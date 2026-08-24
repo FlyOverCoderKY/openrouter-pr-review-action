@@ -1,0 +1,166 @@
+name: OpenRouter PR Review
+
+on:
+  workflow_call:
+    inputs:
+      models:
+        description: Comma-separated OpenRouter review-lane slugs (cap 4).
+        type: string
+        default: x-ai/grok-4.6
+      judge_model:
+        description: OpenRouter judge slug. Used only when two or more lanes are configured.
+        type: string
+        default: google/gemini-3.1-flash-lite
+      github_token:
+        type: string
+        default: ${{ github.token }}
+      pr_number:
+        type: string
+        default: ""
+      fail_on:
+        type: string
+        default: never
+      roast_level:
+        type: string
+        default: professional
+      custom_instructions:
+        type: string
+        default: ""
+      status_comments:
+        type: string
+        default: "true"
+      max_diff_kb:
+        type: string
+        default: "300"
+      review_scope:
+        type: string
+        default: full-pr
+      review_mode:
+        type: string
+        default: auto
+      effort:
+        type: string
+        default: ""
+    secrets:
+      OPENROUTER_API_KEY:
+        required: true
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      models_json: ${{ steps.parse.outputs.models_json }}
+      lane_count: ${{ steps.parse.outputs.lane_count }}
+      judge_needed: ${{ steps.parse.outputs.judge_needed }}
+      judge_model: ${{ steps.parse.outputs.judge_model }}
+    steps:
+      - name: Checkout action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: FlyOverCoderKY/openrouter-pr-review-action
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - id: parse
+        uses: ./
+        with:
+          role: setup
+          models: ${{ inputs.models }}
+          judge_model: ${{ inputs.judge_model }}
+          fail_on: ${{ inputs.fail_on }}
+          roast_level: ${{ inputs.roast_level }}
+          review_scope: ${{ inputs.review_scope }}
+          review_mode: ${{ inputs.review_mode }}
+          max_diff_kb: ${{ inputs.max_diff_kb }}
+          custom_instructions: ${{ inputs.custom_instructions }}
+
+  lane:
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout reviewed repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Checkout action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: FlyOverCoderKY/openrouter-pr-review-action
+          ref: ${{ github.workflow_sha }}
+          path: .or-pr-review-action
+          persist-credentials: false
+      - id: lane
+        uses: ./.or-pr-review-action
+        with:
+          role: lane
+          models: ${{ matrix.model }}
+          lane_index: ${{ matrix.index }}
+          judge_needed: ${{ needs.setup.outputs.judge_needed }}
+          judge_model: ${{ inputs.judge_model }}
+          github_token: ${{ inputs.github_token }}
+          pr_number: ${{ inputs.pr_number }}
+          fail_on: ${{ inputs.fail_on }}
+          roast_level: ${{ inputs.roast_level }}
+          custom_instructions: ${{ inputs.custom_instructions }}
+          status_comments: ${{ inputs.status_comments }}
+          max_diff_kb: ${{ inputs.max_diff_kb }}
+          review_scope: ${{ inputs.review_scope }}
+          review_mode: ${{ inputs.review_mode }}
+          effort: ${{ inputs.effort }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      - name: Upload lane artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-${{ matrix.index }}
+          path: ${{ steps.lane.outputs.lane_file }}
+          if-no-files-found: warn
+
+  judge:
+    needs: [setup, lane]
+    if: always() && needs.setup.result == 'success' && needs.setup.outputs.judge_needed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: FlyOverCoderKY/openrouter-pr-review-action
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Download lane artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/or-pr-review-lanes
+          pattern: lane-*
+          merge-multiple: true
+      - uses: ./
+        with:
+          role: judge
+          models: ${{ inputs.models }}
+          judge_model: ${{ inputs.judge_model }}
+          judge_needed: "true"
+          lane_results_dir: ${{ runner.temp }}/or-pr-review-lanes
+          github_token: ${{ inputs.github_token }}
+          pr_number: ${{ inputs.pr_number }}
+          fail_on: ${{ inputs.fail_on }}
+          roast_level: ${{ inputs.roast_level }}
+          custom_instructions: ${{ inputs.custom_instructions }}
+          status_comments: ${{ inputs.status_comments }}
+          max_diff_kb: ${{ inputs.max_diff_kb }}
+          review_scope: ${{ inputs.review_scope }}
+          review_mode: ${{ inputs.review_mode }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

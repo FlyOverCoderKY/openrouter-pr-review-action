@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python3 -m pip install -e '.[dev]'
+      - name: Pytest
+        run: pytest
+      - name: Action metadata
+        run: python3 -c "from pathlib import Path; text = Path('action.yml').read_text(); assert 'OPENROUTER_API_KEY' in Path('README.md').read_text(); assert 'XAI_API_KEY' not in text; assert 'google/gemini-3.1-flash-lite' in text"

@@ -93,13 +93,19 @@ def _role_setup(env: dict[str, str]) -> int:
 def _role_lane(env: dict[str, str]) -> int:
     slugs = parse_models(env.get("MODELS"))
     index = _int_env(env, "LANE_INDEX", 0)
-    if index < 0 or index >= len(slugs):
-        # A single-model lane job passes models=<one slug> and index 0.
-        if len(slugs) == 1:
-            index = 0
-        else:
-            raise ActionError(f"LANE_INDEX {index} is out of range for {len(slugs)} model(s)")
-    model = slugs[index] if env.get("LANE_MODEL", "").strip() == "" else env["LANE_MODEL"].strip()
+    if index < 0:
+        raise ActionError(f"LANE_INDEX {index} is invalid")
+    override = (env.get("LANE_MODEL") or "").strip()
+    if override:
+        model = override
+    elif index < len(slugs):
+        model = slugs[index]
+    elif len(slugs) == 1:
+        # Reusable workflow matrix jobs pass models=<one slug> plus the global
+        # matrix index. Keep that index so lane-N.json artifacts do not collide.
+        model = slugs[0]
+    else:
+        raise ActionError(f"LANE_INDEX {index} is out of range for {len(slugs)} model(s)")
     result = _run_one_lane(env, model)
     path = _write_lane_file(env, index, result)
     _set_output("lane_file", str(path))
@@ -203,15 +209,16 @@ def _role_all(env: dict[str, str]) -> int:
         lanes.append(_one(slugs[0]))
     else:
         with ThreadPoolExecutor(max_workers=min(len(slugs), LANE_CAP)) as pool:
-            futures = {pool.submit(_one, model): model for model in slugs}
-            by_model: dict[str, LaneResult] = {}
+            futures = {pool.submit(_one, model): i for i, model in enumerate(slugs)}
+            by_index: dict[int, LaneResult] = {}
             for future in as_completed(futures):
-                model = futures[future]
+                i = futures[future]
+                model = slugs[i]
                 try:
-                    by_model[model] = future.result()
+                    by_index[i] = future.result()
                 except Exception as exc:  # noqa: BLE001
-                    by_model[model] = failed_lane(model, redact(str(exc)))
-            lanes = [by_model[model] for model in slugs]
+                    by_index[i] = failed_lane(model, redact(str(exc)))
+            lanes = [by_index[i] for i in range(len(slugs))]
 
     lane_dir = work / "lanes"
     lane_dir.mkdir(parents=True, exist_ok=True)

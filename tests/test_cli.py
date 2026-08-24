@@ -478,3 +478,102 @@ def test_fail_on_bugs_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         FAIL_ON="bugs",
     )
     assert main(["judge"], env) == 1
+
+
+def test_lane_keeps_matrix_index_when_models_is_single_slug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.schema import SCHEMA_VERSION, LaneResult
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_run_one_lane",
+        lambda env, model: LaneResult(
+            schema_version=SCHEMA_VERSION,
+            ok=True,
+            model=model,
+            findings=[],
+            error=None,
+        ),
+    )
+    lane_dir = tmp_path / "lanes"
+    env = _base_env(
+        tmp_path,
+        MODELS="anthropic/claude-sonnet-4.6",
+        LANE_INDEX="1",
+        JUDGE_NEEDED="true",
+        LANE_RESULTS_DIR=str(lane_dir),
+    )
+    assert main(["lane"], env) == 0
+    kept = lane_dir / "lane-1.json"
+    assert kept.is_file()
+    assert not (lane_dir / "lane-0.json").exists()
+    assert json.loads(kept.read_text(encoding="utf-8"))["model"] == "anthropic/claude-sonnet-4.6"
+
+
+def test_all_keeps_duplicate_model_lane_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+    from or_pr_review.schema import SCHEMA_VERSION, Finding, LaneResult
+
+    collected = CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", None),
+        truncation=Truncation("diff", False, 4, 4, 300),
+        mode="initial",
+    )
+    calls = {"n": 0}
+    captured: dict[str, list[LaneResult]] = {}
+
+    def fake_invoke(
+        env: dict[str, str],
+        model: str,
+        messages: object,
+        workspace: object,
+    ) -> LaneResult:
+        calls["n"] += 1
+        return LaneResult(
+            schema_version=SCHEMA_VERSION,
+            ok=True,
+            model=model,
+            findings=[
+                Finding(
+                    title=f"Finding {calls['n']}",
+                    body="details",
+                    severity="bug",
+                    file="a.py",
+                    line=calls["n"],
+                    model_id=model,
+                )
+            ],
+            error=None,
+        )
+
+    def fake_finish(
+        env: dict[str, str],
+        lanes: list[LaneResult],
+        collected: CollectedReview | None = None,
+    ) -> int:
+        captured["lanes"] = lanes
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_mod, "_prepare_workspace", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(cli_mod, "_messages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(cli_mod, "_invoke_lane", fake_invoke)
+    monkeypatch.setattr(cli_mod, "_finish", fake_finish)
+
+    env = _base_env(tmp_path, MODELS="x-ai/grok-4.6,x-ai/grok-4.6")
+    assert main(["all"], env) == 0
+    lanes = captured["lanes"]
+    assert len(lanes) == 2
+    assert {lane.findings[0].title for lane in lanes} == {"Finding 1", "Finding 2"}

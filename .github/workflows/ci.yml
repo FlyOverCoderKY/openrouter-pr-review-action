@@ -17,4 +17,4 @@ jobs:
       - name: Pytest
         run: pytest
       - name: Action metadata
-        run: python3 -c "from pathlib import Path; text = Path('action.yml').read_text(); assert 'OPENROUTER_API_KEY' in Path('README.md').read_text(); assert 'XAI_API_KEY' not in text; assert 'google/gemini-3.1-flash-lite' in text"
+        run: python3 -c "from pathlib import Path; text = Path('action.yml').read_text(); wf = Path('.github/workflows/pr-review.yml').read_text(); assert 'OPENROUTER_API_KEY' in Path('README.md').read_text(); assert 'XAI_API_KEY' not in text; assert 'google/gemini-3.1-flash-lite' in text; assert 'github.job_workflow_sha' in wf"

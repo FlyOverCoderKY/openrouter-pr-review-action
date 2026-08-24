@@ -59,7 +59,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: FlyOverCoderKY/openrouter-pr-review-action
-          ref: ${{ github.workflow_sha }}
+          # github.workflow_sha is the *caller* workflow commit. This job must
+          # check out the reusable workflow's own commit.
+          ref: ${{ github.job_workflow_sha }}
           persist-credentials: false
       - id: parse
         uses: ./
@@ -95,7 +97,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: FlyOverCoderKY/openrouter-pr-review-action
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ github.job_workflow_sha }}
           path: .or-pr-review-action
           persist-credentials: false
       - id: lane
@@ -138,7 +140,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: FlyOverCoderKY/openrouter-pr-review-action
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ github.job_workflow_sha }}
           persist-credentials: false
       - name: Download lane artifacts
         uses: actions/download-artifact@v4

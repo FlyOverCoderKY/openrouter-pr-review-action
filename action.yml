@@ -1,0 +1,208 @@
+name: "OpenRouter PR Review"
+description: >-
+  OpenRouter pull-request reviews with a custom harness and an optional
+  multi-model bake-off. Authenticates with OPENROUTER_API_KEY against
+  openrouter.ai only.
+author: "Nathan / RetireGolden, LLC"
+branding:
+  icon: "eye"
+  color: "blue"
+
+inputs:
+  role:
+    description: >-
+      all (default: collect, run lanes, judge, post) | setup (parse models
+      into a matrix) | lane (one model) | judge (merge artifacts and post).
+    required: false
+    default: "all"
+  models:
+    description: >-
+      Comma-separated OpenRouter model slugs. List length is the lane count
+      (hard-capped at 4). Default is today's Grok 4.6 slug on OpenRouter.
+      One model = one lane and the judge is skipped.
+    required: false
+    default: "x-ai/grok-4.6"
+  judge_model:
+    description: >-
+      OpenRouter slug for the merge/de-dupe judge (independent of models).
+      Used only when two or more review lanes are configured. Default is
+      google/gemini-3.1-flash-lite. See README for cheaper/upgrade alternatives.
+    required: false
+    default: "google/gemini-3.1-flash-lite"
+  judge_needed:
+    description: >-
+      true forces the judge; false skips it. Empty infers from models list
+      length (skip when there is one review lane).
+    required: false
+    default: ""
+  github_token:
+    description: "Token used to read the PR and post comments/reviews."
+    required: false
+    default: ${{ github.token }}
+  github_timeout_seconds:
+    description: "Timeout for each GitHub CLI operation (1-600 seconds)."
+    required: false
+    default: "120"
+  pr_number:
+    description: "PR number to review. Defaults to the PR that triggered the workflow."
+    required: false
+    default: ""
+  fail_on:
+    description: "Finding policy: never | bugs | any. Operational errors always fail."
+    required: false
+    default: "never"
+  roast_level:
+    description: "Public comment tone: professional | playful. Default professional."
+    required: false
+    default: "professional"
+  custom_instructions:
+    description: "Extra prompt instructions (max 16,000 UTF-8 bytes; do not include secrets)."
+    required: false
+    default: ""
+  status_comments:
+    description: "Post/update a live status comment on the PR."
+    required: false
+    default: "true"
+  max_diff_kb:
+    description: "Maximum diff size (KB) embedded in the prompt before truncation."
+    required: false
+    default: "300"
+  review_scope:
+    description: >-
+      Diff to embed: full-pr or latest-commit. latest-commit never silently
+      falls back to the full PR diff. Initial rounds require full-pr.
+    required: false
+    default: "full-pr"
+  review_mode:
+    description: >-
+      Loop position: auto (opened = initial, synchronize = verify), or force
+      initial / verify.
+    required: false
+    default: "auto"
+  effort:
+    description: "Optional OpenRouter reasoning effort (for example low | medium | high)."
+    required: false
+    default: ""
+  max_tool_turns:
+    description: "Read-only tool-call rounds against the inert checkout (0 disables tools)."
+    required: false
+    default: "8"
+  openrouter_timeout_seconds:
+    description: "Timeout in seconds for each OpenRouter HTTP request."
+    required: false
+    default: "180"
+  lane_index:
+    description: "Zero-based lane index (role=lane). Used for artifact names."
+    required: false
+    default: "0"
+  lane_model:
+    description: "Override the model slug for role=lane (defaults to models / matrix)."
+    required: false
+    default: ""
+  lane_results_dir:
+    description: "Directory of lane-N.json artifacts (role=judge) or write target (role=lane)."
+    required: false
+    default: ""
+  # Reserved unused hook. v1 ignores this and uses the same review prompt
+  # on every lane. A later persona input can land here without rewriting
+  # the setup / lane / judge layout. A future single-persona run should
+  # skip the judge the same way (one reviewer = no judge).
+  persona:
+    description: >-
+      Reserved unused hook for a future persona input. Ignored in v1.
+      A future single-persona run should skip the judge (one reviewer = no judge).
+    required: false
+    default: ""
+
+outputs:
+  verdict:
+    description: "Review verdict: clean | issues | partial | error"
+    value: ${{ steps.run.outputs.verdict }}
+  issue_count:
+    description: "Merged finding count after the judge."
+    value: ${{ steps.run.outputs.issue_count }}
+  bug_count:
+    description: "Merged bug-severity finding count."
+    value: ${{ steps.run.outputs.bug_count }}
+  review_url:
+    description: "URL of the posted GitHub review or status comment."
+    value: ${{ steps.run.outputs.review_url }}
+  models_json:
+    description: "JSON array of parsed OpenRouter slugs (setup / all)."
+    value: ${{ steps.run.outputs.models_json }}
+  matrix:
+    description: "JSON array of {index, model} for a GitHub Actions matrix."
+    value: ${{ steps.run.outputs.matrix }}
+  lane_count:
+    description: "Number of model lanes after parsing."
+    value: ${{ steps.run.outputs.lane_count }}
+  judge_needed:
+    description: "true when two or more review lanes require the OpenRouter judge."
+    value: ${{ steps.run.outputs.judge_needed }}
+  judge_model:
+    description: "OpenRouter slug the judge would use (ignored on a single lane)."
+    value: ${{ steps.run.outputs.judge_model }}
+  lane_file:
+    description: "Path of the written lane JSON (role=lane)."
+    value: ${{ steps.run.outputs.lane_file }}
+  lane_ok:
+    description: "true if this lane produced structured findings (role=lane)."
+    value: ${{ steps.run.outputs.lane_ok }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Prepare workdir
+      id: dirs
+      shell: bash
+      run: |
+        WORK="$(mktemp -d "${RUNNER_TEMP:-/tmp}/or-pr-review.XXXXXX")"
+        echo "work=$WORK" >> "$GITHUB_OUTPUT"
+
+    - name: Run OpenRouter PR review
+      id: run
+      shell: bash
+      env:
+        PYTHONPATH: ${{ github.action_path }}/src
+        ROLE: ${{ inputs.role }}
+        MODELS: ${{ inputs.models }}
+        JUDGE_MODEL: ${{ inputs.judge_model }}
+        JUDGE_NEEDED: ${{ inputs.judge_needed }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        GITHUB_TIMEOUT_SECONDS: ${{ inputs.github_timeout_seconds }}
+        PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        FAIL_ON: ${{ inputs.fail_on }}
+        ROAST_LEVEL: ${{ inputs.roast_level }}
+        CUSTOM_INSTRUCTIONS: ${{ inputs.custom_instructions }}
+        STATUS_COMMENTS: ${{ inputs.status_comments }}
+        MAX_DIFF_KB: ${{ inputs.max_diff_kb }}
+        REVIEW_SCOPE: ${{ inputs.review_scope }}
+        REVIEW_MODE: ${{ inputs.review_mode }}
+        EFFORT: ${{ inputs.effort }}
+        MAX_TOOL_TURNS: ${{ inputs.max_tool_turns }}
+        OPENROUTER_TIMEOUT_SECONDS: ${{ inputs.openrouter_timeout_seconds }}
+        LANE_INDEX: ${{ inputs.lane_index }}
+        LANE_MODEL: ${{ inputs.lane_model }}
+        LANE_RESULTS_DIR: ${{ inputs.lane_results_dir }}
+        PERSONA: ${{ inputs.persona }}
+        WORK: ${{ steps.dirs.outputs.work }}
+        SOURCE_WORKSPACE: ${{ github.workspace }}
+        EVENT_BEFORE: ${{ github.event.before }}
+        EVENT_AFTER: ${{ github.event.after }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        EVENT_ACTION: ${{ github.event.action }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: python3 -m or_pr_review
+
+    - name: Cleanup temporary files
+      if: ${{ always() }}
+      shell: bash
+      env:
+        WORK: ${{ steps.dirs.outputs.work }}
+      run: |
+        if [ -n "$WORK" ] && [ -d "$WORK" ]; then
+          case "$WORK" in
+            "${RUNNER_TEMP:-/tmp}"/or-pr-review.*) rm -rf "$WORK" ;;
+          esac
+        fi

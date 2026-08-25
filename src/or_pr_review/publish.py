@@ -50,6 +50,14 @@ def render_review(
                 extra += f", {lane.elapsed_ms / 1000:.1f}s"
             if lane.prompt_tokens is not None:
                 extra += f", {lane.prompt_tokens}+{lane.completion_tokens or 0} tokens"
+                if lane.cached_tokens:
+                    extra += f" ({lane.cached_tokens} cached)"
+            if lane.tool_rounds is not None:
+                extra += f", {lane.tool_rounds} tool round(s)"
+            if lane.retries:
+                extra += f", {lane.retries} retried request(s)"
+            if lane.salvaged:
+                extra += ", salvaged finish"
             lane_lines.append(f"- `{lane.model}`: ok ({extra})")
         else:
             lane_lines.append(f"- `{lane.model}`: failed-open — {lane.error or 'unknown error'}")

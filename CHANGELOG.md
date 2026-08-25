@@ -7,6 +7,9 @@ Loop-protocol hardening toward Grok parity — first changesets of the merged pa
 - Preserve `reasoning_details` (or normalized `reasoning`) on assistant messages echoed back during tool turns, per OpenRouter's reasoning contract. Previously every turn dropped the model's prior reasoning from context.
 - Withdraw tools *before* the request that follows the final permitted tool round. The old loop kept offering tools and then answered an over-budget round with an assistant `tool_calls` entry and no tool results — an invalid conversation that OpenAI-compatible providers reject, failing the lane after the entire budget was spent. If a model still emits tool calls after withdrawal, they now get stub results (bounded by a repair cap) instead of a protocol violation.
 - One schema-enforced, tool-free finalization retry when a tool-backed run's natural finish is not valid findings JSON. The tool path runs without `response_format`, so a malformed finish previously failed the lane open immediately.
+- Retry transient OpenRouter errors (408/429/5xx, timeouts, connection failures) with exponential backoff, honoring `Retry-After`. Previously a single transient failure anywhere in a 50-round loop discarded all accumulated tool work.
+- Salvage finalization: a mid-loop failure that survives the retries now asks the model once — tools withdrawn, schema attached — for findings from the evidence already gathered, instead of failing the lane. A context-overflow failure additionally truncates old tool observations (keeping the newest two intact) so the salvage request fits.
+- Lane observability: lane artifacts and the posted review now carry `requests`, `tool_rounds`, `retries`, `cached_tokens` (OpenRouter prompt-cache telemetry), and a `salvaged` flag. Failed lanes report their token usage too.
 
 ## 1.1.0 — 2026-08-25
 

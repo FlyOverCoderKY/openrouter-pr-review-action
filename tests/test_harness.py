@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import email.message
 import inspect
+import io
+import urllib.error
 from pathlib import Path
 
 import pytest
 
-from or_pr_review.errors import ActionError
+from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.harness import (
     BLAST_RADIUS_NUDGE,
     BUDGET_EXHAUSTED_NOTICE,
@@ -397,3 +400,191 @@ def test_malformed_finish_fails_open_after_single_retry() -> None:
     )
     assert not result.ok
     assert calls["n"] == 2
+
+
+def _http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
+    headers = email.message.Message()
+    if retry_after:
+        headers["Retry-After"] = retry_after
+    return urllib.error.HTTPError(
+        "https://openrouter.ai/api/v1/chat/completions", code, "err", headers, io.BytesIO(b"body")
+    )
+
+
+class _FakeResponse:
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return b'{"choices": []}'
+
+
+def test_openrouter_chat_retries_transient_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import harness
+
+    attempts = {"n": 0}
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise _http_error(429, retry_after="1")
+        return _FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    stats: dict[str, int] = {}
+    parsed = harness.openrouter_chat(
+        "sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append, stats=stats
+    )
+    assert parsed == {"choices": []}
+    assert attempts["n"] == 3
+    assert sleeps == [1.0, 1.0]
+    assert stats["retries"] == 2
+
+
+def test_openrouter_chat_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import harness
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        raise _http_error(503)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    with pytest.raises(LaneError, match="HTTP 503"):
+        harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append)
+    assert len(sleeps) == harness.MAX_HTTP_ATTEMPTS - 1
+    assert sleeps == [2.0, 4.0, 8.0]
+
+
+def test_openrouter_chat_does_not_retry_client_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import harness
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        raise _http_error(400)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    with pytest.raises(LaneError, match="HTTP 400"):
+        harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append)
+    assert sleeps == []
+
+
+def test_lane_salvages_after_midloop_failure(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        if len(payloads) == 2:
+            raise LaneError("OpenRouter HTTP 500: upstream unavailable")
+        assert "response_format" in payload
+        assert "tools" not in payload
+        assert "already gathered" in payload["messages"][-1]["content"]
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+    assert result.ok
+    assert result.salvaged is True
+    assert result.requests == 3
+    assert result.tool_rounds == 1
+
+
+def test_salvage_shrinks_old_observations_on_context_overflow(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x" * 5000 + "\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) <= 3:
+            return _tool_reply()
+        if len(payloads) == 4:
+            raise LaneError("OpenRouter HTTP 400: maximum context length exceeded")
+        tool_texts = [
+            message["content"]
+            for message in payload["messages"]
+            if message.get("role") == "tool"
+        ]
+        assert any("[observation truncated" in text for text in tool_texts)
+        assert all("[observation truncated" not in text for text in tool_texts[-2:])
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=10,
+    )
+    assert result.ok
+    assert result.salvaged is True
+    assert len(payloads) == 5
+
+
+def test_failed_lane_still_reports_usage_and_stats(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            reply = _tool_reply()
+            reply["usage"] = {
+                "prompt_tokens": 7,
+                "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 5},
+            }
+            return reply
+        raise LaneError("OpenRouter HTTP 500: down")
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+    assert not result.ok
+    assert result.prompt_tokens == 7
+    assert result.completion_tokens == 3
+    assert result.cached_tokens == 5
+    assert result.salvaged is True
+    assert result.requests == 3
+    assert result.tool_rounds == 1
+
+
+def test_lane_artifact_roundtrip_with_stats_fields() -> None:
+    from or_pr_review.schema import SCHEMA_VERSION, LaneResult, parse_lane_artifact
+
+    lane = LaneResult(
+        schema_version=SCHEMA_VERSION,
+        ok=True,
+        model="x-ai/grok-4.6",
+        findings=[],
+        error=None,
+        elapsed_ms=12,
+        prompt_tokens=100,
+        completion_tokens=20,
+        cached_tokens=80,
+        requests=5,
+        tool_rounds=3,
+        retries=1,
+        salvaged=True,
+    )
+    parsed = parse_lane_artifact(lane.to_dict())
+    assert parsed.cached_tokens == 80
+    assert parsed.requests == 5
+    assert parsed.tool_rounds == 3
+    assert parsed.retries == 1
+    assert parsed.salvaged is True

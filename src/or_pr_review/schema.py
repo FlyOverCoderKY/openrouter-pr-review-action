@@ -76,6 +76,11 @@ class LaneResult:
     elapsed_ms: int | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    cached_tokens: int | None = None
+    requests: int | None = None
+    tool_rounds: int | None = None
+    retries: int | None = None
+    salvaged: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,6 +92,11 @@ class LaneResult:
             "elapsed_ms": self.elapsed_ms,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
+            "cached_tokens": self.cached_tokens,
+            "requests": self.requests,
+            "tool_rounds": self.tool_rounds,
+            "retries": self.retries,
+            "salvaged": self.salvaged,
         }
 
 
@@ -211,6 +221,9 @@ def parse_lane_artifact(payload: object) -> LaneResult:
             findings.append(parse_finding(item, model))
         except LaneError as exc:
             raise SchemaError(f"lane artifact finding is invalid: {exc}") from exc
+    salvaged = payload.get("salvaged", False)
+    if not isinstance(salvaged, bool):
+        raise SchemaError("lane artifact salvaged must be a boolean")
     return LaneResult(
         schema_version=SCHEMA_VERSION,
         ok=ok,
@@ -220,6 +233,11 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         elapsed_ms=_optional_int(payload.get("elapsed_ms")),
         prompt_tokens=_optional_int(payload.get("prompt_tokens")),
         completion_tokens=_optional_int(payload.get("completion_tokens")),
+        cached_tokens=_optional_int(payload.get("cached_tokens")),
+        requests=_optional_int(payload.get("requests")),
+        tool_rounds=_optional_int(payload.get("tool_rounds")),
+        retries=_optional_int(payload.get("retries")),
+        salvaged=salvaged,
     )
 
 

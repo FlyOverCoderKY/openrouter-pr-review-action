@@ -17,7 +17,12 @@ from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.redaction import looks_like_dotenv
 
 MAX_MATERIALIZED_FILE = 1_000_000
-MAX_READ_BYTES = 200_000
+# Per-read byte cap. The chat loop resends every tool observation on every
+# later request, so large single reads multiply across the whole run; ranged
+# reads (start_line/max_lines) fetch the rest when needed.
+MAX_READ_BYTES = 60_000
+MAX_RANGE_LINES = 2_000
+DEFAULT_RANGE_LINES = 400
 MAX_GREP_MATCHES = 100
 MAX_LIST_ENTRIES = 200
 MAX_TOOL_OUTPUT = 40_000
@@ -109,7 +114,12 @@ def is_blocked_path(path: Path) -> bool:
     return name.endswith(_BLOCKED_SUFFIXES)
 
 
-def tool_read_file(root: Path, rel: str) -> str:
+def tool_read_file(
+    root: Path,
+    rel: str,
+    start_line: int | None = None,
+    max_lines: int | None = None,
+) -> str:
     path = resolve_inside(root, rel)
     if not path.is_file():
         return f"error: not a file: {rel}"
@@ -119,12 +129,40 @@ def tool_read_file(root: Path, rel: str) -> str:
         data = path.read_bytes()
     except OSError as exc:
         return f"error: {exc}"
-    if looks_like_dotenv(data.decode("utf-8", errors="replace")):
+    text = data.decode("utf-8", errors="replace")
+    if looks_like_dotenv(text):
         return "error: refusing to return .env-style KEY=value contents"
-    if len(data) > MAX_READ_BYTES:
-        text = data[:MAX_READ_BYTES].decode("utf-8", errors="replace")
-        return text + f"\n\n[truncated after {MAX_READ_BYTES} bytes]"
-    return data.decode("utf-8", errors="replace")
+    if start_line is None and max_lines is None:
+        if len(data) > MAX_READ_BYTES:
+            clipped = data[:MAX_READ_BYTES].decode("utf-8", errors="replace")
+            next_line = clipped.count("\n") + 1
+            return clipped + (
+                f"\n\n[truncated after {MAX_READ_BYTES} bytes; the file continues — "
+                f"call read_file again with start_line={next_line} to keep reading]"
+            )
+        return text
+    start = start_line if start_line is not None and start_line > 0 else 1
+    count = max_lines if max_lines is not None and max_lines > 0 else DEFAULT_RANGE_LINES
+    count = min(count, MAX_RANGE_LINES)
+    lines = text.splitlines(keepends=True)
+    total = len(lines)
+    if total and start > total:
+        return f"error: start_line {start} is past the end of the file ({total} lines)"
+    window = lines[start - 1 : start - 1 + count]
+    body = "".join(window)
+    encoded = body.encode("utf-8")
+    truncated_bytes = len(encoded) > MAX_READ_BYTES
+    if truncated_bytes:
+        body = encoded[:MAX_READ_BYTES].decode("utf-8", errors="replace")
+    end = min(start + len(window) - 1, total)
+    header = f"[lines {start}-{end} of {total}]\n"
+    if truncated_bytes:
+        footer = f"\n[window truncated after {MAX_READ_BYTES} bytes]"
+    elif end < total:
+        footer = f"\n[file continues; call read_file with start_line={end + 1} for more]"
+    else:
+        footer = ""
+    return header + body + footer
 
 
 def tool_list_dir(root: Path, rel: str) -> str:
@@ -204,12 +242,22 @@ READ_ONLY_TOOLS = (
                 "Read a tracked file from the inert checkout of the reviewed commit. "
                 "Read-only. Paths are relative to the repository root. Use this for "
                 "README, code-map docs, sibling workflows, and tests that inventory "
-                "filenames — not only files named in the embedded diff."
+                "filenames — not only files named in the embedded diff. Large files "
+                "are truncated; pass start_line (and optionally max_lines) to read "
+                "a specific window instead of the whole file."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Repository-relative path"}
+                    "path": {"type": "string", "description": "Repository-relative path"},
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional 1-based first line for a ranged read",
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "Optional line count for a ranged read (default 400)",
+                    },
                 },
                 "required": ["path"],
             },
@@ -267,12 +315,31 @@ def dispatch_tool(root: Path, name: str, arguments: dict[str, object]) -> str:
         return f"error: {exc}"
 
 
+def _optional_int_arg(value: object) -> tuple[int | None, bool]:
+    """Return (parsed, ok). None with ok=True means the argument was absent."""
+    if value is None:
+        return None, True
+    if isinstance(value, bool):
+        return None, False
+    if isinstance(value, int):
+        return value, True
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip()), True
+    return None, False
+
+
 def _dispatch_tool(root: Path, name: str, arguments: dict[str, object]) -> str:
     if name == "read_file":
         path = arguments.get("path")
         if not isinstance(path, str):
             return "error: path is required"
-        return tool_read_file(root, path)
+        start_line, ok = _optional_int_arg(arguments.get("start_line"))
+        if not ok:
+            return "error: start_line must be an integer"
+        max_lines, ok = _optional_int_arg(arguments.get("max_lines"))
+        if not ok:
+            return "error: max_lines must be an integer"
+        return tool_read_file(root, path, start_line=start_line, max_lines=max_lines)
     if name == "grep":
         pattern = arguments.get("pattern")
         if not isinstance(pattern, str):

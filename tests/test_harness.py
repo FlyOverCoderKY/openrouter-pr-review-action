@@ -564,6 +564,35 @@ def test_failed_lane_still_reports_usage_and_stats(tmp_path: Path) -> None:
     assert result.tool_rounds == 1
 
 
+def test_observation_budget_withdraws_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+
+    monkeypatch.setattr(harness, "MAX_OBSERVATION_BYTES", 100)
+    (tmp_path / "a.py").write_text("x" * 200 + "\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=50,
+    )
+    assert result.ok
+    assert len(payloads) == 2
+    assert "tools" not in payloads[1]
+    assert payloads[1]["messages"][-1] == {"role": "user", "content": BUDGET_EXHAUSTED_NOTICE}
+
+
 def test_lane_artifact_roundtrip_with_stats_fields() -> None:
     from or_pr_review.schema import SCHEMA_VERSION, LaneResult, parse_lane_artifact
 

@@ -10,6 +10,7 @@ Loop-protocol hardening toward Grok parity — first changesets of the merged pa
 - Retry transient OpenRouter errors (408/429/5xx, timeouts, connection failures) with exponential backoff, honoring `Retry-After`. Previously a single transient failure anywhere in a 50-round loop discarded all accumulated tool work.
 - Salvage finalization: a mid-loop failure that survives the retries now asks the model once — tools withdrawn, schema attached — for findings from the evidence already gathered, instead of failing the lane. A context-overflow failure additionally truncates old tool observations (keeping the newest two intact) so the salvage request fits.
 - Lane observability: lane artifacts and the posted review now carry `requests`, `tool_rounds`, `retries`, `cached_tokens` (OpenRouter prompt-cache telemetry), and a `salvaged` flag. Failed lanes report their token usage too.
+- Transcript bounding: `read_file` gains ranged reads (`start_line`, `max_lines`) and the unranged per-read cap drops from 200 KB to 60 KB with a continuation hint (every observation is resent on every later request, so single large reads multiplied across the whole run). A per-lane aggregate observation budget (600 KB) withdraws tools the same way the turn budget does. Checkpointed compaction is deferred until cached-token telemetry from live runs says what it is worth.
 
 ## 1.1.0 — 2026-08-25
 

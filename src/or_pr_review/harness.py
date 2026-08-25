@@ -37,6 +37,11 @@ MAX_RETRY_AFTER_SECONDS = 30.0
 DEFAULT_MAX_TOOL_TURNS = 50
 MAX_TOOL_TURNS = DEFAULT_MAX_TOOL_TURNS
 MAX_TOOL_TURNS_LIMIT = 1000
+# Aggregate cap on tool-observation bytes per lane. Every observation is
+# resent on every later request, so unbounded reads grow the transcript
+# quadratically; past this cap the loop withdraws tools and asks for the
+# JSON finish.
+MAX_OBSERVATION_BYTES = 600_000
 BLAST_RADIUS_NUDGE = (
     "You returned a review without using tools. The embedded diff is not the "
     "whole repository. Use read_file, grep, and/or list_dir to check blast "
@@ -244,6 +249,7 @@ def _run_loop(
 
     turns = 0
     repairs = 0
+    observation_bytes = 0
     last_error: LaneError | None = None
     tools_active = bool(tools) and workspace is not None
     # JSON schema on the first tool-enabled turn pushes a glance-and-clean
@@ -323,12 +329,17 @@ def _run_loop(
                     continue
                 turns += 1
                 for call in tool_calls:
-                    conversation.append(_run_one_tool(workspace, call))
-                if turns >= max_tool_turns:
+                    observation = _run_one_tool(workspace, call)
+                    conversation.append(observation)
+                    text = observation.get("content")
+                    if isinstance(text, str):
+                        observation_bytes += len(text.encode("utf-8"))
+                if turns >= max_tool_turns or observation_bytes >= MAX_OBSERVATION_BYTES:
                     # Withdraw tools BEFORE the next request: the loop must
                     # never solicit a tool call it will not execute (a
                     # dangling assistant tool_calls entry is an invalid
-                    # conversation).
+                    # conversation). The observation-byte cap bounds the
+                    # resent transcript the same way the turn budget does.
                     tools_active = False
                     use_schema = True
                     conversation.append({"role": "user", "content": BUDGET_EXHAUSTED_NOTICE})

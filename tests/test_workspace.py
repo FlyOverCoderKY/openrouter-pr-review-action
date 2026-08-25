@@ -34,3 +34,40 @@ def test_dotenv_contents_refused(tmp_path: Path) -> None:
 
 def test_unknown_tool_rejected(tmp_path: Path) -> None:
     assert "disallowed" in dispatch_tool(tmp_path, "shell", {"cmd": "ls"})
+
+
+def test_ranged_read_returns_window(tmp_path: Path) -> None:
+    lines = "".join(f"line {n}\n" for n in range(1, 11))
+    (tmp_path / "big.txt").write_text(lines, encoding="utf-8")
+    result = tool_read_file(tmp_path, "big.txt", start_line=3, max_lines=2)
+    assert result.startswith("[lines 3-4 of 10]")
+    assert "line 3" in result and "line 4" in result
+    assert "line 5" not in result
+    assert "start_line=5" in result  # continuation hint
+
+
+def test_unranged_large_file_truncates_with_continuation_hint(tmp_path: Path) -> None:
+    from or_pr_review.workspace import MAX_READ_BYTES
+
+    (tmp_path / "huge.txt").write_text("padding words here\n" * 5000, encoding="utf-8")
+    result = tool_read_file(tmp_path, "huge.txt")
+    assert f"[truncated after {MAX_READ_BYTES} bytes" in result
+    assert "start_line=" in result
+    assert len(result.encode("utf-8")) < MAX_READ_BYTES + 300
+
+
+def test_ranged_read_rejects_bad_arguments(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    assert "error: start_line" in dispatch_tool(
+        tmp_path, "read_file", {"path": "a.txt", "start_line": "abc"}
+    )
+    assert "error: max_lines" in dispatch_tool(
+        tmp_path, "read_file", {"path": "a.txt", "max_lines": 1.5}
+    )
+    assert "past the end" in tool_read_file(tmp_path, "a.txt", start_line=99)
+
+
+def test_ranged_read_accepts_digit_strings(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    result = dispatch_tool(tmp_path, "read_file", {"path": "a.txt", "start_line": "2"})
+    assert result.startswith("[lines 2-3 of 3]")

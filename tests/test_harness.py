@@ -593,6 +593,72 @@ def test_observation_budget_withdraws_tools(
     assert payloads[1]["messages"][-1] == {"role": "user", "content": BUDGET_EXHAUSTED_NOTICE}
 
 
+def test_initial_lane_enforces_coverage_with_schema_retry(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        if len(payloads) == 2:
+            return _findings_reply()  # missing coverage → finalize retry
+        schema = payload["response_format"]["json_schema"]["schema"]
+        assert "coverage" in schema["required"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"findings": [], "coverage": [{"path": "a.py", "findings": 0}]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        expect_coverage=True,
+        expected_paths={"a.py"},
+    )
+    assert result.ok
+    assert result.coverage == [("a.py", 0)]
+    assert len(payloads) == 3
+    assert "coverage is missing" in payloads[2]["messages"][-1]["content"]
+
+
+def test_initial_lane_fails_open_when_coverage_misses_a_file(tmp_path: Path) -> None:
+    def chat(_payload: dict) -> dict:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"findings": [], "coverage": [{"path": "a.py", "findings": 0}]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+        expect_coverage=True,
+        expected_paths={"a.py", "b.py"},
+    )
+    assert not result.ok
+    assert "does not account" in (result.error or "")
+
+
 def test_lane_artifact_roundtrip_with_stats_fields() -> None:
     from or_pr_review.schema import SCHEMA_VERSION, LaneResult, parse_lane_artifact
 

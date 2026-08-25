@@ -76,12 +76,28 @@ def _system_prompt(*, tone: str, mode: str) -> str:
             "and clearly wrong. Still use tools for blast radius of the new work "
             "before you return an empty findings list."
         )
+        coverage_block = ""
+        empty_case = (
+            'If you find nothing after checking blast radius, return {"findings": []}.'
+        )
     else:
         task = (
             "This is an initial review of the full pull request. Be thorough. "
             "Report bugs, risks, and nits you can name a concrete failure for. "
             "Do not invent issues. Do not treat the embedded diff as sufficient "
             "context — open related files with tools."
+        )
+        coverage_block = (
+            "\n"
+            'This initial review must ALSO return a "coverage" array accounting for\n'
+            "EVERY file in the embedded diff, including files with zero findings:\n"
+            '{"coverage": [{"path": "relative/file", "findings": 0}]}. A diff file\n'
+            "you cannot account for means the review is not finished. Do not list\n"
+            "files that are not in the embedded diff.\n"
+        )
+        empty_case = (
+            'If you find nothing after checking blast radius, return {"findings": []}\n'
+            "with a zero-count coverage entry for every diff file."
         )
     return f"""You are a pull-request reviewer. Tone: {tone_word}.
 
@@ -121,8 +137,8 @@ Return a JSON object with a "findings" array. Each finding:
 - severity: bug | risk | nit
 - file: repository-relative path or null
 - line: 1-based line number if known, otherwise null
-
-If you find nothing after checking blast radius, return {{"findings": []}}.
+{coverage_block}
+{empty_case}
 Do not wrap the JSON in commentary after you are done using tools.
 """
 

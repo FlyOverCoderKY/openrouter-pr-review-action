@@ -596,6 +596,7 @@ def test_all_keeps_duplicate_model_lane_results(
         model: str,
         messages: object,
         workspace: object,
+        **_kwargs: object,
     ) -> LaneResult:
         calls["n"] += 1
         return LaneResult(
@@ -793,6 +794,67 @@ def test_long_findings_lists_post_continuation_comments(
     joined = "\n".join(reviews + comments)
     for n in range(1, 21):
         assert f"Finding number {n} " in joined
+
+
+def test_initial_coverage_count_mismatch_posts_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+
+    diff = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
+    collected = CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha="a" * 40,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        truncation=Truncation(diff, False, len(diff), len(diff), 300),
+        mode="initial",
+    )
+    posted: list[str] = []
+
+    class DummyGitHub:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+            posted.append(body)
+            return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+                "coverage": [{"path": "src/app.py", "findings": 2}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert main(["judge"], env) == 0
+    assert "claims 2 finding(s)" in posted[0]
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=clean" in out
 
 
 def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

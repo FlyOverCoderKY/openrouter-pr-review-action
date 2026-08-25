@@ -31,7 +31,7 @@ from or_pr_review.models import (
     parse_judge_model,
     parse_models,
 )
-from or_pr_review.prompt import build_messages
+from or_pr_review.prompt import build_messages, changed_paths_from_diff
 from or_pr_review.publish import (
     decide_verdict,
     fail_on_should_fail,
@@ -39,7 +39,12 @@ from or_pr_review.publish import (
     render_review_parts,
 )
 from or_pr_review.redaction import redact
-from or_pr_review.schema import LaneResult, failed_lane, parse_lane_artifact
+from or_pr_review.schema import (
+    LaneResult,
+    coverage_count_mismatches,
+    failed_lane,
+    parse_lane_artifact,
+)
 from or_pr_review.workspace import materialize_commit
 
 _ACTIVE_ENV: dict[str, str] = {}
@@ -202,9 +207,18 @@ def _role_all(env: dict[str, str]) -> int:
     work = Path(env.get("WORK") or "").resolve() if env.get("WORK") else Path(env.get("RUNNER_TEMP") or "/tmp")
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected)
+    initial = collected.mode == "initial"
+    expected_paths = set(changed_paths_from_diff(collected.diff)) if initial else None
 
     def _one(model: str) -> LaneResult:
-        return _invoke_lane(env, model, messages, workspace)
+        return _invoke_lane(
+            env,
+            model,
+            messages,
+            workspace,
+            expect_coverage=initial,
+            expected_paths=expected_paths,
+        )
 
     lanes: list[LaneResult] = []
     if len(slugs) == 1:
@@ -241,7 +255,15 @@ def _run_one_lane(env: dict[str, str], model: str) -> tuple[LaneResult, Collecte
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected)
     _maybe_status(env, collected.pr_number, f"Lane `{model}` is reviewing via OpenRouter.")
-    result = _invoke_lane(env, model, messages, workspace)
+    initial = collected.mode == "initial"
+    result = _invoke_lane(
+        env,
+        model,
+        messages,
+        workspace,
+        expect_coverage=initial,
+        expected_paths=set(changed_paths_from_diff(collected.diff)) if initial else None,
+    )
     result.head_sha = collected.head_sha
     return result, collected
 
@@ -251,6 +273,10 @@ def _invoke_lane(
     model: str,
     messages: list[dict[str, Any]],
     workspace: Path | None,
+    *,
+    expect_coverage: bool = False,
+    expect_resolutions: bool = False,
+    expected_paths: set[str] | None = None,
 ) -> LaneResult:
     try:
         key = require_openrouter_key(env)
@@ -262,6 +288,9 @@ def _invoke_lane(
             max_tool_turns=parse_max_tool_turns(env.get("MAX_TOOL_TURNS")),
             effort=(env.get("EFFORT") or "").strip(),
             timeout=_int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180),
+            expect_coverage=expect_coverage,
+            expect_resolutions=expect_resolutions,
+            expected_paths=expected_paths,
         )
     except ActionError:
         raise
@@ -345,6 +374,17 @@ def _finish(
             f"This review is pinned to commit {reviewed_sha[:12]} and does not "
             "cover the newest push."
         )
+    notices: list[str] = []
+    if stale_notice:
+        notices.append(stale_notice)
+    if collected.mode == "initial":
+        diff_path_set = set(changed_paths_from_diff(collected.diff))
+        for lane in lanes:
+            if lane.ok and lane.coverage:
+                for note in coverage_count_mismatches(
+                    lane.findings, lane.coverage, diff_path_set
+                ):
+                    notices.append(f"`{lane.model}`: {note}")
     verdict = decide_verdict(
         issues=issues,
         truncated=collected.truncation.truncated,
@@ -360,7 +400,7 @@ def _finish(
         run_url=env.get("RUN_URL") or "",
         judge_note=judge_note,
         reviewed_sha=reviewed_sha,
-        extra_notices=[stale_notice] if stale_notice else None,
+        extra_notices=notices or None,
     )
     review_url = ""
     try:

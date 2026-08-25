@@ -78,6 +78,16 @@ def test_workflow_prompt_calls_out_inventory_docs() -> None:
     assert "README / code-map" in user
 
 
+def test_initial_prompt_requires_coverage_manifest() -> None:
+    text = "\n".join(item["content"] for item in build_messages(_collected()))
+    assert '"coverage"' in text
+    assert "EVERY file in the embedded diff" in text
+    verify_text = "\n".join(
+        item["content"] for item in build_messages(_collected(mode="verify"))
+    )
+    assert '"coverage"' not in verify_text
+
+
 def test_verify_prompt_still_requires_tools_before_empty_findings() -> None:
     text = "\n".join(item["content"] for item in build_messages(_collected(mode="verify")))
     assert "verification follow-up" in text.lower()

@@ -14,10 +14,14 @@ from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.redaction import redact
 from or_pr_review.schema import (
     SCHEMA_VERSION,
+    Finding,
     LaneResult,
+    Resolution,
     failed_lane,
     findings_json_schema,
+    parse_lane_payload,
     parse_model_findings,
+    validate_coverage,
 )
 from or_pr_review.workspace import READ_ONLY_TOOLS, dispatch_tool
 
@@ -174,6 +178,9 @@ def run_lane(
     effort: str = "",
     timeout: int = DEFAULT_TIMEOUT,
     chat: ChatFn | None = None,
+    expect_coverage: bool = False,
+    expect_resolutions: bool = False,
+    expected_paths: set[str] | None = None,
 ) -> LaneResult:
     started = time.monotonic()
     stats: dict[str, int] = {}
@@ -183,6 +190,19 @@ def run_lane(
     conversation = list(messages)
     tools = list(READ_ONLY_TOOLS) if workspace is not None and max_tool_turns > 0 else None
     usage: dict[str, int] = {}
+
+    def _validate(content: str) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
+        findings, resolutions, coverage = parse_lane_payload(
+            content,
+            model,
+            expect_coverage=expect_coverage,
+            expect_resolutions=expect_resolutions,
+        )
+        if expect_coverage and expected_paths:
+            problem = validate_coverage(coverage, set(expected_paths))
+            if problem:
+                raise LaneError(problem)
+        return findings, resolutions, coverage
 
     try:
         content = _run_loop(
@@ -195,8 +215,13 @@ def run_lane(
             send=send,
             usage=usage,
             stats=stats,
+            response_schema=findings_json_schema(
+                include_coverage=expect_coverage,
+                include_resolutions=expect_resolutions,
+            ),
+            validate_final=_validate,
         )
-        findings = parse_model_findings(content, model)
+        findings, resolutions, coverage = _validate(content)
     except LaneError as exc:
         failed = failed_lane(model, redact(str(exc)), elapsed_ms=_elapsed_ms(started))
         _attach_stats(failed, stats, usage)
@@ -211,6 +236,8 @@ def run_lane(
         elapsed_ms=_elapsed_ms(started),
         prompt_tokens=usage.get("prompt_tokens"),
         completion_tokens=usage.get("completion_tokens"),
+        resolutions=resolutions,
+        coverage=coverage,
     )
     _attach_stats(result, stats, usage)
     return result
@@ -239,10 +266,15 @@ def _run_loop(
     send: ChatFn,
     usage: dict[str, int],
     stats: dict[str, int] | None = None,
+    response_schema: dict[str, Any] | None = None,
+    validate_final: Callable[[str], object] | None = None,
 ) -> str:
     payload_base: dict[str, Any] = {
         "model": model,
-        "response_format": {"type": "json_schema", "json_schema": findings_json_schema()},
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": response_schema or findings_json_schema(),
+        },
     }
     if effort:
         payload_base["reasoning"] = {"effort": effort}
@@ -355,7 +387,10 @@ def _run_loop(
                 continue
             if content.strip():
                 try:
-                    parse_model_findings(content, model)
+                    if validate_final is not None:
+                        validate_final(content)
+                    else:
+                        parse_model_findings(content, model)
                 except LaneError as exc:
                     if finalize_retried:
                         raise
@@ -365,7 +400,12 @@ def _run_loop(
                     finalize_retried = True
                     last_error = exc
                     conversation.append(_assistant_record(message))
-                    conversation.append({"role": "user", "content": FINALIZE_RETRY_NOTICE})
+                    conversation.append(
+                        {
+                            "role": "user",
+                            "content": f"{FINALIZE_RETRY_NOTICE} Problem: {exc}",
+                        }
+                    )
                     tools_active = False
                     use_schema = True
                     continue

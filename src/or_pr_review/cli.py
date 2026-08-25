@@ -19,7 +19,7 @@ from or_pr_review.collect import (
 )
 from or_pr_review.errors import ActionError, LaneError, SchemaError
 from or_pr_review.github_ops import GitHub, upsert_status_comment
-from or_pr_review.harness import require_openrouter_key, run_lane
+from or_pr_review.harness import parse_max_tool_turns, require_openrouter_key, run_lane
 from or_pr_review.judge import run_llm_judge
 from or_pr_review.merge import MergedIssue, issues_from_single_lane
 from or_pr_review.models import (
@@ -142,6 +142,7 @@ def _validate_inputs(env: dict[str, str]) -> list[str]:
     max_diff = _int_env(env, "MAX_DIFF_KB", 300)
     if max_diff <= 0:
         raise ActionError("max_diff_kb must be a positive integer")
+    parse_max_tool_turns(env.get("MAX_TOOL_TURNS"))
     custom = env.get("CUSTOM_INSTRUCTIONS") or ""
     if len(custom.encode("utf-8")) > 16_000:
         raise ActionError("custom_instructions exceeds 16,000 UTF-8 bytes")
@@ -252,7 +253,7 @@ def _invoke_lane(
             messages=messages,
             api_key=key,
             workspace=workspace,
-            max_tool_turns=_int_env(env, "MAX_TOOL_TURNS", 8),
+            max_tool_turns=parse_max_tool_turns(env.get("MAX_TOOL_TURNS")),
             effort=(env.get("EFFORT") or "").strip(),
             timeout=_int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180),
         )

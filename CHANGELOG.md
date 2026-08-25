@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 — 2026-08-25
+
+Review-depth parity with the sibling Grok action's first-pass budget. Still OpenRouter-only (`OPENROUTER_API_KEY` → openrouter.ai). No Grok CLI, no `XAI_API_KEY`, no `api.x.ai`.
+
+- Default `max_tool_turns` is **50** (was 8), matching the sibling first-pass `max_turns` default. Still configurable; `0` disables tools. Follow-up jobs may pass a lower value (sibling callers often use 30). The reusable workflow now exposes the input.
+- Review prompt requires read-only tool use for **blast radius**: filename-inventory tests, README / code-map docs, and sibling CI/workflow files — not just the embedded diff. Changed paths are listed in the user prompt. Out-of-diff findings are valid. A workflow-only PR that is missing from README or a code-map inventory test should not glance clean.
+- Harness no longer attaches JSON-schema `response_format` while tools are offered, and nudges once (with `tool_choice=required`) if the model tries to finish with zero tool calls. That glance-and-clean path is what missed a workflow-inventory test on a 31-line YAML PR.
+- `fail_on` remains `never`. One-lane judge skip unchanged.
+
 ## 1.0.0 — 2026-08-24
 
 Initial public v1.

@@ -202,7 +202,9 @@ READ_ONLY_TOOLS = (
             "name": "read_file",
             "description": (
                 "Read a tracked file from the inert checkout of the reviewed commit. "
-                "Read-only. Paths are relative to the repository root."
+                "Read-only. Paths are relative to the repository root. Use this for "
+                "README, code-map docs, sibling workflows, and tests that inventory "
+                "filenames — not only files named in the embedded diff."
             ),
             "parameters": {
                 "type": "object",
@@ -219,7 +221,8 @@ READ_ONLY_TOOLS = (
             "name": "grep",
             "description": (
                 "Search file contents in the inert checkout with a Python regular expression. "
-                "Read-only. Does not run a shell."
+                "Read-only. Does not run a shell. Use this to find tests, docs, or configs "
+                "that list workflow filenames or other inventories of the changed paths."
             ),
             "parameters": {
                 "type": "object",
@@ -238,7 +241,10 @@ READ_ONLY_TOOLS = (
         "type": "function",
         "function": {
             "name": "list_dir",
-            "description": "List a directory in the inert checkout. Read-only.",
+            "description": (
+                "List a directory in the inert checkout. Read-only. Use this for "
+                "sibling CI files (for example .github/workflows) and test/docs trees."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

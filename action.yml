@@ -84,9 +84,12 @@ inputs:
     required: false
     default: ""
   max_tool_turns:
-    description: "Read-only tool-call rounds against the inert checkout (0 disables tools)."
+    description: >-
+      Read-only tool-call rounds against the inert checkout (0 disables tools).
+      Default 50 matches the sibling Grok first-pass max_turns. Follow-up
+      jobs may pass a lower value (sibling callers often use 30).
     required: false
-    default: "8"
+    default: "50"
   openrouter_timeout_seconds:
     description: "Timeout in seconds for each OpenRouter HTTP request."
     required: false

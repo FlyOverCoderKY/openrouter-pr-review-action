@@ -53,6 +53,8 @@ PR title, body, diffs, and repository files are treated as **untrusted data**. T
 
 The checkout must contain the reviewed commit object (`fetch-depth: 0` is the safest setup). GitHub does not give repository secrets or a write token to ordinary `pull_request` workflows from public forks. Do not work around that by blindly checking out and executing fork code under `pull_request_target`.
 
+The default first-pass tool budget is **50** read-only rounds (`max_tool_turns`), matching the sibling Grok action's default `max_turns`. The review prompt tells the model to use those tools for **blast radius** — filename-inventory tests, README / code-map docs, and sibling CI files — not just the embedded diff. A workflow-only PR can still break a test that requires every `.github/workflows/*.yml` to be listed in docs. Follow-up jobs may pass a lower budget (sibling callers often use `30`).
+
 ## Copy-paste: one-lane Grok via OpenRouter
 
 First-pass + latest-commit follow-up. The default `models` value is one slug (`x-ai/grok-4.6`), so the **judge does not run**.
@@ -114,6 +116,7 @@ jobs:
           models: x-ai/grok-4.6
           review_scope: latest-commit
           review_mode: verify
+          max_tool_turns: "30"
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
@@ -185,7 +188,7 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `review_scope` | `full-pr` | `full-pr` \| `latest-commit`. Initial rounds require `full-pr`. |
 | `review_mode` | `auto` | `auto` (opened = initial, synchronize = verify) \| `initial` \| `verify`. |
 | `effort` | _empty_ | Optional OpenRouter reasoning effort for **review lanes**. |
-| `max_tool_turns` | `8` | Read-only tool rounds against the inert checkout. `0` disables tools. |
+| `max_tool_turns` | `50` | Read-only tool rounds against the inert checkout. `0` disables tools. First-pass default matches the sibling Grok `max_turns`. Follow-up jobs may pass `30`. |
 | `persona` | _empty_ | **Reserved, unused in v1.** Future single-persona runs should skip the judge. |
 
 ## Outputs

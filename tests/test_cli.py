@@ -112,6 +112,9 @@ def test_judge_missing_lane_fail_opens_then_errors_if_none_ok(tmp_path: Path, mo
         def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
             return {"html_url": "https://example.test/review"}
 
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
     monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
 
@@ -149,6 +152,9 @@ def test_one_lane_posts_without_judge(tmp_path: Path, monkeypatch: pytest.Monkey
         def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
             posted.append(body)
             return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
 
     def _boom(*_args: object, **_kwargs: object) -> list[MergedIssue]:
         judge_calls["n"] += 1
@@ -222,6 +228,9 @@ def test_two_lanes_require_judge_and_attribution(tmp_path: Path, monkeypatch: py
         def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
             posted.append(body)
             return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
 
     def _judge(**kwargs: object) -> list[MergedIssue]:
         judge_calls["n"] += 1
@@ -363,6 +372,9 @@ def test_judge_merges_valid_artifacts(tmp_path: Path, monkeypatch: pytest.Monkey
             posted.append(body)
             return {"html_url": "https://example.test/review"}
 
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
     def _judge(**_kwargs: object) -> list[MergedIssue]:
         return [
             MergedIssue(
@@ -455,6 +467,9 @@ def test_fail_on_bugs_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
             return {"html_url": "https://example.test/review"}
 
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
     monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
@@ -502,12 +517,15 @@ def test_lane_keeps_matrix_index_when_models_is_single_slug(
     monkeypatch.setattr(
         cli_mod,
         "_run_one_lane",
-        lambda env, model: LaneResult(
-            schema_version=SCHEMA_VERSION,
-            ok=True,
-            model=model,
-            findings=[],
-            error=None,
+        lambda env, model: (
+            LaneResult(
+                schema_version=SCHEMA_VERSION,
+                ok=True,
+                model=model,
+                findings=[],
+                error=None,
+            ),
+            None,
         ),
     )
     lane_dir = tmp_path / "lanes"
@@ -617,3 +635,131 @@ def test_all_keeps_duplicate_model_lane_results(
     lanes = captured["lanes"]
     assert len(lanes) == 2
     assert {lane.findings[0].title for lane in lanes} == {"Finding 1", "Finding 2"}
+    assert all(lane.head_sha == "a" * 40 for lane in lanes)
+
+
+def _mk_collected(head: str = "a" * 40, fallback_notice: str | None = None):
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+
+    return CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha=head,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, head, fallback_notice),
+        truncation=Truncation("diff", False, 4, 4, 300),
+        mode="initial",
+    )
+
+
+def test_prepare_workspace_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.errors import ActionError
+
+    def boom(source: object, sha: object, dest: object) -> None:
+        raise ActionError("git archive failed")
+
+    monkeypatch.setattr(cli_mod, "materialize_commit", boom)
+    env = {"MAX_TOOL_TURNS": "50", "SOURCE_WORKSPACE": str(tmp_path)}
+    with pytest.raises(ActionError, match="refusing a tool-less review"):
+        cli_mod._prepare_workspace(env, _mk_collected(), tmp_path / "work")
+
+
+def test_prepare_workspace_skips_when_tools_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+
+    called = {"n": 0}
+
+    def track(*_args: object) -> None:
+        called["n"] += 1
+
+    monkeypatch.setattr(cli_mod, "materialize_commit", track)
+    env = {"MAX_TOOL_TURNS": "0", "SOURCE_WORKSPACE": str(tmp_path)}
+    assert cli_mod._prepare_workspace(env, _mk_collected(), tmp_path / "work") is None
+    assert called["n"] == 0
+
+
+def test_stale_head_marks_review_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import cli as cli_mod
+
+    posted: list[tuple[str, str]] = []
+
+    class DummyGitHub:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+            posted.append((body, commit_id))
+            return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "b" * 40}
+
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert main(["judge"], env) == 0
+    body, commit_id = posted[0]
+    assert commit_id == "a" * 40
+    assert "pinned to commit" in body
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=partial" in out
+
+
+def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    for index, (model, sha) in enumerate(
+        [("x-ai/grok-4.6", "a" * 40), ("anthropic/claude-sonnet-4.6", "b" * 40)]
+    ):
+        (lane_dir / f"lane-{index}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "ok": True,
+                    "model": model,
+                    "findings": [],
+                    "error": None,
+                    "head_sha": sha,
+                }
+            ),
+            encoding="utf-8",
+        )
+    env = _base_env(
+        tmp_path,
+        MODELS="x-ai/grok-4.6,anthropic/claude-sonnet-4.6",
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert main(["judge"], env) == 1

@@ -81,6 +81,7 @@ class LaneResult:
     tool_rounds: int | None = None
     retries: int | None = None
     salvaged: bool = False
+    head_sha: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +98,7 @@ class LaneResult:
             "tool_rounds": self.tool_rounds,
             "retries": self.retries,
             "salvaged": self.salvaged,
+            "head_sha": self.head_sha,
         }
 
 
@@ -224,6 +226,14 @@ def parse_lane_artifact(payload: object) -> LaneResult:
     salvaged = payload.get("salvaged", False)
     if not isinstance(salvaged, bool):
         raise SchemaError("lane artifact salvaged must be a boolean")
+    head_sha_value = payload.get("head_sha")
+    if head_sha_value is not None and not isinstance(head_sha_value, str):
+        raise SchemaError("lane artifact head_sha must be a string or null")
+    head_sha = (
+        head_sha_value.strip().lower()
+        if isinstance(head_sha_value, str) and head_sha_value.strip()
+        else None
+    )
     return LaneResult(
         schema_version=SCHEMA_VERSION,
         ok=ok,
@@ -238,6 +248,7 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         tool_rounds=_optional_int(payload.get("tool_rounds")),
         retries=_optional_int(payload.get("retries")),
         salvaged=salvaged,
+        head_sha=head_sha,
     )
 
 

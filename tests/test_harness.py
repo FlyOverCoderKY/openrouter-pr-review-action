@@ -610,6 +610,7 @@ def test_lane_artifact_roundtrip_with_stats_fields() -> None:
         tool_rounds=3,
         retries=1,
         salvaged=True,
+        head_sha="a" * 40,
     )
     parsed = parse_lane_artifact(lane.to_dict())
     assert parsed.cached_tokens == 80
@@ -617,3 +618,4 @@ def test_lane_artifact_roundtrip_with_stats_fields() -> None:
     assert parsed.tool_rounds == 3
     assert parsed.retries == 1
     assert parsed.salvaged is True
+    assert parsed.head_sha == "a" * 40

@@ -74,15 +74,31 @@ class GitHub:
         return self._gh("pr", "diff", str(number), "--repo", self.repository)
 
     def compare_diff(self, before: str, after: str) -> str:
-        raw = self._gh(
-            "api",
-            f"repos/{self.repository}/compare/{before}...{after}",
-        )
-        return _patches_from_files(raw, what=f"compare {before[:12]}...{after[:12]}")
+        """Raw unified diff for a verified linear fast-forward range.
+
+        The JSON compare payload caps its files array at 300 entries with no
+        truncation marker, so the diff itself is fetched with the raw diff
+        media type instead. A non-fast-forward range (force-push, rebase)
+        raises so the caller falls back to the single latest commit with a
+        visible notice rather than silently reviewing a merge-base diff.
+        """
+        endpoint = f"repos/{self.repository}/compare/{before}...{after}"
+        raw = self._gh("api", endpoint)
+        comparison = _json_object(raw, f"compare {before[:12]}...{after[:12]}")
+        status = comparison.get("status")
+        behind_by = comparison.get("behind_by")
+        if status != "ahead" or behind_by not in {0, None}:
+            raise ActionError("commit comparison is not a linear fast-forward range")
+        return self._gh("api", "-H", "Accept: application/vnd.github.diff", endpoint)
 
     def commit_diff(self, sha: str) -> str:
-        raw = self._gh("api", f"repos/{self.repository}/commits/{sha}")
-        return _patches_from_files(raw, what=f"commit {sha[:12]}")
+        """Raw unified diff for one commit (complete; no JSON files-array caps)."""
+        return self._gh(
+            "api",
+            "-H",
+            "Accept: application/vnd.github.diff",
+            f"repos/{self.repository}/commits/{sha}",
+        )
 
     def list_issue_comments(self, number: int) -> list[dict[str, Any]]:
         raw = self._gh(
@@ -128,34 +144,6 @@ class GitHub:
             stdin=json.dumps({"event": "COMMENT", "body": body, "commit_id": commit_id}),
         )
         return _json_object(raw, "create review")
-
-
-def _patches_from_files(raw: str, *, what: str) -> str:
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ActionError(f"{what} returned non-JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ActionError(f"{what} returned a non-object")
-    files = payload.get("files")
-    if not isinstance(files, list):
-        raise ActionError(f"{what} has no files array")
-    parts: list[str] = []
-    for item in files:
-        if not isinstance(item, dict):
-            continue
-        filename = item.get("filename")
-        if not isinstance(filename, str) or not filename:
-            continue
-        previous = item.get("previous_filename")
-        status = item.get("status") or "modified"
-        patch = item.get("patch")
-        header = f"diff --git a/{previous or filename} b/{filename}"
-        if isinstance(patch, str) and patch.strip():
-            parts.append(f"{header}\n{patch}")
-        else:
-            parts.append(f"{header}\n# {status} (no patch text from GitHub)")
-    return "\n\n".join(parts)
 
 
 def _json_object(raw: str, what: str) -> dict[str, Any]:

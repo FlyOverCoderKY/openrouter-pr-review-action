@@ -14,10 +14,15 @@ def decide_verdict(
     issues: list[MergedIssue],
     truncated: bool,
     successful_lanes: int,
+    fallback: bool = False,
+    stale: bool = False,
 ) -> str:
+    """`fallback` (single-commit diff fallback) and `stale` (PR head advanced
+    past the reviewed commit) are partial, never clean: both mean this review
+    did not see everything a clean verdict would vouch for."""
     if successful_lanes == 0:
         return "error"
-    if truncated:
+    if truncated or fallback or stale:
         return "partial"
     return "issues" if issues else "clean"
 
@@ -41,6 +46,8 @@ def render_review(
     verdict: str,
     run_url: str = "",
     judge_note: str = "",
+    reviewed_sha: str | None = None,
+    extra_notices: list[str] | None = None,
 ) -> str:
     lane_lines = []
     for lane in lanes:
@@ -68,7 +75,7 @@ def render_review(
         f"**Verdict:** `{verdict}`",
         f"**Scope:** `{collected.plan.scope}` ({collected.plan.kind})",
         f"**Mode:** `{collected.mode}`",
-        f"**Commit:** `{collected.head_sha}`",
+        f"**Commit:** `{reviewed_sha or collected.head_sha}`",
     ]
     if judge_note:
         header.append(f"**Judge:** {judge_note}")
@@ -93,6 +100,8 @@ def render_review(
         )
     if collected.plan.fallback_notice:
         header.extend([collected.plan.fallback_notice, ""])
+    for notice in extra_notices or []:
+        header.extend(["> [!WARNING]", f"> {notice}", ""])
 
     if issues:
         header.append("### Findings")

@@ -13,6 +13,7 @@ from typing import Any
 from or_pr_review.collect import (
     CollectedReview,
     collect_review,
+    normalize_sha,
     parse_mode,
     parse_scope,
     resolve_mode,
@@ -106,7 +107,7 @@ def _role_lane(env: dict[str, str]) -> int:
         model = slugs[0]
     else:
         raise ActionError(f"LANE_INDEX {index} is out of range for {len(slugs)} model(s)")
-    result = _run_one_lane(env, model)
+    result, collected = _run_one_lane(env, model)
     path = _write_lane_file(env, index, result)
     _set_output("lane_file", str(path))
     _set_output("lane_ok", "true" if result.ok else "false")
@@ -115,7 +116,7 @@ def _role_lane(env: dict[str, str]) -> int:
     else:
         print(f"lane {index} `{model}` failed-open: {result.error}")
     if not _judge_needed(env, slugs):
-        return _finish(env, [result])
+        return _finish(env, [result], collected=collected)
     return 0
 
 
@@ -221,6 +222,9 @@ def _role_all(env: dict[str, str]) -> int:
                     by_index[i] = failed_lane(model, redact(str(exc)))
             lanes = [by_index[i] for i in range(len(slugs))]
 
+    for lane in lanes:
+        lane.head_sha = collected.head_sha
+
     lane_dir = work / "lanes"
     lane_dir.mkdir(parents=True, exist_ok=True)
     for index, lane in enumerate(lanes):
@@ -231,13 +235,15 @@ def _role_all(env: dict[str, str]) -> int:
     return _finish(env, lanes, collected=collected)
 
 
-def _run_one_lane(env: dict[str, str], model: str) -> LaneResult:
+def _run_one_lane(env: dict[str, str], model: str) -> tuple[LaneResult, CollectedReview]:
     collected = _collect(env)
     work = Path(env.get("WORK") or env.get("RUNNER_TEMP") or "/tmp")
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected)
     _maybe_status(env, collected.pr_number, f"Lane `{model}` is reviewing via OpenRouter.")
-    return _invoke_lane(env, model, messages, workspace)
+    result = _invoke_lane(env, model, messages, workspace)
+    result.head_sha = collected.head_sha
+    return result, collected
 
 
 def _invoke_lane(
@@ -284,6 +290,8 @@ def _collect(env: dict[str, str]) -> CollectedReview:
 
 
 def _prepare_workspace(env: dict[str, str], collected: CollectedReview, work: Path) -> Path | None:
+    if parse_max_tool_turns(env.get("MAX_TOOL_TURNS")) == 0:
+        return None
     source = Path(env.get("SOURCE_WORKSPACE") or env.get("GITHUB_WORKSPACE") or ".").resolve()
     dest = work / "inert-checkout"
     if dest.exists() and any(dest.iterdir()):
@@ -291,8 +299,12 @@ def _prepare_workspace(env: dict[str, str], collected: CollectedReview, work: Pa
     try:
         return materialize_commit(source, collected.head_sha, dest)
     except ActionError as exc:
-        print(f"warning: inert checkout unavailable ({redact(str(exc))}); continuing without tools")
-        return None
+        # Fail closed: the prompt mandates blast-radius tool use, so a
+        # silently tool-less run could post an unmarked glance review.
+        raise ActionError(
+            "inert checkout unavailable; refusing a tool-less review "
+            f"(set max_tool_turns: 0 to review without tools): {redact(str(exc))}"
+        ) from exc
 
 
 def _messages(env: dict[str, str], collected: CollectedReview) -> list[dict[str, str]]:
@@ -318,13 +330,27 @@ def _finish(
 ) -> int:
     if collected is None:
         collected = _collect(env)
+    # Lanes stamp the commit they actually reviewed; mixed artifacts are
+    # irreconcilable and fail closed before anything posts.
+    reviewed_sha = _common_lane_sha(lanes) or collected.head_sha
     successful = [lane for lane in lanes if lane.ok]
     slugs = parse_models(env.get("MODELS"))
     issues, judge_note = _resolve_issues(env, slugs, lanes, successful)
+    github = _github(env)
+    stale_notice: str | None = None
+    live_head = _live_head(github, collected.pr_number)
+    if live_head and live_head != reviewed_sha:
+        stale_notice = (
+            "The PR head advanced after this review's diff was collected. "
+            f"This review is pinned to commit {reviewed_sha[:12]} and does not "
+            "cover the newest push."
+        )
     verdict = decide_verdict(
         issues=issues,
         truncated=collected.truncation.truncated,
         successful_lanes=len(successful),
+        fallback=collected.plan.fallback_notice is not None,
+        stale=stale_notice is not None,
     )
     body = render_review(
         collected=collected,
@@ -333,11 +359,12 @@ def _finish(
         verdict=verdict,
         run_url=env.get("RUN_URL") or "",
         judge_note=judge_note,
+        reviewed_sha=reviewed_sha,
+        extra_notices=[stale_notice] if stale_notice else None,
     )
-    github = _github(env)
     review_url = ""
     try:
-        posted = github.create_review(collected.pr_number, body, collected.head_sha)
+        posted = github.create_review(collected.pr_number, body, reviewed_sha)
         html = posted.get("html_url")
         review_url = html if isinstance(html, str) else ""
     except ActionError as exc:
@@ -375,6 +402,37 @@ def _finish(
         _error(f"fail_on={fail_on} matched {len(issues)} finding(s) ({bug_count} bug)")
         return 1
     return 0
+
+
+def _common_lane_sha(lanes: list[LaneResult]) -> str | None:
+    """The one commit every lane reviewed, or None when no lane recorded one.
+
+    Mixed artifacts (lanes that reviewed different commits) fail closed:
+    merging findings from two different code states would attribute results
+    to a commit no lane actually reviewed.
+    """
+    shas = {lane.head_sha for lane in lanes if lane.head_sha}
+    if len(shas) > 1:
+        listed = ", ".join(sorted(sha[:12] for sha in shas))
+        raise SchemaError(
+            f"lane artifacts reviewed different commits ({listed}); refusing to merge them"
+        )
+    return next(iter(shas), None)
+
+
+def _live_head(github: GitHub, pr_number: int) -> str | None:
+    try:
+        pr = github.pr_view(pr_number)
+    except ActionError as exc:
+        print(f"warning: could not re-check the live PR head: {redact(str(exc))}")
+        return None
+    head = pr.get("headRefOid")
+    if isinstance(head, str):
+        return normalize_sha(head)
+    nested = pr.get("head")
+    if isinstance(nested, dict) and isinstance(nested.get("sha"), str):
+        return normalize_sha(nested["sha"])
+    return None
 
 
 def _load_lane_dir(directory: Path, expected: list[str]) -> list[LaneResult]:

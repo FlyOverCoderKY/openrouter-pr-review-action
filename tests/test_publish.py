@@ -38,6 +38,27 @@ def test_fail_on_policies() -> None:
     assert fail_on_should_fail("any", [nit])
 
 
+def test_fallback_and_stale_are_partial() -> None:
+    assert (
+        decide_verdict(issues=[], truncated=False, successful_lanes=1, fallback=True) == "partial"
+    )
+    assert decide_verdict(issues=[], truncated=False, successful_lanes=1, stale=True) == "partial"
+
+
+def test_render_uses_reviewed_sha_and_extra_notices() -> None:
+    lane = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None)
+    text = render_review(
+        collected=_collected(),
+        lanes=[lane],
+        issues=[],
+        verdict="partial",
+        reviewed_sha="b" * 40,
+        extra_notices=["The PR head advanced after this review's diff was collected."],
+    )
+    assert ("b" * 40) in text
+    assert "head advanced" in text
+
+
 def test_render_includes_partial_banner() -> None:
     lane = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None)
     text = render_review(

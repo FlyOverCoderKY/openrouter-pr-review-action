@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import email.message
 import inspect
+import io
+import urllib.error
 from pathlib import Path
 
 import pytest
 
-from or_pr_review.errors import ActionError
+from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.harness import (
     BLAST_RADIUS_NUDGE,
+    BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_MAX_TOOL_TURNS,
     MAX_TOOL_TURNS,
+    _assistant_record,
     parse_max_tool_turns,
     require_openrouter_key,
     run_lane,
@@ -265,3 +270,506 @@ def test_schema_used_when_tools_disabled() -> None:
     assert result.ok
     assert "response_format" in payloads[0]
     assert "tools" not in payloads[0]
+
+
+def _assert_valid_tool_pairing(messages: list[dict]) -> None:
+    """Every assistant tool_calls entry must be followed by matching tool results."""
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            for call in message["tool_calls"]:
+                index += 1
+                assert index < len(messages), f"missing tool result for {call.get('id')!r}"
+                nxt = messages[index]
+                assert nxt.get("role") == "tool", f"dangling tool_calls before {nxt!r}"
+                assert nxt.get("tool_call_id") == call.get("id")
+        index += 1
+
+
+def test_assistant_record_preserves_reasoning() -> None:
+    details = [{"type": "reasoning.text", "text": "plan"}]
+    record = _assistant_record(
+        {"content": "", "tool_calls": [{"id": "c1"}], "reasoning_details": details}
+    )
+    assert record["reasoning_details"] == details
+    plain = _assistant_record({"content": "x", "reasoning": "thoughts"})
+    assert plain["reasoning"] == "thoughts"
+    bare = _assistant_record({"content": "x"})
+    assert "reasoning" not in bare and "reasoning_details" not in bare
+
+
+def test_budget_withdrawal_never_solicits_unserviceable_calls(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        _assert_valid_tool_pairing(payload["messages"])
+        if len(payloads) <= 2:
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=2,
+    )
+    assert result.ok
+    assert len(payloads) == 3
+    final = payloads[2]
+    assert "tools" not in final
+    assert "tool_choice" not in final
+    assert "response_format" in final
+    assert final["messages"][-1] == {"role": "user", "content": BUDGET_EXHAUSTED_NOTICE}
+
+
+def test_unsolicited_tool_calls_are_stubbed_not_fatal(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        _assert_valid_tool_pairing(payload["messages"])
+        if len(payloads) <= 2:
+            # The second tool_calls reply arrives after tools were withdrawn.
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=1,
+    )
+    assert result.ok
+    assert len(payloads) == 3
+    assert "tools" not in payloads[1]
+    stubs = [
+        message
+        for message in payloads[2]["messages"]
+        if message.get("role") == "tool" and "not executed" in message.get("content", "")
+    ]
+    assert stubs and stubs[-1]["tool_call_id"] == "call_1"
+
+
+def test_malformed_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        if len(payloads) == 2:
+            return {"choices": [{"message": {"content": "sorry, prose only"}}]}
+        assert "response_format" in payload
+        assert "tools" not in payload
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=50,
+    )
+    assert result.ok
+    assert len(payloads) == 3
+
+
+def test_malformed_finish_fails_open_after_single_retry() -> None:
+    calls = {"n": 0}
+
+    def chat(_payload: dict) -> dict:
+        calls["n"] += 1
+        return {"choices": [{"message": {"content": "still not json"}}]}
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+    )
+    assert not result.ok
+    assert calls["n"] == 2
+
+
+def _http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
+    headers = email.message.Message()
+    if retry_after:
+        headers["Retry-After"] = retry_after
+    return urllib.error.HTTPError(
+        "https://openrouter.ai/api/v1/chat/completions", code, "err", headers, io.BytesIO(b"body")
+    )
+
+
+class _FakeResponse:
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return b'{"choices": []}'
+
+
+def test_openrouter_chat_retries_transient_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import harness
+
+    attempts = {"n": 0}
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise _http_error(429, retry_after="1")
+        return _FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    stats: dict[str, int] = {}
+    parsed = harness.openrouter_chat(
+        "sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append, stats=stats
+    )
+    assert parsed == {"choices": []}
+    assert attempts["n"] == 3
+    assert sleeps == [1.0, 1.0]
+    assert stats["retries"] == 2
+
+
+def test_openrouter_chat_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import harness
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        raise _http_error(503)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    with pytest.raises(LaneError, match="HTTP 503"):
+        harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append)
+    assert len(sleeps) == harness.MAX_HTTP_ATTEMPTS - 1
+    assert sleeps == [2.0, 4.0, 8.0]
+
+
+def test_openrouter_chat_does_not_retry_client_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import harness
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        raise _http_error(400)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    with pytest.raises(LaneError, match="HTTP 400"):
+        harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append)
+    assert sleeps == []
+
+
+def test_lane_salvages_after_midloop_failure(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        if len(payloads) == 2:
+            raise LaneError("OpenRouter HTTP 500: upstream unavailable")
+        assert "response_format" in payload
+        assert "tools" not in payload
+        assert "already gathered" in payload["messages"][-1]["content"]
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+    assert result.ok
+    assert result.salvaged is True
+    assert result.requests == 3
+    assert result.tool_rounds == 1
+
+
+def test_salvage_shrinks_old_observations_on_context_overflow(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x" * 5000 + "\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) <= 3:
+            return _tool_reply()
+        if len(payloads) == 4:
+            raise LaneError("OpenRouter HTTP 400: maximum context length exceeded")
+        tool_texts = [
+            message["content"]
+            for message in payload["messages"]
+            if message.get("role") == "tool"
+        ]
+        assert any("[observation truncated" in text for text in tool_texts)
+        assert all("[observation truncated" not in text for text in tool_texts[-2:])
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=10,
+    )
+    assert result.ok
+    assert result.salvaged is True
+    assert len(payloads) == 5
+
+
+def test_failed_lane_still_reports_usage_and_stats(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            reply = _tool_reply()
+            reply["usage"] = {
+                "prompt_tokens": 7,
+                "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 5},
+            }
+            return reply
+        raise LaneError("OpenRouter HTTP 500: down")
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+    assert not result.ok
+    assert result.prompt_tokens == 7
+    assert result.completion_tokens == 3
+    assert result.cached_tokens == 5
+    assert result.salvaged is True
+    assert result.requests == 3
+    assert result.tool_rounds == 1
+
+
+def test_observation_budget_withdraws_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+
+    monkeypatch.setattr(harness, "MAX_OBSERVATION_BYTES", 100)
+    (tmp_path / "a.py").write_text("x" * 200 + "\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=50,
+    )
+    assert result.ok
+    assert len(payloads) == 2
+    assert "tools" not in payloads[1]
+    assert payloads[1]["messages"][-1] == {"role": "user", "content": BUDGET_EXHAUSTED_NOTICE}
+
+
+def test_initial_lane_enforces_coverage_with_schema_retry(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        if len(payloads) == 2:
+            return _findings_reply()  # missing coverage → finalize retry
+        schema = payload["response_format"]["json_schema"]["schema"]
+        assert "coverage" in schema["required"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"findings": [], "coverage": [{"path": "a.py", "findings": 0}]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        expect_coverage=True,
+        expected_paths={"a.py"},
+    )
+    assert result.ok
+    assert result.coverage == [("a.py", 0)]
+    assert len(payloads) == 3
+    assert "coverage is missing" in payloads[2]["messages"][-1]["content"]
+
+
+def test_initial_lane_fails_open_when_coverage_misses_a_file(tmp_path: Path) -> None:
+    def chat(_payload: dict) -> dict:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"findings": [], "coverage": [{"path": "a.py", "findings": 0}]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+        expect_coverage=True,
+        expected_paths={"a.py", "b.py"},
+    )
+    assert not result.ok
+    assert "does not account" in (result.error or "")
+
+
+def test_in_body_error_reaches_salvage(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        if len(payloads) == 2:
+            # HTTP 200 whose body carries an error object — must salvage,
+            # not discard the gathered evidence.
+            return {"error": {"message": "provider exploded upstream"}}
+        assert "response_format" in payload
+        assert "tools" not in payload
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+    assert result.ok
+    assert result.salvaged is True
+    assert len(payloads) == 3
+
+
+def test_in_body_schema_rejection_downgrades_schema() -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"error": {"message": "response_format json_schema is not supported"}}
+        assert "response_format" not in payload
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+    )
+    assert result.ok
+    assert len(payloads) == 2
+
+
+def test_verify_lane_requires_complete_resolutions() -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {
+                "choices": [
+                    {"message": {"content": '{"findings": [], "resolutions": []}'}}
+                ]
+            }
+        assert "missing entries" in payload["messages"][-1]["content"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"findings": [], "resolutions": '
+                            '[{"id": "r1-1", "status": "fixed", "note": ""}]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+        expect_resolutions=True,
+        expected_resolution_ids={"r1-1"},
+    )
+    assert result.ok
+    assert result.resolutions[0].id == "r1-1"
+    assert len(payloads) == 2
+
+
+def test_lane_artifact_roundtrip_with_stats_fields() -> None:
+    from or_pr_review.schema import SCHEMA_VERSION, LaneResult, parse_lane_artifact
+
+    lane = LaneResult(
+        schema_version=SCHEMA_VERSION,
+        ok=True,
+        model="x-ai/grok-4.6",
+        findings=[],
+        error=None,
+        elapsed_ms=12,
+        prompt_tokens=100,
+        completion_tokens=20,
+        cached_tokens=80,
+        requests=5,
+        tool_rounds=3,
+        retries=1,
+        salvaged=True,
+        head_sha="a" * 40,
+    )
+    parsed = parse_lane_artifact(lane.to_dict())
+    assert parsed.cached_tokens == 80
+    assert parsed.requests == 5
+    assert parsed.tool_rounds == 3
+    assert parsed.retries == 1
+    assert parsed.salvaged is True
+    assert parsed.head_sha == "a" * 40

@@ -32,6 +32,8 @@ def test_action_yml_default_max_tool_turns_is_fifty() -> None:
     assert _input_default(action, "max_tool_turns") == "50"
     assert _input_default(workflow, "max_tool_turns") == "50"
     assert 'max_tool_turns: ${{ inputs.max_tool_turns }}' in workflow
+    # PAT/App-token callers must be able to keep the review loop working.
+    assert workflow.count("bot_login: ${{ inputs.bot_login }}") == 2
     assert "| `max_tool_turns` | `50` |" in readme
     assert DEFAULT_MAX_TOOL_TURNS == 50
     assert "fail_on" in action and 'default: "never"' in action

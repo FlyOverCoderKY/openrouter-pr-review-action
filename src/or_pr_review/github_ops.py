@@ -7,10 +7,17 @@ import os
 import subprocess
 from typing import Any
 
-from or_pr_review.errors import ActionError
+from or_pr_review.errors import ActionError, DivergedRangeError
+from or_pr_review.loop import FINDING_MARKER_RE
 from or_pr_review.redaction import redact
 
 STATUS_MARKER = "<!-- openrouter-pr-review-status -->"
+# The harness's own posted bodies (continuation parts, incomplete notices)
+# must never be fed back to a verify round as "fixing agent responses".
+_BOT_BODY_PREFIXES = (
+    "## OpenRouter pull-request review",
+    "## OpenRouter review incomplete",
+)
 
 
 class GitHub:
@@ -74,15 +81,114 @@ class GitHub:
         return self._gh("pr", "diff", str(number), "--repo", self.repository)
 
     def compare_diff(self, before: str, after: str) -> str:
-        raw = self._gh(
-            "api",
-            f"repos/{self.repository}/compare/{before}...{after}",
-        )
-        return _patches_from_files(raw, what=f"compare {before[:12]}...{after[:12]}")
+        """Raw unified diff for a verified linear fast-forward range.
+
+        The JSON compare payload caps its files array at 300 entries with no
+        truncation marker, so the diff itself is fetched with the raw diff
+        media type instead. A non-fast-forward range (force-push, rebase)
+        raises so the caller falls back to the single latest commit with a
+        visible notice rather than silently reviewing a merge-base diff.
+        """
+        endpoint = f"repos/{self.repository}/compare/{before}...{after}"
+        raw = self._gh("api", endpoint)
+        comparison = _json_object(raw, f"compare {before[:12]}...{after[:12]}")
+        status = comparison.get("status")
+        behind_by = comparison.get("behind_by")
+        if status != "ahead" or behind_by not in {0, None}:
+            raise DivergedRangeError("commit comparison is not a linear fast-forward range")
+        return self._gh("api", "-H", "Accept: application/vnd.github.diff", endpoint)
 
     def commit_diff(self, sha: str) -> str:
-        raw = self._gh("api", f"repos/{self.repository}/commits/{sha}")
-        return _patches_from_files(raw, what=f"commit {sha[:12]}")
+        """Raw unified diff for one commit (complete; no JSON files-array caps)."""
+        return self._gh(
+            "api",
+            "-H",
+            "Accept: application/vnd.github.diff",
+            f"repos/{self.repository}/commits/{sha}",
+        )
+
+    def _paginated_list(self, endpoint: str, label: str) -> list[dict[str, Any]]:
+        raw = self._gh("api", "--paginate", "--slurp", endpoint)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ActionError(f"could not parse {label}") from exc
+        if not isinstance(payload, list):
+            return []
+        items = (
+            [item for page in payload for item in page]
+            if payload and all(isinstance(page, list) for page in payload)
+            else payload
+        )
+        return [item for item in items if isinstance(item, dict)]
+
+    def list_bot_review_bodies(self, number: int, bot_login: str) -> list[str]:
+        """Review bodies authored by the action's own identity, oldest first.
+
+        Only these bodies may carry loop-ledger state: any PR reviewer can
+        post a review, so bodies from other authors are untrusted and never
+        scanned.
+        """
+        reviews = self._paginated_list(
+            f"repos/{self.repository}/pulls/{number}/reviews", "reviews"
+        )
+        return [
+            body
+            for review in reviews
+            if _comment_login(review) == bot_login
+            and isinstance(body := review.get("body"), str)
+        ]
+
+    def list_finding_replies(
+        self, number: int, *, generation: str
+    ) -> list[tuple[str, str, str]]:
+        """(finding_id, login, body) for replies to the bot's inline comments.
+
+        Only markers from the given loop generation pair: finding ids restart
+        at r1-1 after a loop reset, so an old generation's threads must never
+        be attributed to a new finding that reuses the id.
+        """
+        if not generation:
+            return []
+        comments = self._paginated_list(
+            f"repos/{self.repository}/pulls/{number}/comments", "review comments"
+        )
+        finding_by_comment_id: dict[int, str] = {}
+        for comment in comments:
+            ident = comment.get("id")
+            body = comment.get("body")
+            if isinstance(ident, int) and isinstance(body, str):
+                match = FINDING_MARKER_RE.search(body)
+                if match and match.group(1) == generation:
+                    finding_by_comment_id[ident] = match.group(2)
+        replies: list[tuple[str, str, str]] = []
+        for comment in comments:
+            parent = comment.get("in_reply_to_id")
+            body = comment.get("body")
+            if not isinstance(parent, int) or not isinstance(body, str):
+                continue
+            finding_id = finding_by_comment_id.get(parent)
+            if finding_id is None or FINDING_MARKER_RE.search(body):
+                continue
+            replies.append((finding_id, _comment_login(comment), body))
+        return replies
+
+    def list_recent_issue_comments(
+        self, number: int, limit: int = 30
+    ) -> list[tuple[str, str]]:
+        """(login, body) for the newest PR conversation comments, oldest first."""
+        comments = self._paginated_list(
+            f"repos/{self.repository}/issues/{number}/comments", "issue comments"
+        )
+        recent: list[tuple[str, str]] = []
+        for comment in comments:
+            body = comment.get("body")
+            if not isinstance(body, str) or STATUS_MARKER in body:
+                continue
+            if body.startswith(_BOT_BODY_PREFIXES):
+                continue
+            recent.append((_comment_login(comment), body))
+        return recent[-limit:]
 
     def list_issue_comments(self, number: int) -> list[dict[str, Any]]:
         raw = self._gh(
@@ -119,43 +225,52 @@ class GitHub:
         )
         return _json_object(raw, "update comment")
 
-    def create_review(self, number: int, body: str, commit_id: str) -> dict[str, Any]:
-        raw = self._gh(
-            "api",
-            f"repos/{self.repository}/pulls/{number}/reviews",
-            "--input",
-            "-",
-            stdin=json.dumps({"event": "COMMENT", "body": body, "commit_id": commit_id}),
-        )
+    def create_review(
+        self,
+        number: int,
+        body: str,
+        commit_id: str,
+        comments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"event": "COMMENT", "body": body, "commit_id": commit_id}
+        if comments:
+            payload["comments"] = comments
+        try:
+            raw = self._gh(
+                "api",
+                f"repos/{self.repository}/pulls/{number}/reviews",
+                "--input",
+                "-",
+                stdin=json.dumps(payload),
+            )
+        except ActionError as exc:
+            if not comments:
+                raise
+            # Inline placement can fail (for example a line outside the diff
+            # hunks); the review body itself must still post — but never
+            # silently.
+            print(
+                f"warning: inline comments were rejected and dropped "
+                f"({len(comments)} comment(s)): {redact(str(exc))}"
+            )
+            fallback = {"event": "COMMENT", "body": body, "commit_id": commit_id}
+            raw = self._gh(
+                "api",
+                f"repos/{self.repository}/pulls/{number}/reviews",
+                "--input",
+                "-",
+                stdin=json.dumps(fallback),
+            )
         return _json_object(raw, "create review")
 
 
-def _patches_from_files(raw: str, *, what: str) -> str:
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ActionError(f"{what} returned non-JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ActionError(f"{what} returned a non-object")
-    files = payload.get("files")
-    if not isinstance(files, list):
-        raise ActionError(f"{what} has no files array")
-    parts: list[str] = []
-    for item in files:
-        if not isinstance(item, dict):
-            continue
-        filename = item.get("filename")
-        if not isinstance(filename, str) or not filename:
-            continue
-        previous = item.get("previous_filename")
-        status = item.get("status") or "modified"
-        patch = item.get("patch")
-        header = f"diff --git a/{previous or filename} b/{filename}"
-        if isinstance(patch, str) and patch.strip():
-            parts.append(f"{header}\n{patch}")
-        else:
-            parts.append(f"{header}\n# {status} (no patch text from GitHub)")
-    return "\n\n".join(parts)
+def _comment_login(item: dict[str, Any]) -> str:
+    user = item.get("user")
+    if isinstance(user, dict):
+        login = user.get("login")
+        if isinstance(login, str):
+            return login
+    return "unknown"
 
 
 def _json_object(raw: str, what: str) -> dict[str, Any]:

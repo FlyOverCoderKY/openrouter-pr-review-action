@@ -112,6 +112,9 @@ def test_judge_missing_lane_fail_opens_then_errors_if_none_ok(tmp_path: Path, mo
         def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
             return {"html_url": "https://example.test/review"}
 
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
     monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
 
@@ -149,6 +152,9 @@ def test_one_lane_posts_without_judge(tmp_path: Path, monkeypatch: pytest.Monkey
         def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
             posted.append(body)
             return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
 
     def _boom(*_args: object, **_kwargs: object) -> list[MergedIssue]:
         judge_calls["n"] += 1
@@ -222,6 +228,9 @@ def test_two_lanes_require_judge_and_attribution(tmp_path: Path, monkeypatch: py
         def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
             posted.append(body)
             return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
 
     def _judge(**kwargs: object) -> list[MergedIssue]:
         judge_calls["n"] += 1
@@ -363,6 +372,9 @@ def test_judge_merges_valid_artifacts(tmp_path: Path, monkeypatch: pytest.Monkey
             posted.append(body)
             return {"html_url": "https://example.test/review"}
 
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
     def _judge(**_kwargs: object) -> list[MergedIssue]:
         return [
             MergedIssue(
@@ -455,6 +467,9 @@ def test_fail_on_bugs_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
             return {"html_url": "https://example.test/review"}
 
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
     monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
@@ -502,12 +517,16 @@ def test_lane_keeps_matrix_index_when_models_is_single_slug(
     monkeypatch.setattr(
         cli_mod,
         "_run_one_lane",
-        lambda env, model: LaneResult(
-            schema_version=SCHEMA_VERSION,
-            ok=True,
-            model=model,
-            findings=[],
-            error=None,
+        lambda env, model: (
+            LaneResult(
+                schema_version=SCHEMA_VERSION,
+                ok=True,
+                model=model,
+                findings=[],
+                error=None,
+            ),
+            None,
+            None,
         ),
     )
     lane_dir = tmp_path / "lanes"
@@ -578,6 +597,7 @@ def test_all_keeps_duplicate_model_lane_results(
         model: str,
         messages: object,
         workspace: object,
+        **_kwargs: object,
     ) -> LaneResult:
         calls["n"] += 1
         return LaneResult(
@@ -601,6 +621,7 @@ def test_all_keeps_duplicate_model_lane_results(
         env: dict[str, str],
         lanes: list[LaneResult],
         collected: CollectedReview | None = None,
+        **_kwargs: object,
     ) -> int:
         captured["lanes"] = lanes
         return 0
@@ -612,8 +633,636 @@ def test_all_keeps_duplicate_model_lane_results(
     monkeypatch.setattr(cli_mod, "_invoke_lane", fake_invoke)
     monkeypatch.setattr(cli_mod, "_finish", fake_finish)
 
-    env = _base_env(tmp_path, MODELS="x-ai/grok-4.6,x-ai/grok-4.6")
+    env = _base_env(
+        tmp_path,
+        MODELS="x-ai/grok-4.6,x-ai/grok-4.6",
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
     assert main(["all"], env) == 0
     lanes = captured["lanes"]
     assert len(lanes) == 2
     assert {lane.findings[0].title for lane in lanes} == {"Finding 1", "Finding 2"}
+    assert all(lane.head_sha == "a" * 40 for lane in lanes)
+
+
+def _mk_collected(head: str = "a" * 40, fallback_notice: str | None = None):
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+
+    return CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha=head,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, head, fallback_notice),
+        truncation=Truncation("diff", False, 4, 4, 300),
+        mode="initial",
+    )
+
+
+def test_prepare_workspace_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.errors import ActionError
+
+    def boom(source: object, sha: object, dest: object) -> None:
+        raise ActionError("git archive failed")
+
+    monkeypatch.setattr(cli_mod, "materialize_commit", boom)
+    env = {"MAX_TOOL_TURNS": "50", "SOURCE_WORKSPACE": str(tmp_path)}
+    with pytest.raises(ActionError, match="refusing a tool-less review"):
+        cli_mod._prepare_workspace(env, _mk_collected(), tmp_path / "work")
+
+
+def test_prepare_workspace_skips_when_tools_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+
+    called = {"n": 0}
+
+    def track(*_args: object) -> None:
+        called["n"] += 1
+
+    monkeypatch.setattr(cli_mod, "materialize_commit", track)
+    env = {"MAX_TOOL_TURNS": "0", "SOURCE_WORKSPACE": str(tmp_path)}
+    assert cli_mod._prepare_workspace(env, _mk_collected(), tmp_path / "work") is None
+    assert called["n"] == 0
+
+
+def test_stale_head_marks_review_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import cli as cli_mod
+
+    posted: list[tuple[str, str]] = []
+
+    class DummyGitHub:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+            posted.append((body, commit_id))
+            return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "b" * 40}
+
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert main(["judge"], env) == 0
+    body, commit_id = posted[0]
+    assert commit_id == "a" * 40
+    assert "pinned to commit" in body
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=partial" in out
+
+
+def test_long_findings_lists_post_continuation_comments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+
+    reviews: list[str] = []
+    comments: list[str] = []
+
+    class DummyGitHub:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+            reviews.append(body)
+            return {"html_url": "https://example.test/review"}
+
+        def create_issue_comment(self, number: int, body: str) -> dict[str, object]:
+            comments.append(body)
+            return {"html_url": "https://example.test/comment"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    findings = [
+        {
+            "title": f"Finding number {n}",
+            "body": "y" * 6000,
+            "severity": "bug",
+            "file": "src/api.py",
+            "line": n,
+            "model_id": "x-ai/grok-4.6",
+        }
+        for n in range(1, 21)
+    ]
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": findings,
+                "error": None,
+                "head_sha": "a" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert main(["judge"], env) == 0
+    assert len(reviews) == 1
+    assert comments, "long findings lists must continue in comments, not truncate"
+    joined = "\n".join(reviews + comments)
+    for n in range(1, 21):
+        assert f"Finding number {n} " in joined
+
+
+def test_initial_coverage_count_mismatch_posts_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+
+    diff = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
+    collected = CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha="a" * 40,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        truncation=Truncation(diff, False, len(diff), len(diff), 300),
+        mode="initial",
+    )
+    posted: list[str] = []
+
+    class DummyGitHub:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+            posted.append(body)
+            return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+                "coverage": [{"path": "src/app.py", "findings": 2}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert main(["judge"], env) == 0
+    assert "claims 2 finding(s)" in posted[0]
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=clean" in out
+
+
+def _prior_ledger_marker(repo: str) -> str:
+    from or_pr_review.loop import Ledger, LedgerFinding, encode_ledger
+
+    prior = Ledger(
+        round_number=1,
+        findings=(
+            LedgerFinding(
+                id="r1-1",
+                severity="bug",
+                file="src/api.py",
+                line=42,
+                title="Missing auth check",
+                evidence="Unauthenticated POST is accepted",
+                status="open",
+                models=("x-ai/grok-4.6",),
+            ),
+        ),
+        reviewed_sha="b" * 40,
+        generation="1234567890ab",
+    )
+    return encode_ledger(prior, repo=repo, pr_number=1)
+
+
+class _LoopGitHub:
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+        self.posted: list[str] = []
+        self.comments: list[list[dict]] = []
+
+    def list_bot_review_bodies(self, number: int, bot_login: str) -> list[str]:
+        assert bot_login == "github-actions[bot]"
+        return [f"## OpenRouter pull-request review\n{self.marker}\n"]
+
+    def list_finding_replies(
+        self, number: int, *, generation: str = ""
+    ) -> list[tuple[str, str, str]]:
+        return [("r1-1", "dev", "added the check in abc123")]
+
+    def list_recent_issue_comments(self, number: int, limit: int = 30) -> list[tuple[str, str]]:
+        return []
+
+    def pr_view(self, number: int) -> dict[str, object]:
+        return {"headRefOid": "a" * 40}
+
+    def create_review(
+        self,
+        number: int,
+        body: str,
+        commit_id: str,
+        comments: list[dict] | None = None,
+    ) -> dict[str, object]:
+        self.posted.append(body)
+        self.comments.append(comments or [])
+        return {"html_url": "https://example.test/review"}
+
+
+def _verify_env(tmp_path: Path, lane_dir: Path, repo: str) -> dict[str, str]:
+    return _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY=repo,
+        REVIEW_MODE="verify",
+    )
+
+
+def test_verify_round_folds_ledger_and_updates_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import extract_ledger
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+                "resolutions": [{"id": "r1-1", "status": "fixed", "note": "check added"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["judge"], _verify_env(tmp_path, lane_dir, repo)) == 0
+    body = github.posted[0]
+    assert "### Round 2 resolution" in body
+    assert "✅" in body and "r1-1" in body
+    updated = extract_ledger(body, repo=repo, pr_number=1)
+    assert updated is not None
+    assert updated.round_number == 2
+    assert updated.reviewed_sha == "a" * 40
+    assert updated.generation == "1234567890ab"  # generation carries across rounds
+    assert updated.findings == ()
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=clean" in out
+    assert "round=2" in out
+    assert "issue_count=0" in out
+
+
+def test_verify_round_carries_unfixed_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import extract_ledger
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+                "resolutions": [
+                    {"id": "r1-1", "status": "not_fixed", "note": "still reachable"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["judge"], _verify_env(tmp_path, lane_dir, repo)) == 0
+    body = github.posted[0]
+    assert "❌" in body
+    updated = extract_ledger(body, repo=repo, pr_number=1)
+    assert updated is not None
+    assert [finding.id for finding in updated.findings] == ["r1-1"]
+    assert updated.findings[0].status == "open"
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=issues" in out
+    assert "issue_count=1" in out
+    assert "bug_count=1" in out
+
+
+def test_initial_round_embeds_marker_and_inline_comments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+    from or_pr_review.loop import extract_ledger
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    diff = (
+        "diff --git a/src/api.py b/src/api.py\n"
+        "--- a/src/api.py\n"
+        "+++ b/src/api.py\n"
+        "@@ -40,3 +40,4 @@\n"
+        " ctx40\n"
+        " ctx41\n"
+        "+added42\n"
+        " ctx43\n"
+    )
+    collected = CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha="a" * 40,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        truncation=Truncation(diff, False, len(diff), len(diff), 300),
+        mode="initial",
+    )
+    github = _LoopGitHub("unused")
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_mod, "_new_generation", lambda: "a" * 12)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [
+                    {
+                        "title": "Missing auth check",
+                        "body": "Unauthenticated POST",
+                        "severity": "bug",
+                        "file": "src/api.py",
+                        "line": 42,
+                        "model_id": "x-ai/grok-4.6",
+                    }
+                ],
+                "error": None,
+                "head_sha": "a" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY=repo,
+    )
+    assert main(["judge"], env) == 0
+    body = github.posted[0]
+    updated = extract_ledger(body, repo=repo, pr_number=1)
+    assert updated is not None
+    assert updated.round_number == 1
+    assert updated.findings[0].id == "r1-1"
+    assert updated.findings[0].evidence.startswith("Unauthenticated POST")
+    inline = github.comments[0]
+    assert len(inline) == 1
+    assert inline[0]["path"] == "src/api.py"
+    assert inline[0]["line"] == 42
+    # Marker is generation-scoped (initial round mints generation = sha[:12]).
+    assert f"<!-- or-finding:{'a' * 12}:r1-1 -->" in inline[0]["body"]
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "round=1" in out
+    assert "issue_count=1" in out
+
+
+def test_force_push_resets_to_full_pr_initial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import (
+        DIVERGED_NOTICE,
+        CollectedReview,
+        DiffPlan,
+        Truncation,
+    )
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+    collected_calls: list[dict[str, str]] = []
+
+    def fake_collect(env: dict[str, str]) -> CollectedReview:
+        collected_calls.append(dict(env))
+        if env.get("REVIEW_MODE") == "verify":
+            plan = DiffPlan(
+                "latest-commit", "single-commit", None, "a" * 40, DIVERGED_NOTICE
+            )
+            return CollectedReview(
+                1, "t", "", "a" * 40, "main", "feat",
+                plan, Truncation("diff", False, 4, 4, 300), "verify",
+            )
+        plan = DiffPlan("full-pr", "full-pr", None, "a" * 40, None)
+        return CollectedReview(
+            1, "t", "", "a" * 40, "main", "feat",
+            plan, Truncation("diff", False, 4, 4, 300), "initial",
+        )
+
+    monkeypatch.setattr(cli_mod, "_collect", fake_collect)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    env = _base_env(
+        tmp_path,
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY=repo,
+        REVIEW_MODE="verify",
+        REVIEW_SCOPE="latest-commit",
+    )
+    collected, state, replies = cli_mod._collect_with_loop(env)
+    # The diverged range must not livelock in partial verify rounds: a
+    # rewrite resets to a fresh full-PR initial round.
+    assert state.mode == "initial"
+    assert state.round_number == 1
+    assert collected.plan.kind == "full-pr"
+    assert replies == ""
+    assert collected_calls[0]["EVENT_BEFORE"] == "b" * 40  # continuity attempted
+    assert collected_calls[1]["REVIEW_MODE"] == "initial"
+    assert collected_calls[1]["REVIEW_SCOPE"] == "full-pr"
+
+
+def test_transient_compare_failure_does_not_reset_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import (
+        COMPARE_FAILED_NOTICE,
+        CollectedReview,
+        DiffPlan,
+        Truncation,
+    )
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+    collect_count = {"n": 0}
+
+    def fake_collect(env: dict[str, str]) -> CollectedReview:
+        collect_count["n"] += 1
+        plan = DiffPlan(
+            "latest-commit", "single-commit", None, "a" * 40, COMPARE_FAILED_NOTICE
+        )
+        return CollectedReview(
+            1, "t", "", "a" * 40, "main", "feat",
+            plan, Truncation("diff", False, 4, 4, 300), "verify",
+        )
+
+    monkeypatch.setattr(cli_mod, "_collect", fake_collect)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    env = _base_env(
+        tmp_path,
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY=repo,
+        REVIEW_MODE="verify",
+        REVIEW_SCOPE="latest-commit",
+    )
+    collected, state, _replies = cli_mod._collect_with_loop(env)
+    # A transient gh failure (timeout/5xx) must never wipe carried loop
+    # state: the run stays a verify round with the fallback notice, and the
+    # partial verdict downstream preserves the previous ledger.
+    assert state.mode == "verify"
+    assert state.round_number == 2
+    assert state.prior_findings  # carried findings intact
+    assert collected.plan.fallback_notice == COMPARE_FAILED_NOTICE
+    assert collect_count["n"] == 1  # no re-collect / reset
+
+
+def test_coverage_enforcement_skips_when_diff_exceeds_manifest_cap() -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+    from or_pr_review.loop import LoopState
+    from or_pr_review.schema import MAX_COVERAGE_ENTRIES
+
+    diff = "".join(
+        f"diff --git a/f{n}.txt b/f{n}.txt\n" for n in range(MAX_COVERAGE_ENTRIES + 1)
+    )
+    collected = CollectedReview(
+        1, "t", "", "a" * 40, "main", "feat",
+        DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        Truncation(diff, False, len(diff), len(diff), 300),
+        "initial",
+    )
+    state = LoopState(mode="initial", round_number=1)
+    expect_coverage, expected_paths = cli_mod._coverage_expectations(state, collected)
+    assert expect_coverage is False
+    assert expected_paths is None
+    # A normal-sized diff keeps enforcement on.
+    small = CollectedReview(
+        1, "t", "", "a" * 40, "main", "feat",
+        DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        Truncation("diff --git a/x.py b/x.py\n", False, 4, 4, 300),
+        "initial",
+    )
+    expect_coverage, expected_paths = cli_mod._coverage_expectations(state, small)
+    assert expect_coverage is True
+    assert expected_paths == {"x.py"}
+
+
+def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    for index, (model, sha) in enumerate(
+        [("x-ai/grok-4.6", "a" * 40), ("anthropic/claude-sonnet-4.6", "b" * 40)]
+    ):
+        (lane_dir / f"lane-{index}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "ok": True,
+                    "model": model,
+                    "findings": [],
+                    "error": None,
+                    "head_sha": sha,
+                }
+            ),
+            encoding="utf-8",
+        )
+    env = _base_env(
+        tmp_path,
+        MODELS="x-ai/grok-4.6,anthropic/claude-sonnet-4.6",
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert main(["judge"], env) == 1

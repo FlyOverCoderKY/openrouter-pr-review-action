@@ -47,6 +47,13 @@ on:
           Follow-up callers often pass 30. 0 disables tools.
         type: string
         default: "50"
+      bot_login:
+        description: >-
+          GitHub login the reviews post as. Review-loop ledger state is only
+          trusted from this identity; set it when github_token is a PAT or
+          GitHub App token.
+        type: string
+        default: "github-actions[bot]"
     secrets:
       OPENROUTER_API_KEY:
         required: true
@@ -126,6 +133,7 @@ jobs:
           review_mode: ${{ inputs.review_mode }}
           effort: ${{ inputs.effort }}
           max_tool_turns: ${{ inputs.max_tool_turns }}
+          bot_login: ${{ inputs.bot_login }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       - name: Upload lane artifact
@@ -172,5 +180,6 @@ jobs:
           max_diff_kb: ${{ inputs.max_diff_kb }}
           review_scope: ${{ inputs.review_scope }}
           review_mode: ${{ inputs.review_mode }}
+          bot_login: ${{ inputs.bot_login }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from or_pr_review.collect import (
+    DIVERGED_NOTICE,
     CollectedReview,
     collect_review,
+    head_sha_from_pr,
     parse_mode,
     parse_scope,
     resolve_mode,
@@ -21,6 +25,17 @@ from or_pr_review.errors import ActionError, LaneError, SchemaError
 from or_pr_review.github_ops import GitHub, upsert_status_comment
 from or_pr_review.harness import parse_max_tool_turns, require_openrouter_key, run_lane
 from or_pr_review.judge import run_llm_judge
+from or_pr_review.loop import (
+    Ledger,
+    LoopState,
+    apply_round,
+    decide_loop_state,
+    encode_ledger,
+    latest_ledger,
+    merge_resolutions,
+    render_agent_context,
+    round_report,
+)
 from or_pr_review.merge import MergedIssue, issues_from_single_lane
 from or_pr_review.models import (
     LANE_CAP,
@@ -30,15 +45,26 @@ from or_pr_review.models import (
     parse_judge_model,
     parse_models,
 )
-from or_pr_review.prompt import build_messages
+from or_pr_review.prompt import (
+    build_messages,
+    changed_paths_from_diff,
+    diff_right_side_lines,
+)
 from or_pr_review.publish import (
     decide_verdict,
     fail_on_should_fail,
+    inline_review_comments,
     render_incomplete,
-    render_review,
+    render_review_parts,
 )
 from or_pr_review.redaction import redact
-from or_pr_review.schema import LaneResult, failed_lane, parse_lane_artifact
+from or_pr_review.schema import (
+    MAX_COVERAGE_ENTRIES,
+    LaneResult,
+    coverage_count_mismatches,
+    failed_lane,
+    parse_lane_artifact,
+)
 from or_pr_review.workspace import materialize_commit
 
 _ACTIVE_ENV: dict[str, str] = {}
@@ -106,7 +132,7 @@ def _role_lane(env: dict[str, str]) -> int:
         model = slugs[0]
     else:
         raise ActionError(f"LANE_INDEX {index} is out of range for {len(slugs)} model(s)")
-    result = _run_one_lane(env, model)
+    result, collected, state = _run_one_lane(env, model)
     path = _write_lane_file(env, index, result)
     _set_output("lane_file", str(path))
     _set_output("lane_ok", "true" if result.ok else "false")
@@ -115,7 +141,7 @@ def _role_lane(env: dict[str, str]) -> int:
     else:
         print(f"lane {index} `{model}` failed-open: {result.error}")
     if not _judge_needed(env, slugs):
-        return _finish(env, [result])
+        return _finish(env, [result], collected=collected, loop=state)
     return 0
 
 
@@ -143,6 +169,7 @@ def _validate_inputs(env: dict[str, str]) -> list[str]:
     if max_diff <= 0:
         raise ActionError("max_diff_kb must be a positive integer")
     parse_max_tool_turns(env.get("MAX_TOOL_TURNS"))
+    _bot_login(env)
     custom = env.get("CUSTOM_INSTRUCTIONS") or ""
     if len(custom.encode("utf-8")) > 16_000:
         raise ActionError("custom_instructions exceeds 16,000 UTF-8 bytes")
@@ -192,7 +219,7 @@ def _role_all(env: dict[str, str]) -> int:
     _set_output("lane_count", str(len(slugs)))
     _set_output("judge_needed", "true" if needed else "false")
     _set_output("judge_model", parse_judge_model(env.get("JUDGE_MODEL")))
-    collected = _collect(env)
+    collected, state, agent_replies = _collect_with_loop(env)
     _maybe_status(
         env,
         collected.pr_number,
@@ -200,10 +227,23 @@ def _role_all(env: dict[str, str]) -> int:
     )
     work = Path(env.get("WORK") or "").resolve() if env.get("WORK") else Path(env.get("RUNNER_TEMP") or "/tmp")
     workspace = _prepare_workspace(env, collected, work)
-    messages = _messages(env, collected)
+    messages = _messages(env, collected, state, agent_replies)
+    expect_coverage, expected_paths = _coverage_expectations(state, collected)
+    expected_ids = (
+        {finding.id for finding in state.open_prior} if state.mode == "verify" else None
+    )
 
     def _one(model: str) -> LaneResult:
-        return _invoke_lane(env, model, messages, workspace)
+        return _invoke_lane(
+            env,
+            model,
+            messages,
+            workspace,
+            expect_coverage=expect_coverage,
+            expect_resolutions=state.mode == "verify",
+            expected_paths=expected_paths,
+            expected_resolution_ids=expected_ids,
+        )
 
     lanes: list[LaneResult] = []
     if len(slugs) == 1:
@@ -221,6 +261,9 @@ def _role_all(env: dict[str, str]) -> int:
                     by_index[i] = failed_lane(model, redact(str(exc)))
             lanes = [by_index[i] for i in range(len(slugs))]
 
+    for lane in lanes:
+        lane.head_sha = collected.head_sha
+
     lane_dir = work / "lanes"
     lane_dir.mkdir(parents=True, exist_ok=True)
     for index, lane in enumerate(lanes):
@@ -228,16 +271,34 @@ def _role_all(env: dict[str, str]) -> int:
             json.dumps(lane.to_dict(), indent=2) + "\n",
             encoding="utf-8",
         )
-    return _finish(env, lanes, collected=collected)
+    return _finish(env, lanes, collected=collected, loop=state)
 
 
-def _run_one_lane(env: dict[str, str], model: str) -> LaneResult:
-    collected = _collect(env)
+def _run_one_lane(
+    env: dict[str, str], model: str
+) -> tuple[LaneResult, CollectedReview, LoopState]:
+    collected, state, agent_replies = _collect_with_loop(env)
     work = Path(env.get("WORK") or env.get("RUNNER_TEMP") or "/tmp")
     workspace = _prepare_workspace(env, collected, work)
-    messages = _messages(env, collected)
+    messages = _messages(env, collected, state, agent_replies)
     _maybe_status(env, collected.pr_number, f"Lane `{model}` is reviewing via OpenRouter.")
-    return _invoke_lane(env, model, messages, workspace)
+    expect_coverage, expected_paths = _coverage_expectations(state, collected)
+    result = _invoke_lane(
+        env,
+        model,
+        messages,
+        workspace,
+        expect_coverage=expect_coverage,
+        expect_resolutions=state.mode == "verify",
+        expected_paths=expected_paths,
+        expected_resolution_ids=(
+            {finding.id for finding in state.open_prior}
+            if state.mode == "verify"
+            else None
+        ),
+    )
+    result.head_sha = collected.head_sha
+    return result, collected, state
 
 
 def _invoke_lane(
@@ -245,6 +306,11 @@ def _invoke_lane(
     model: str,
     messages: list[dict[str, Any]],
     workspace: Path | None,
+    *,
+    expect_coverage: bool = False,
+    expect_resolutions: bool = False,
+    expected_paths: set[str] | None = None,
+    expected_resolution_ids: set[str] | None = None,
 ) -> LaneResult:
     try:
         key = require_openrouter_key(env)
@@ -256,6 +322,10 @@ def _invoke_lane(
             max_tool_turns=parse_max_tool_turns(env.get("MAX_TOOL_TURNS")),
             effort=(env.get("EFFORT") or "").strip(),
             timeout=_int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180),
+            expect_coverage=expect_coverage,
+            expect_resolutions=expect_resolutions,
+            expected_paths=expected_paths,
+            expected_resolution_ids=expected_resolution_ids,
         )
     except ActionError:
         raise
@@ -263,6 +333,138 @@ def _invoke_lane(
         return failed_lane(model, redact(str(exc)))
     except Exception as exc:  # noqa: BLE001
         return failed_lane(model, redact(str(exc)))
+
+
+def _new_generation() -> str:
+    """A fresh nonce per initial round.
+
+    Deriving the token from the reviewed SHA would reuse it when a loop is
+    reset at the same commit, letting old inline threads pair with new
+    same-numbered findings.
+    """
+    return secrets.token_hex(6)
+
+
+def _coverage_expectations(
+    state: LoopState, collected: CollectedReview
+) -> tuple[bool, set[str] | None]:
+    """Whether this run enforces the coverage manifest, and for which paths.
+
+    A diff naming more paths than a manifest may hold would make every lane
+    unsatisfiable (the prompt demands every file while the parser caps the
+    array), so enforcement degrades to unenforced with a visible notice.
+    """
+    if state.mode != "initial":
+        return False, None
+    paths = set(changed_paths_from_diff(collected.diff))
+    if len(paths) > MAX_COVERAGE_ENTRIES:
+        print(
+            f"notice: {len(paths)} diff paths exceed the coverage manifest cap "
+            f"({MAX_COVERAGE_ENTRIES}); coverage enforcement is skipped for this run"
+        )
+        return False, None
+    return True, paths
+
+
+def _bot_login(env: dict[str, str]) -> str:
+    login = (env.get("BOT_LOGIN") or "").strip() or "github-actions[bot]"
+    if len(login) > 100 or any(character.isspace() for character in login):
+        raise ActionError("bot_login must be a GitHub login of at most 100 characters")
+    return login
+
+
+def _resolve_loop(
+    env: dict[str, str], github: GitHub, pr_number: int
+) -> tuple[Ledger | None, LoopState]:
+    """Recover the loop position before collecting the diff.
+
+    State recovery fails closed: a corrupted newest ledger raises instead of
+    silently resetting to round 1, and a state-free synchronize run under
+    latest-commit scope is refused (an "initial" review of one push could
+    report clean without ever seeing the rest of the PR).
+    """
+    mode_input = parse_mode(env.get("REVIEW_MODE") or "auto")
+    event_action = (env.get("EVENT_ACTION") or "").strip().lower()
+    scope = parse_scope(env.get("REVIEW_SCOPE") or "full-pr")
+    repo = (env.get("GITHUB_REPOSITORY") or "").strip()
+    ledger: Ledger | None = None
+    if mode_input == "verify" or (mode_input == "auto" and event_action == "synchronize"):
+        bodies = github.list_bot_review_bodies(pr_number, _bot_login(env))
+        ledger = latest_ledger(bodies, repo=repo, pr_number=pr_number)
+        if ledger is None and mode_input == "verify":
+            raise ActionError(
+                "review_mode is verify but no prior review-loop state exists on "
+                "this PR; run an initial review first"
+            )
+        if ledger is None and event_action == "synchronize" and scope == "latest-commit":
+            raise ActionError(
+                "this synchronize run collects only the latest commit and no prior "
+                "review-loop state exists, so carried findings cannot be verified; "
+                "run an initial full-PR review first (review_mode: initial, "
+                "review_scope: full-pr)"
+            )
+    mode, round_number = decide_loop_state(
+        review_mode=mode_input, event_action=event_action, ledger=ledger
+    )
+    prior = ledger.findings if ledger is not None and mode == "verify" else ()
+    generation = ledger.generation if ledger is not None and mode == "verify" else ""
+    return ledger, LoopState(
+        mode=mode,
+        round_number=round_number,
+        prior_findings=prior,
+        generation=generation,
+    )
+
+
+def _collect_with_loop(
+    env: dict[str, str], *, with_replies: bool = True
+) -> tuple[CollectedReview, LoopState, str]:
+    pr_number = _pr_number(env)
+    github = _github(env)
+    ledger, state = _resolve_loop(env, github, pr_number)
+    env_for_collect = dict(env)
+    env_for_collect["REVIEW_MODE"] = state.mode
+    if state.mode == "verify" and ledger is not None and ledger.reviewed_sha:
+        # Continuity: verify everything since the last successfully published
+        # review, not just this push's webhook range, so a run racing a
+        # cancelled older run can never skip the commits that run covered.
+        env_for_collect["EVENT_BEFORE"] = ledger.reviewed_sha
+    collected = _collect(env_for_collect)
+    if (
+        state.mode == "verify"
+        and ledger is not None
+        and collected.plan.fallback_notice == DIVERGED_NOTICE
+    ):
+        # History was rewritten (force-push): the last reviewed SHA is no
+        # longer an ancestor, so a latest-commit verify can never cover the
+        # rewritten work — and its partial verdict would never republish the
+        # ledger, repeating the identical failed round forever. A rewrite
+        # requires a fresh exhaustive pass: reset to a full-PR initial round.
+        # Transient compare failures (timeouts, 5xx) carry a different notice
+        # and never reset: they stay a single-commit partial round and retry
+        # naturally on the next push.
+        print(
+            "notice: history diverged from the last reviewed commit "
+            f"({ledger.reviewed_sha[:12]}); resetting to a full-PR initial review"
+        )
+        env_reset = dict(env)
+        env_reset["REVIEW_MODE"] = "initial"
+        env_reset["REVIEW_SCOPE"] = "full-pr"
+        collected = _collect(env_reset)
+        return collected, LoopState(mode="initial", round_number=1), ""
+    agent_replies = ""
+    if with_replies and state.mode == "verify":
+        try:
+            agent_replies = render_agent_context(
+                github.list_finding_replies(pr_number, generation=state.generation),
+                github.list_recent_issue_comments(pr_number),
+            )
+        except ActionError as exc:
+            print(
+                "warning: could not fetch reviewer replies; verifying from "
+                f"commits only: {redact(str(exc))}"
+            )
+    return collected, state, agent_replies
 
 
 def _collect(env: dict[str, str]) -> CollectedReview:
@@ -284,6 +486,8 @@ def _collect(env: dict[str, str]) -> CollectedReview:
 
 
 def _prepare_workspace(env: dict[str, str], collected: CollectedReview, work: Path) -> Path | None:
+    if parse_max_tool_turns(env.get("MAX_TOOL_TURNS")) == 0:
+        return None
     source = Path(env.get("SOURCE_WORKSPACE") or env.get("GITHUB_WORKSPACE") or ".").resolve()
     dest = work / "inert-checkout"
     if dest.exists() and any(dest.iterdir()):
@@ -291,11 +495,20 @@ def _prepare_workspace(env: dict[str, str], collected: CollectedReview, work: Pa
     try:
         return materialize_commit(source, collected.head_sha, dest)
     except ActionError as exc:
-        print(f"warning: inert checkout unavailable ({redact(str(exc))}); continuing without tools")
-        return None
+        # Fail closed: the prompt mandates blast-radius tool use, so a
+        # silently tool-less run could post an unmarked glance review.
+        raise ActionError(
+            "inert checkout unavailable; refusing a tool-less review "
+            f"(set max_tool_turns: 0 to review without tools): {redact(str(exc))}"
+        ) from exc
 
 
-def _messages(env: dict[str, str], collected: CollectedReview) -> list[dict[str, str]]:
+def _messages(
+    env: dict[str, str],
+    collected: CollectedReview,
+    state: LoopState | None = None,
+    agent_replies: str = "",
+) -> list[dict[str, str]]:
     custom = env.get("CUSTOM_INSTRUCTIONS") or ""
     if len(custom.encode("utf-8")) > 16_000:
         raise ActionError("custom_instructions exceeds 16,000 UTF-8 bytes")
@@ -308,6 +521,8 @@ def _messages(env: dict[str, str], collected: CollectedReview) -> list[dict[str,
         custom_instructions=custom,
         tone=tone,
         persona=env.get("PERSONA") or "",
+        loop=state,
+        agent_replies=agent_replies,
     )
 
 
@@ -315,29 +530,102 @@ def _finish(
     env: dict[str, str],
     lanes: list[LaneResult],
     collected: CollectedReview | None = None,
+    loop: LoopState | None = None,
 ) -> int:
-    if collected is None:
-        collected = _collect(env)
+    if collected is None or loop is None:
+        collected, loop, _replies = _collect_with_loop(env, with_replies=False)
+    # Lanes stamp the commit they actually reviewed; mixed artifacts are
+    # irreconcilable and fail closed before anything posts.
+    reviewed_sha = _common_lane_sha(lanes) or collected.head_sha
     successful = [lane for lane in lanes if lane.ok]
     slugs = parse_models(env.get("MODELS"))
     issues, judge_note = _resolve_issues(env, slugs, lanes, successful)
+
+    prior_ids = {finding.id for finding in loop.open_prior}
+    resolutions = merge_resolutions([lane.resolutions for lane in successful], prior_ids)
+    outcome = apply_round(loop, issues, resolutions)
+    issues = outcome.issues
+
+    github = _github(env)
+    stale_notice: str | None = None
+    live_head = _live_head(github, collected.pr_number)
+    if live_head and live_head != reviewed_sha:
+        stale_notice = (
+            "The PR head advanced after this review's diff was collected. "
+            f"This review is pinned to commit {reviewed_sha[:12]} and does not "
+            "cover the newest push."
+        )
+    notices: list[str] = []
+    if stale_notice:
+        notices.append(stale_notice)
+    if loop.mode == "initial":
+        diff_path_set = set(changed_paths_from_diff(collected.diff))
+        for lane in lanes:
+            if lane.ok and lane.coverage:
+                for note in coverage_count_mismatches(
+                    lane.findings, lane.coverage, diff_path_set
+                ):
+                    notices.append(f"`{lane.model}`: {note}")
     verdict = decide_verdict(
         issues=issues,
         truncated=collected.truncation.truncated,
         successful_lanes=len(successful),
+        fallback=collected.plan.fallback_notice is not None,
+        stale=stale_notice is not None,
     )
-    body = render_review(
+    if verdict == "clean" and outcome.open_issue_count:
+        # Carried findings from earlier rounds are still open.
+        verdict = "issues"
+
+    # The generation token scopes inline finding markers to this loop
+    # generation; a reset mints a new one so old threads can never pair with
+    # new same-numbered findings.
+    generation = (
+        loop.generation
+        if loop.mode == "verify" and loop.generation
+        else _new_generation()
+    )
+    hidden_marker: str | None = None
+    if verdict in {"clean", "issues"}:
+        # A partial or error run never publishes authoritative loop state;
+        # the previous marker remains the retry boundary, so a truncated or
+        # fallback diff cannot permanently skip unseen code.
+        hidden_marker = encode_ledger(
+            replace(outcome.ledger, reviewed_sha=reviewed_sha, generation=generation),
+            repo=(env.get("GITHUB_REPOSITORY") or "").strip(),
+            pr_number=collected.pr_number,
+        )
+
+    bodies = render_review_parts(
         collected=collected,
         lanes=lanes,
         issues=issues,
         verdict=verdict,
         run_url=env.get("RUN_URL") or "",
         judge_note=judge_note,
+        reviewed_sha=reviewed_sha,
+        extra_notices=notices or None,
+        hidden_marker=hidden_marker,
+        round_lines=round_report(loop, outcome) or None,
     )
-    github = _github(env)
+    comments: list[dict[str, Any]] = []
+    if verdict in {"clean", "issues"}:
+        # Partial runs never post inline comments: their diff (stale head,
+        # truncated, or fallback) is not what the anchors were computed
+        # against, and a same-round retry would re-issue the same finding ids.
+        comments = inline_review_comments(
+            issues,
+            allowed_lines=diff_right_side_lines(collected.diff),
+            generation=generation,
+        )
     review_url = ""
     try:
-        posted = github.create_review(collected.pr_number, body, collected.head_sha)
+        if comments:
+            posted = github.create_review(
+                collected.pr_number, bodies[0], reviewed_sha, comments=comments
+            )
+        else:
+            posted = github.create_review(collected.pr_number, bodies[0], reviewed_sha)
         html = posted.get("html_url")
         review_url = html if isinstance(html, str) else ""
     except ActionError as exc:
@@ -348,16 +636,22 @@ def _finish(
         )
         raise ActionError(f"failed to post the GitHub review: {exc}") from exc
 
+    for continuation in bodies[1:]:
+        try:
+            github.create_issue_comment(collected.pr_number, continuation)
+        except ActionError as exc:
+            print(f"warning: could not post a continuation comment: {redact(str(exc))}")
+
     _maybe_status(
         env,
         collected.pr_number,
         f"OpenRouter review posted (`{verdict}`). {review_url}".strip(),
     )
 
-    bug_count = sum(1 for issue in issues if issue.severity == "bug")
     _set_output("verdict", verdict)
-    _set_output("issue_count", str(len(issues)))
-    _set_output("bug_count", str(bug_count))
+    _set_output("issue_count", str(outcome.open_issue_count))
+    _set_output("bug_count", str(outcome.open_bug_count))
+    _set_output("round", str(loop.round_number))
     _set_output("review_url", review_url)
 
     _set_output("judge_needed", "true" if _judge_needed(env, slugs) else "false")
@@ -371,10 +665,43 @@ def _finish(
     fail_on = (env.get("FAIL_ON") or "never").strip().lower()
     if fail_on not in {"never", "bugs", "any"}:
         raise ActionError("fail_on must be never, bugs, or any")
-    if fail_on_should_fail(fail_on, issues):
-        _error(f"fail_on={fail_on} matched {len(issues)} finding(s) ({bug_count} bug)")
+    if fail_on_should_fail(
+        fail_on,
+        issues,
+        open_issue_count=outcome.open_issue_count,
+        open_bug_count=outcome.open_bug_count,
+    ):
+        _error(
+            f"fail_on={fail_on} matched {outcome.open_issue_count} open finding(s) "
+            f"({outcome.open_bug_count} bug)"
+        )
         return 1
     return 0
+
+
+def _common_lane_sha(lanes: list[LaneResult]) -> str | None:
+    """The one commit every lane reviewed, or None when no lane recorded one.
+
+    Mixed artifacts (lanes that reviewed different commits) fail closed:
+    merging findings from two different code states would attribute results
+    to a commit no lane actually reviewed.
+    """
+    shas = {lane.head_sha for lane in lanes if lane.head_sha}
+    if len(shas) > 1:
+        listed = ", ".join(sorted(sha[:12] for sha in shas))
+        raise SchemaError(
+            f"lane artifacts reviewed different commits ({listed}); refusing to merge them"
+        )
+    return next(iter(shas), None)
+
+
+def _live_head(github: GitHub, pr_number: int) -> str | None:
+    try:
+        pr = github.pr_view(pr_number)
+    except ActionError as exc:
+        print(f"warning: could not re-check the live PR head: {redact(str(exc))}")
+        return None
+    return head_sha_from_pr(pr)
 
 
 def _load_lane_dir(directory: Path, expected: list[str]) -> list[LaneResult]:

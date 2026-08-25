@@ -1,0 +1,144 @@
+# Live self-review smoke: every PR to this repo is reviewed by the PR's OWN
+# version of the harness (`uses: ./` on the checked-out PR head). This is the
+# release gate the unit suite cannot provide — it exercises the real
+# OpenRouter round-trip (reasoning_details echo, json_schema variants,
+# coverage compliance), the posted review, the ledger marker, inline
+# comments, and (on synchronize) a verify round with continuity.
+#
+# Advisory only: fail_on is never and this must not become a required check.
+# Fork PRs do not receive OPENROUTER_API_KEY and fail fast with a clear error.
+name: Self review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  first-pass:
+    name: Self review first-pass
+    # Owner-actor guard: these jobs execute the PR's OWN action code with
+    # repository secrets (the point of the smoke), so only runs triggered by
+    # the repository owner may start them.
+    if: >-
+      github.actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' &&
+        !github.event.pull_request.draft &&
+        (github.event.action == 'opened' ||
+         github.event.action == 'reopened' ||
+         github.event.action == 'ready_for_review')))
+    concurrency:
+      group: self-review-first-pass-${{ github.event.pull_request.number || inputs.pr_number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require OPENROUTER_API_KEY
+        if: env.OPENROUTER_API_KEY == ''
+        run: |
+          echo "::error::OPENROUTER_API_KEY is empty (fork PRs do not receive repository secrets)."
+          exit 1
+
+      - name: Resolve PR head SHA
+        id: head
+        env:
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="${EVENT_HEAD_SHA:-}"
+          if [ -z "$HEAD_SHA" ]; then
+            HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          fi
+          if [ -z "$HEAD_SHA" ]; then
+            echo "::error::Could not resolve PR head SHA for PR ${PR_NUMBER}."
+            exit 1
+          fi
+          echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ steps.head.outputs.sha }}
+
+      - name: Run self review (this PR's own harness)
+        uses: ./
+        with:
+          github_token: ${{ github.token }}
+          pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+          models: x-ai/grok-4.6
+          review_scope: full-pr
+          review_mode: auto
+          effort: medium
+          roast_level: professional
+          fail_on: never
+          status_comments: "true"
+          max_diff_kb: "1024"
+          max_tool_turns: "50"
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+  follow-up:
+    name: Self review follow-up
+    if: >-
+      github.actor == github.repository_owner &&
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      github.event.action == 'synchronize'
+    concurrency:
+      group: self-review-follow-up-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require OPENROUTER_API_KEY
+        if: env.OPENROUTER_API_KEY == ''
+        run: |
+          echo "::error::OPENROUTER_API_KEY is empty (fork PRs do not receive repository secrets)."
+          exit 1
+
+      - name: Checkout PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # A synchronize that outruns the very first first-pass fails closed with
+      # "run an initial full-PR review first" — that is the loop's designed
+      # behavior, not a smoke failure.
+      - name: Run self review follow-up (verify round)
+        uses: ./
+        with:
+          github_token: ${{ github.token }}
+          pr_number: ${{ github.event.pull_request.number }}
+          models: x-ai/grok-4.6
+          review_scope: latest-commit
+          review_mode: auto
+          effort: low
+          roast_level: professional
+          fail_on: never
+          status_comments: "true"
+          max_diff_kb: "1024"
+          max_tool_turns: "30"
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

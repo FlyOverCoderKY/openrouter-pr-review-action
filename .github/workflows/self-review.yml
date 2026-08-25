@@ -26,13 +26,17 @@ permissions:
 jobs:
   first-pass:
     name: Self review first-pass
+    # Owner-actor guard: these jobs execute the PR's OWN action code with
+    # repository secrets (the point of the smoke), so only runs triggered by
+    # the repository owner may start them.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       !github.event.pull_request.draft &&
-       (github.event.action == 'opened' ||
-        github.event.action == 'reopened' ||
-        github.event.action == 'ready_for_review'))
+      github.actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' &&
+        !github.event.pull_request.draft &&
+        (github.event.action == 'opened' ||
+         github.event.action == 'reopened' ||
+         github.event.action == 'ready_for_review')))
     concurrency:
       group: self-review-first-pass-${{ github.event.pull_request.number || inputs.pr_number }}
       cancel-in-progress: false
@@ -92,6 +96,7 @@ jobs:
   follow-up:
     name: Self review follow-up
     if: >-
+      github.actor == github.repository_owner &&
       github.event_name == 'pull_request' &&
       !github.event.pull_request.draft &&
       github.event.action == 'synchronize'

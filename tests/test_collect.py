@@ -130,3 +130,36 @@ def test_initial_mode_rejects_latest_commit_scope() -> None:
             max_diff_kb=300,
             source=FakeSource(),
         )
+
+
+def test_fetch_scoped_diff_distinguishes_diverged_from_transport() -> None:
+    from or_pr_review.collect import (
+        COMPARE_FAILED_NOTICE,
+        DIVERGED_NOTICE,
+        DiffPlan,
+        fetch_scoped_diff,
+    )
+    from or_pr_review.errors import ActionError, DivergedRangeError
+
+    plan = DiffPlan("latest-commit", "commit-range", "a" * 40, "b" * 40, None)
+
+    class _Source:
+        def __init__(self, exc: Exception) -> None:
+            self.exc = exc
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            raise AssertionError("unused")
+
+        def pr_diff(self, number: int) -> str:
+            raise AssertionError("unused")
+
+        def compare_diff(self, before: str, after: str) -> str:
+            raise self.exc
+
+        def commit_diff(self, sha: str) -> str:
+            return "single-commit-diff"
+
+    _diff, diverged_plan = fetch_scoped_diff(1, plan, _Source(DivergedRangeError("nff")))
+    assert diverged_plan.fallback_notice == DIVERGED_NOTICE
+    _diff, transport_plan = fetch_scoped_diff(1, plan, _Source(ActionError("timeout")))
+    assert transport_plan.fallback_notice == COMPARE_FAILED_NOTICE

@@ -1052,6 +1052,7 @@ def test_initial_round_embeds_marker_and_inline_comments(
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
     monkeypatch.setattr(cli_mod, "_github", lambda env: github)
     monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_mod, "_new_generation", lambda: "a" * 12)
 
     lane_dir = tmp_path / "lanes"
     lane_dir.mkdir()
@@ -1107,7 +1108,7 @@ def test_force_push_resets_to_full_pr_initial(
 ) -> None:
     from or_pr_review import cli as cli_mod
     from or_pr_review.collect import (
-        COMPARE_FAILED_NOTICE,
+        DIVERGED_NOTICE,
         CollectedReview,
         DiffPlan,
         Truncation,
@@ -1121,7 +1122,7 @@ def test_force_push_resets_to_full_pr_initial(
         collected_calls.append(dict(env))
         if env.get("REVIEW_MODE") == "verify":
             plan = DiffPlan(
-                "latest-commit", "single-commit", None, "a" * 40, COMPARE_FAILED_NOTICE
+                "latest-commit", "single-commit", None, "a" * 40, DIVERGED_NOTICE
             )
             return CollectedReview(
                 1, "t", "", "a" * 40, "main", "feat",
@@ -1153,6 +1154,83 @@ def test_force_push_resets_to_full_pr_initial(
     assert collected_calls[0]["EVENT_BEFORE"] == "b" * 40  # continuity attempted
     assert collected_calls[1]["REVIEW_MODE"] == "initial"
     assert collected_calls[1]["REVIEW_SCOPE"] == "full-pr"
+
+
+def test_transient_compare_failure_does_not_reset_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import (
+        COMPARE_FAILED_NOTICE,
+        CollectedReview,
+        DiffPlan,
+        Truncation,
+    )
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+    collect_count = {"n": 0}
+
+    def fake_collect(env: dict[str, str]) -> CollectedReview:
+        collect_count["n"] += 1
+        plan = DiffPlan(
+            "latest-commit", "single-commit", None, "a" * 40, COMPARE_FAILED_NOTICE
+        )
+        return CollectedReview(
+            1, "t", "", "a" * 40, "main", "feat",
+            plan, Truncation("diff", False, 4, 4, 300), "verify",
+        )
+
+    monkeypatch.setattr(cli_mod, "_collect", fake_collect)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    env = _base_env(
+        tmp_path,
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY=repo,
+        REVIEW_MODE="verify",
+        REVIEW_SCOPE="latest-commit",
+    )
+    collected, state, _replies = cli_mod._collect_with_loop(env)
+    # A transient gh failure (timeout/5xx) must never wipe carried loop
+    # state: the run stays a verify round with the fallback notice, and the
+    # partial verdict downstream preserves the previous ledger.
+    assert state.mode == "verify"
+    assert state.round_number == 2
+    assert state.prior_findings  # carried findings intact
+    assert collected.plan.fallback_notice == COMPARE_FAILED_NOTICE
+    assert collect_count["n"] == 1  # no re-collect / reset
+
+
+def test_coverage_enforcement_skips_when_diff_exceeds_manifest_cap() -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+    from or_pr_review.loop import LoopState
+    from or_pr_review.schema import MAX_COVERAGE_ENTRIES
+
+    diff = "".join(
+        f"diff --git a/f{n}.txt b/f{n}.txt\n" for n in range(MAX_COVERAGE_ENTRIES + 1)
+    )
+    collected = CollectedReview(
+        1, "t", "", "a" * 40, "main", "feat",
+        DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        Truncation(diff, False, len(diff), len(diff), 300),
+        "initial",
+    )
+    state = LoopState(mode="initial", round_number=1)
+    expect_coverage, expected_paths = cli_mod._coverage_expectations(state, collected)
+    assert expect_coverage is False
+    assert expected_paths is None
+    # A normal-sized diff keeps enforcement on.
+    small = CollectedReview(
+        1, "t", "", "a" * 40, "main", "feat",
+        DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        Truncation("diff --git a/x.py b/x.py\n", False, 4, 4, 300),
+        "initial",
+    )
+    expect_coverage, expected_paths = cli_mod._coverage_expectations(state, small)
+    assert expect_coverage is True
+    assert expected_paths == {"x.py"}
 
 
 def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

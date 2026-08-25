@@ -7,7 +7,7 @@ import os
 import subprocess
 from typing import Any
 
-from or_pr_review.errors import ActionError
+from or_pr_review.errors import ActionError, DivergedRangeError
 from or_pr_review.loop import FINDING_MARKER_RE
 from or_pr_review.redaction import redact
 
@@ -95,7 +95,7 @@ class GitHub:
         status = comparison.get("status")
         behind_by = comparison.get("behind_by")
         if status != "ahead" or behind_by not in {0, None}:
-            raise ActionError("commit comparison is not a linear fast-forward range")
+            raise DivergedRangeError("commit comparison is not a linear fast-forward range")
         return self._gh("api", "-H", "Accept: application/vnd.github.diff", endpoint)
 
     def commit_diff(self, sha: str) -> str:

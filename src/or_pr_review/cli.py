@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from or_pr_review.collect import (
-    COMPARE_FAILED_NOTICE,
+    DIVERGED_NOTICE,
     CollectedReview,
     collect_review,
     head_sha_from_pr,
@@ -58,6 +59,7 @@ from or_pr_review.publish import (
 )
 from or_pr_review.redaction import redact
 from or_pr_review.schema import (
+    MAX_COVERAGE_ENTRIES,
     LaneResult,
     coverage_count_mismatches,
     failed_lane,
@@ -226,8 +228,7 @@ def _role_all(env: dict[str, str]) -> int:
     work = Path(env.get("WORK") or "").resolve() if env.get("WORK") else Path(env.get("RUNNER_TEMP") or "/tmp")
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected, state, agent_replies)
-    initial = state.mode == "initial"
-    expected_paths = set(changed_paths_from_diff(collected.diff)) if initial else None
+    expect_coverage, expected_paths = _coverage_expectations(state, collected)
     expected_ids = (
         {finding.id for finding in state.open_prior} if state.mode == "verify" else None
     )
@@ -238,7 +239,7 @@ def _role_all(env: dict[str, str]) -> int:
             model,
             messages,
             workspace,
-            expect_coverage=initial,
+            expect_coverage=expect_coverage,
             expect_resolutions=state.mode == "verify",
             expected_paths=expected_paths,
             expected_resolution_ids=expected_ids,
@@ -281,15 +282,15 @@ def _run_one_lane(
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected, state, agent_replies)
     _maybe_status(env, collected.pr_number, f"Lane `{model}` is reviewing via OpenRouter.")
-    initial = state.mode == "initial"
+    expect_coverage, expected_paths = _coverage_expectations(state, collected)
     result = _invoke_lane(
         env,
         model,
         messages,
         workspace,
-        expect_coverage=initial,
+        expect_coverage=expect_coverage,
         expect_resolutions=state.mode == "verify",
-        expected_paths=set(changed_paths_from_diff(collected.diff)) if initial else None,
+        expected_paths=expected_paths,
         expected_resolution_ids=(
             {finding.id for finding in state.open_prior}
             if state.mode == "verify"
@@ -332,6 +333,37 @@ def _invoke_lane(
         return failed_lane(model, redact(str(exc)))
     except Exception as exc:  # noqa: BLE001
         return failed_lane(model, redact(str(exc)))
+
+
+def _new_generation() -> str:
+    """A fresh nonce per initial round.
+
+    Deriving the token from the reviewed SHA would reuse it when a loop is
+    reset at the same commit, letting old inline threads pair with new
+    same-numbered findings.
+    """
+    return secrets.token_hex(6)
+
+
+def _coverage_expectations(
+    state: LoopState, collected: CollectedReview
+) -> tuple[bool, set[str] | None]:
+    """Whether this run enforces the coverage manifest, and for which paths.
+
+    A diff naming more paths than a manifest may hold would make every lane
+    unsatisfiable (the prompt demands every file while the parser caps the
+    array), so enforcement degrades to unenforced with a visible notice.
+    """
+    if state.mode != "initial":
+        return False, None
+    paths = set(changed_paths_from_diff(collected.diff))
+    if len(paths) > MAX_COVERAGE_ENTRIES:
+        print(
+            f"notice: {len(paths)} diff paths exceed the coverage manifest cap "
+            f"({MAX_COVERAGE_ENTRIES}); coverage enforcement is skipped for this run"
+        )
+        return False, None
+    return True, paths
 
 
 def _bot_login(env: dict[str, str]) -> str:
@@ -401,13 +433,16 @@ def _collect_with_loop(
     if (
         state.mode == "verify"
         and ledger is not None
-        and collected.plan.fallback_notice == COMPARE_FAILED_NOTICE
+        and collected.plan.fallback_notice == DIVERGED_NOTICE
     ):
         # History was rewritten (force-push): the last reviewed SHA is no
         # longer an ancestor, so a latest-commit verify can never cover the
         # rewritten work — and its partial verdict would never republish the
         # ledger, repeating the identical failed round forever. A rewrite
         # requires a fresh exhaustive pass: reset to a full-PR initial round.
+        # Transient compare failures (timeouts, 5xx) carry a different notice
+        # and never reset: they stay a single-commit partial round and retry
+        # naturally on the next push.
         print(
             "notice: history diverged from the last reviewed commit "
             f"({ledger.reviewed_sha[:12]}); resetting to a full-PR initial review"
@@ -548,7 +583,7 @@ def _finish(
     generation = (
         loop.generation
         if loop.mode == "verify" and loop.generation
-        else reviewed_sha[:12]
+        else _new_generation()
     )
     hidden_marker: str | None = None
     if verdict in {"clean", "issues"}:

@@ -23,12 +23,16 @@ def test_compare_diff_validates_fast_forward_and_fetches_raw() -> None:
     assert "Accept: application/vnd.github.diff" in calls[1]
 
 
-def test_compare_diff_rejects_non_fast_forward() -> None:
+def test_compare_diff_rejects_non_fast_forward_with_distinct_error() -> None:
+    from or_pr_review.errors import DivergedRangeError
+
     def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
         return json.dumps({"status": "diverged", "behind_by": 3})
 
     gh = GitHub(token="t", repository="o/r", runner=runner)
-    with pytest.raises(ActionError, match="fast-forward"):
+    # The distinct type matters: only a genuine divergence may reset the
+    # review loop; transport failures raise plain ActionError.
+    with pytest.raises(DivergedRangeError, match="fast-forward"):
         gh.compare_diff("a" * 40, "b" * 40)
 
 

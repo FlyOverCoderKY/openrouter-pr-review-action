@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from or_pr_review.errors import ActionError
+from or_pr_review.errors import ActionError, DivergedRangeError
 
 ScopeName = Literal["full-pr", "latest-commit"]
 ReviewMode = Literal["auto", "initial", "verify"]
@@ -28,7 +28,14 @@ MISSING_BEFORE_NOTICE = (
 )
 
 COMPARE_FAILED_NOTICE = (
-    "The before...after compare failed (missing history or a force-push). "
+    "The before...after compare failed (a transient GitHub error). "
+    "This prompt embeds only the single latest commit on the PR head. "
+    "This is not a full-PR review and the full pull request diff was not fetched."
+)
+
+DIVERGED_NOTICE = (
+    "The before...after range is not a linear fast-forward: history was "
+    "rewritten (force-push) and the earlier commit is no longer an ancestor. "
     "This prompt embeds only the single latest commit on the PR head. "
     "This is not a full-PR review and the full pull request diff was not fetched."
 )
@@ -220,20 +227,25 @@ def fetch_scoped_diff(pr_number: int, plan: DiffPlan, source: ReviewSource) -> t
             raise ActionError("commit-range plan is missing SHAs")
         try:
             return source.compare_diff(plan.from_sha, plan.to_sha), plan
+        except DivergedRangeError:
+            # Only a genuine non-fast-forward carries the diverged notice;
+            # the review loop keys its reset on it.
+            notice = DIVERGED_NOTICE
         except ActionError:
-            if not plan.to_sha:
-                raise ActionError(
-                    "latest-commit fallback is missing a head SHA; "
-                    "refusing to fall back to the full PR diff"
-                ) from None
-            fallback = DiffPlan(
-                scope=plan.scope,
-                kind="single-commit",
-                from_sha=None,
-                to_sha=plan.to_sha,
-                fallback_notice=COMPARE_FAILED_NOTICE,
-            )
-            return source.commit_diff(fallback.to_sha), fallback
+            notice = COMPARE_FAILED_NOTICE
+        if not plan.to_sha:
+            raise ActionError(
+                "latest-commit fallback is missing a head SHA; "
+                "refusing to fall back to the full PR diff"
+            ) from None
+        fallback = DiffPlan(
+            scope=plan.scope,
+            kind="single-commit",
+            from_sha=None,
+            to_sha=plan.to_sha,
+            fallback_notice=notice,
+        )
+        return source.commit_diff(fallback.to_sha), fallback
 
     if not plan.to_sha:
         raise ActionError(

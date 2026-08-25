@@ -194,6 +194,24 @@ def test_parse_lane_payload_coverage_rules() -> None:
         )
 
 
+def test_oversized_coverage_truncates_when_not_required() -> None:
+    import json as _json
+
+    import pytest
+
+    from or_pr_review.errors import LaneError
+    from or_pr_review.schema import MAX_COVERAGE_ENTRIES, parse_lane_payload
+
+    entries = [
+        {"path": f"f{n}.txt", "findings": 0} for n in range(MAX_COVERAGE_ENTRIES + 10)
+    ]
+    text = _json.dumps({"findings": [], "coverage": entries})
+    _findings, _resolutions, coverage = parse_lane_payload(text, "m")
+    assert len(coverage) == MAX_COVERAGE_ENTRIES  # advisory extras dropped
+    with pytest.raises(LaneError, match="exceeds the limit"):
+        parse_lane_payload(text, "m", expect_coverage=True)
+
+
 def test_parse_lane_payload_resolutions() -> None:
     import pytest
 

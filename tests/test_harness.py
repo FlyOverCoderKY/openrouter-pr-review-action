@@ -8,8 +8,10 @@ import pytest
 from or_pr_review.errors import ActionError
 from or_pr_review.harness import (
     BLAST_RADIUS_NUDGE,
+    BUDGET_EXHAUSTED_NOTICE,
     DEFAULT_MAX_TOOL_TURNS,
     MAX_TOOL_TURNS,
+    _assistant_record,
     parse_max_tool_turns,
     require_openrouter_key,
     run_lane,
@@ -265,3 +267,133 @@ def test_schema_used_when_tools_disabled() -> None:
     assert result.ok
     assert "response_format" in payloads[0]
     assert "tools" not in payloads[0]
+
+
+def _assert_valid_tool_pairing(messages: list[dict]) -> None:
+    """Every assistant tool_calls entry must be followed by matching tool results."""
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            for call in message["tool_calls"]:
+                index += 1
+                assert index < len(messages), f"missing tool result for {call.get('id')!r}"
+                nxt = messages[index]
+                assert nxt.get("role") == "tool", f"dangling tool_calls before {nxt!r}"
+                assert nxt.get("tool_call_id") == call.get("id")
+        index += 1
+
+
+def test_assistant_record_preserves_reasoning() -> None:
+    details = [{"type": "reasoning.text", "text": "plan"}]
+    record = _assistant_record(
+        {"content": "", "tool_calls": [{"id": "c1"}], "reasoning_details": details}
+    )
+    assert record["reasoning_details"] == details
+    plain = _assistant_record({"content": "x", "reasoning": "thoughts"})
+    assert plain["reasoning"] == "thoughts"
+    bare = _assistant_record({"content": "x"})
+    assert "reasoning" not in bare and "reasoning_details" not in bare
+
+
+def test_budget_withdrawal_never_solicits_unserviceable_calls(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        _assert_valid_tool_pairing(payload["messages"])
+        if len(payloads) <= 2:
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=2,
+    )
+    assert result.ok
+    assert len(payloads) == 3
+    final = payloads[2]
+    assert "tools" not in final
+    assert "tool_choice" not in final
+    assert "response_format" in final
+    assert final["messages"][-1] == {"role": "user", "content": BUDGET_EXHAUSTED_NOTICE}
+
+
+def test_unsolicited_tool_calls_are_stubbed_not_fatal(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        _assert_valid_tool_pairing(payload["messages"])
+        if len(payloads) <= 2:
+            # The second tool_calls reply arrives after tools were withdrawn.
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=1,
+    )
+    assert result.ok
+    assert len(payloads) == 3
+    assert "tools" not in payloads[1]
+    stubs = [
+        message
+        for message in payloads[2]["messages"]
+        if message.get("role") == "tool" and "not executed" in message.get("content", "")
+    ]
+    assert stubs and stubs[-1]["tool_call_id"] == "call_1"
+
+
+def test_malformed_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        if len(payloads) == 2:
+            return {"choices": [{"message": {"content": "sorry, prose only"}}]}
+        assert "response_format" in payload
+        assert "tools" not in payload
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=50,
+    )
+    assert result.ok
+    assert len(payloads) == 3
+
+
+def test_malformed_finish_fails_open_after_single_retry() -> None:
+    calls = {"n": 0}
+
+    def chat(_payload: dict) -> dict:
+        calls["n"] += 1
+        return {"choices": [{"message": {"content": "still not json"}}]}
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+    )
+    assert not result.ok
+    assert calls["n"] == 2

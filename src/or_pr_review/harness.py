@@ -37,6 +37,17 @@ BLAST_RADIUS_NUDGE = (
     "code-map docs, and sibling CI files. Then finish with the JSON object "
     '{"findings": [...]}.'
 )
+BUDGET_EXHAUSTED_NOTICE = (
+    "Tool budget exhausted. Finish now with the JSON object "
+    '{"findings": [...]} and no further tool calls.'
+)
+FINALIZE_RETRY_NOTICE = (
+    "Your last message was not the required JSON object. Return ONLY the JSON "
+    'object {"findings": [...]} now, with no commentary and no tool calls.'
+)
+# Bound on stub-repair rounds if a model keeps emitting tool calls after the
+# tool budget was withdrawn.
+MAX_REPAIR_ROUNDS = 3
 
 
 ChatFn = Callable[[dict[str, Any]], dict[str, Any]]
@@ -164,13 +175,16 @@ def _run_loop(
         payload_base["reasoning"] = {"effort": effort}
 
     turns = 0
+    repairs = 0
     last_error: LaneError | None = None
+    tools_active = bool(tools) and workspace is not None
     # JSON schema on the first tool-enabled turn pushes a glance-and-clean
     # empty findings object. Offer tools without a schema until the model
     # stops calling them (or the budget is gone).
-    use_schema = tools is None
+    use_schema = not tools_active
     nudged = False
     force_tool = False
+    finalize_retried = False
     while True:
         payload = {
             **payload_base,
@@ -178,7 +192,7 @@ def _run_loop(
         }
         if not use_schema:
             payload.pop("response_format", None)
-        if tools:
+        if tools_active:
             payload["tools"] = tools
             payload["tool_choice"] = "required" if force_tool else "auto"
         try:
@@ -196,29 +210,36 @@ def _run_loop(
         message = _assistant_message(response)
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
-            turns += 1
             force_tool = False
-            if workspace is None or turns > max_tool_turns:
-                conversation.append(_assistant_record(message))
-                conversation.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Tool budget exhausted. Finish now with the JSON object "
-                            '{"findings": [...]} and no further tool calls.'
-                        ),
-                    }
-                )
-                tools = None
+            conversation.append(_assistant_record(message))
+            if not tools_active or workspace is None:
+                # The model produced tool calls this loop never solicited (or
+                # cannot service). Answer every call with a stub so the
+                # transcript stays valid, then insist on the JSON finish.
+                repairs += 1
+                if repairs > MAX_REPAIR_ROUNDS:
+                    raise LaneError(
+                        "model kept issuing tool calls after the tool budget was withdrawn"
+                    )
+                for call in tool_calls:
+                    conversation.append(_stub_tool_result(call))
+                conversation.append({"role": "user", "content": BUDGET_EXHAUSTED_NOTICE})
                 use_schema = True
                 continue
-            conversation.append(_assistant_record(message))
+            turns += 1
             for call in tool_calls:
                 conversation.append(_run_one_tool(workspace, call))
+            if turns >= max_tool_turns:
+                # Withdraw tools BEFORE the next request: the loop must never
+                # solicit a tool call it will not execute (a dangling
+                # assistant tool_calls entry is an invalid conversation).
+                tools_active = False
+                use_schema = True
+                conversation.append({"role": "user", "content": BUDGET_EXHAUSTED_NOTICE})
             continue
 
         content = _message_text(message)
-        if tools and turns == 0 and not nudged:
+        if tools_active and turns == 0 and not nudged:
             # Glance-and-clean: one forced blast-radius tool pass.
             nudged = True
             force_tool = True
@@ -226,6 +247,21 @@ def _run_loop(
             conversation.append({"role": "user", "content": BLAST_RADIUS_NUDGE})
             continue
         if content.strip():
+            try:
+                parse_model_findings(content, model)
+            except LaneError as exc:
+                if finalize_retried:
+                    raise
+                # The tool-backed path runs without response_format, so a
+                # malformed natural finish gets exactly one schema-enforced,
+                # tool-free redo before the lane fails open.
+                finalize_retried = True
+                last_error = exc
+                conversation.append(_assistant_record(message))
+                conversation.append({"role": "user", "content": FINALIZE_RETRY_NOTICE})
+                tools_active = False
+                use_schema = True
+                continue
             return content
         if last_error:
             raise last_error
@@ -265,7 +301,26 @@ def _assistant_record(message: dict[str, Any]) -> dict[str, Any]:
     record: dict[str, Any] = {"role": "assistant", "content": message.get("content") or ""}
     if message.get("tool_calls"):
         record["tool_calls"] = message["tool_calls"]
+    # OpenRouter's reasoning contract: reasoning_details must be passed back
+    # unmodified when continuing a tool-calling conversation. Dropping it
+    # strips the model's prior reasoning from every later turn. `reasoning`
+    # is the normalized text form some providers return instead.
+    if message.get("reasoning_details"):
+        record["reasoning_details"] = message["reasoning_details"]
+    elif message.get("reasoning"):
+        record["reasoning"] = message["reasoning"]
     return record
+
+
+def _stub_tool_result(call: object) -> dict[str, Any]:
+    call_id = "unknown"
+    if isinstance(call, dict):
+        call_id = str(call.get("id") or "unknown")
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": "error: tool budget exhausted; this call was not executed",
+    }
 
 
 def _run_one_tool(workspace: Path, call: object) -> dict[str, Any]:

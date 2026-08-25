@@ -41,6 +41,12 @@ on:
       effort:
         type: string
         default: ""
+      max_tool_turns:
+        description: >-
+          Read-only tool rounds (default 50, sibling first-pass max_turns).
+          Follow-up callers often pass 30. 0 disables tools.
+        type: string
+        default: "50"
     secrets:
       OPENROUTER_API_KEY:
         required: true
@@ -74,6 +80,7 @@ jobs:
           review_scope: ${{ inputs.review_scope }}
           review_mode: ${{ inputs.review_mode }}
           max_diff_kb: ${{ inputs.max_diff_kb }}
+          max_tool_turns: ${{ inputs.max_tool_turns }}
           custom_instructions: ${{ inputs.custom_instructions }}
 
   lane:
@@ -118,6 +125,7 @@ jobs:
           review_scope: ${{ inputs.review_scope }}
           review_mode: ${{ inputs.review_mode }}
           effort: ${{ inputs.effort }}
+          max_tool_turns: ${{ inputs.max_tool_turns }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       - name: Upload lane artifact

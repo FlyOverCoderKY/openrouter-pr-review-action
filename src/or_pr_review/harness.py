@@ -25,7 +25,18 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 HTTP_REFERER = "https://github.com/FlyOverCoderKY/openrouter-pr-review-action"
 APP_TITLE = "OpenRouter PR Review Action"
 DEFAULT_TIMEOUT = 180
-MAX_TOOL_TURNS = 8
+# First-pass budget matches the sibling Grok action's default max_turns=50.
+# Follow-up jobs may pass a lower value (sibling callers often use 30).
+DEFAULT_MAX_TOOL_TURNS = 50
+MAX_TOOL_TURNS = DEFAULT_MAX_TOOL_TURNS
+MAX_TOOL_TURNS_LIMIT = 1000
+BLAST_RADIUS_NUDGE = (
+    "You returned a review without using tools. The embedded diff is not the "
+    "whole repository. Use read_file, grep, and/or list_dir to check blast "
+    "radius: tests that inventory workflow or other filenames, README and "
+    "code-map docs, and sibling CI files. Then finish with the JSON object "
+    '{"findings": [...]}.'
+)
 
 
 ChatFn = Callable[[dict[str, Any]], dict[str, Any]]
@@ -39,6 +50,25 @@ def require_openrouter_key(env: dict[str, str]) -> str:
             "(not as an action input) from a repository secret."
         )
     return key
+
+
+def parse_max_tool_turns(
+    raw: str | None,
+    *,
+    default: int = DEFAULT_MAX_TOOL_TURNS,
+    what: str = "max_tool_turns",
+) -> int:
+    """Parse a tool-turn budget. 0 disables tools. Empty uses `default`."""
+    text = (raw or "").strip()
+    if not text:
+        return default
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise ActionError(f"{what} must be an integer") from exc
+    if value < 0 or value > MAX_TOOL_TURNS_LIMIT:
+        raise ActionError(f"{what} must be 0 through {MAX_TOOL_TURNS_LIMIT}")
+    return value
 
 
 def openrouter_chat(api_key: str, payload: dict[str, Any], *, timeout: int) -> dict[str, Any]:
@@ -135,7 +165,12 @@ def _run_loop(
 
     turns = 0
     last_error: LaneError | None = None
-    use_schema = True
+    # JSON schema on the first tool-enabled turn pushes a glance-and-clean
+    # empty findings object. Offer tools without a schema until the model
+    # stops calling them (or the budget is gone).
+    use_schema = tools is None
+    nudged = False
+    force_tool = False
     while True:
         payload = {
             **payload_base,
@@ -145,12 +180,14 @@ def _run_loop(
             payload.pop("response_format", None)
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = "required" if force_tool else "auto"
         try:
             response = send(payload)
         except LaneError as exc:
             message = str(exc)
-            if use_schema and ("response_format" in message.lower() or "json_schema" in message.lower()):
+            lowered = message.lower()
+            schema_rejected = "response_format" in lowered or "json_schema" in lowered
+            if use_schema and schema_rejected:
                 use_schema = False
                 last_error = exc
                 continue
@@ -160,6 +197,7 @@ def _run_loop(
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
             turns += 1
+            force_tool = False
             if workspace is None or turns > max_tool_turns:
                 conversation.append(_assistant_record(message))
                 conversation.append(
@@ -172,6 +210,7 @@ def _run_loop(
                     }
                 )
                 tools = None
+                use_schema = True
                 continue
             conversation.append(_assistant_record(message))
             for call in tool_calls:
@@ -179,6 +218,13 @@ def _run_loop(
             continue
 
         content = _message_text(message)
+        if tools and turns == 0 and not nudged:
+            # Glance-and-clean: one forced blast-radius tool pass.
+            nudged = True
+            force_tool = True
+            conversation.append(_assistant_record(message))
+            conversation.append({"role": "user", "content": BLAST_RADIUS_NUDGE})
+            continue
         if content.strip():
             return content
         if last_error:

@@ -53,6 +53,19 @@ def test_setup_default_model(tmp_path: Path) -> None:
     assert DEFAULT_MODEL in (tmp_path / "out.txt").read_text(encoding="utf-8")
 
 
+def test_setup_default_max_tool_turns_is_fifty(tmp_path: Path) -> None:
+    env = _base_env(tmp_path)
+    env.pop("MAX_TOOL_TURNS", None)
+    assert main(["setup"], env) == 0
+
+
+def test_setup_rejects_out_of_range_max_tool_turns(tmp_path: Path) -> None:
+    env = _base_env(tmp_path, MAX_TOOL_TURNS="-1")
+    assert main(["setup"], env) == 1
+    env = _base_env(tmp_path, MAX_TOOL_TURNS="1001")
+    assert main(["setup"], env) == 1
+
+
 def test_setup_cap_fails_closed(tmp_path: Path) -> None:
     env = _base_env(
         tmp_path,
@@ -510,6 +523,33 @@ def test_lane_keeps_matrix_index_when_models_is_single_slug(
     assert kept.is_file()
     assert not (lane_dir / "lane-0.json").exists()
     assert json.loads(kept.read_text(encoding="utf-8"))["model"] == "anthropic/claude-sonnet-4.6"
+
+
+def test_invoke_lane_defaults_max_tool_turns_to_fifty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.harness import DEFAULT_MAX_TOOL_TURNS
+    from or_pr_review.schema import SCHEMA_VERSION, LaneResult
+
+    captured: dict[str, object] = {}
+
+    def fake_run_lane(**kwargs: object) -> LaneResult:
+        captured.update(kwargs)
+        return LaneResult(
+            schema_version=SCHEMA_VERSION,
+            ok=True,
+            model=str(kwargs.get("model") or ""),
+            findings=[],
+            error=None,
+        )
+
+    monkeypatch.setattr(cli_mod, "run_lane", fake_run_lane)
+    env = _base_env(tmp_path, OPENROUTER_API_KEY="sk-test")
+    env.pop("MAX_TOOL_TURNS", None)
+    result = cli_mod._invoke_lane(env, "x-ai/grok-4.6", [], tmp_path)
+    assert result.ok
+    assert captured["max_tool_turns"] == DEFAULT_MAX_TOOL_TURNS == 50
 
 
 def test_all_keeps_duplicate_model_lane_results(

@@ -1,0 +1,58 @@
+name: OpenRouter PR review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+jobs:
+  first-pass:
+    if: github.event.action != 'synchronize'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: or-review-first-pass-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: FlyOverCoderKY/openrouter-pr-review-action@034e7869ea3e73756dae4a50836093b3557b6e6b
+        with:
+          github_token: ${{ github.token }}
+          pr_number: ${{ github.event.pull_request.number }}
+          models: x-ai/grok-4.6
+          review_scope: full-pr
+          review_mode: initial
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+  follow-up:
+    if: github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: or-review-follow-up-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: FlyOverCoderKY/openrouter-pr-review-action@034e7869ea3e73756dae4a50836093b3557b6e6b
+        with:
+          github_token: ${{ github.token }}
+          pr_number: ${{ github.event.pull_request.number }}
+          models: x-ai/grok-4.6
+          review_scope: latest-commit
+          review_mode: verify
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

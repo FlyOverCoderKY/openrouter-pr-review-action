@@ -35,6 +35,7 @@ Loop-protocol hardening toward Grok parity — first changesets of the merged pa
   - The verify-round resolution report is bounded (8 KB, with an omission note) and per-line notes clipped, so the part-1 header (which also carries the ≤40 KB ledger marker) can no longer overflow the body cap and silently truncate findings.
   - The reusable workflow gained a `bot_login` input passed to lane and judge steps, so PAT/App-token callers keep review-loop continuity.
   - Also: byte-truncated ranged reads now report only the lines actually delivered with a truthful resume hint; the judge role skips the reply fetches it never uses; the live-head recheck shares `head_sha_from_pr` with collection; and the resolution rank table is derived from `RESOLUTION_STATUSES` so a future status cannot parse yet crash the merge.
+- **Self-review smoke** (`.github/workflows/self-review.yml`): every PR to this repository is reviewed by the PR's own version of the harness (`uses: ./` on the PR head) — full-PR first-pass on open, latest-commit verify round on synchronize — exercising the live OpenRouter round-trip, the posted review, the ledger, and inline comments before any release. Advisory only; never a required check.
 
 ## 1.1.0 — 2026-08-25
 

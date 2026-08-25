@@ -82,11 +82,28 @@ def test_create_review_falls_back_without_comments() -> None:
     assert "comments" not in calls[1]
 
 
-def test_list_finding_replies_pairs_marker_threads() -> None:
+def test_list_finding_replies_pairs_marker_threads_by_generation() -> None:
+    generation = "1234567890ab"
+    other_generation = "feedfeedfeed"
     comments = [
         [
-            {"id": 10, "body": "<!-- or-finding:r1-1 -->\n**T**", "user": {"login": "bot"}},
+            {
+                "id": 10,
+                "body": f"<!-- or-finding:{generation}:r1-1 -->\n**T**",
+                "user": {"login": "bot"},
+            },
             {"id": 11, "in_reply_to_id": 10, "body": "fixed in abc123", "user": {"login": "dev"}},
+            {
+                "id": 20,
+                "body": f"<!-- or-finding:{other_generation}:r1-1 -->\n**Old**",
+                "user": {"login": "bot"},
+            },
+            {
+                "id": 21,
+                "in_reply_to_id": 20,
+                "body": "false positive because X",
+                "user": {"login": "dev"},
+            },
             {"id": 12, "in_reply_to_id": 99, "body": "unrelated", "user": {"login": "dev"}},
         ]
     ]
@@ -95,4 +112,25 @@ def test_list_finding_replies_pairs_marker_threads() -> None:
         return json.dumps(comments)
 
     gh = GitHub(token="t", repository="o/r", runner=runner)
-    assert gh.list_finding_replies(1) == [("r1-1", "dev", "fixed in abc123")]
+    # Only the current generation's thread pairs; the pre-reset thread with a
+    # reused finding id is ignored, and an empty generation harvests nothing.
+    assert gh.list_finding_replies(1, generation=generation) == [
+        ("r1-1", "dev", "fixed in abc123")
+    ]
+    assert gh.list_finding_replies(1, generation="") == []
+
+
+def test_recent_issue_comments_exclude_bot_review_bodies() -> None:
+    comments = [
+        [
+            {"id": 1, "body": "## OpenRouter pull-request review — continued\n...", "user": {"login": "b"}},
+            {"id": 2, "body": "## OpenRouter review incomplete\n...", "user": {"login": "b"}},
+            {"id": 3, "body": "I pushed a fix for r1-1", "user": {"login": "dev"}},
+        ]
+    ]
+
+    def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
+        return json.dumps(comments)
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+    assert gh.list_recent_issue_comments(1) == [("dev", "I pushed a fix for r1-1")]

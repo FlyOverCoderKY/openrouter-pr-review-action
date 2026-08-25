@@ -181,6 +181,7 @@ def run_lane(
     expect_coverage: bool = False,
     expect_resolutions: bool = False,
     expected_paths: set[str] | None = None,
+    expected_resolution_ids: set[str] | None = None,
 ) -> LaneResult:
     started = time.monotonic()
     stats: dict[str, int] = {}
@@ -202,6 +203,15 @@ def run_lane(
             problem = validate_coverage(coverage, set(expected_paths))
             if problem:
                 raise LaneError(problem)
+        if expect_resolutions and expected_resolution_ids:
+            provided = {resolution.id for resolution in resolutions}
+            missing = sorted(expected_resolution_ids - provided)
+            if missing:
+                named = ", ".join(missing[:5])
+                raise LaneError(
+                    f"resolutions are incomplete; missing entries for carried "
+                    f"finding(s): {named}"
+                )
         return findings, resolutions, coverage
 
     try:
@@ -307,6 +317,11 @@ def _run_loop(
                 stats["requests"] = stats.get("requests", 0) + 1
             try:
                 response = send(payload)
+                _absorb_usage(usage, response)
+                # In-body errors (HTTP 200 whose JSON carries an error object,
+                # a common OpenRouter provider-failure shape) must reach the
+                # same schema-fallback and salvage handling as HTTP errors.
+                message = _assistant_message(response)
             except LaneError as exc:
                 message = str(exc)
                 lowered = message.lower()
@@ -339,8 +354,6 @@ def _run_loop(
                     use_schema = True
                     continue
                 raise
-            _absorb_usage(usage, response)
-            message = _assistant_message(response)
             tool_calls = message.get("tool_calls") or []
             if tool_calls:
                 force_tool = False

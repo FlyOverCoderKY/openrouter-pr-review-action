@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from or_pr_review.collect import (
+    COMPARE_FAILED_NOTICE,
     CollectedReview,
     collect_review,
-    normalize_sha,
+    head_sha_from_pr,
     parse_mode,
     parse_scope,
     resolve_mode,
@@ -43,7 +44,11 @@ from or_pr_review.models import (
     parse_judge_model,
     parse_models,
 )
-from or_pr_review.prompt import build_messages, changed_paths_from_diff
+from or_pr_review.prompt import (
+    build_messages,
+    changed_paths_from_diff,
+    diff_right_side_lines,
+)
 from or_pr_review.publish import (
     decide_verdict,
     fail_on_should_fail,
@@ -223,6 +228,9 @@ def _role_all(env: dict[str, str]) -> int:
     messages = _messages(env, collected, state, agent_replies)
     initial = state.mode == "initial"
     expected_paths = set(changed_paths_from_diff(collected.diff)) if initial else None
+    expected_ids = (
+        {finding.id for finding in state.open_prior} if state.mode == "verify" else None
+    )
 
     def _one(model: str) -> LaneResult:
         return _invoke_lane(
@@ -233,6 +241,7 @@ def _role_all(env: dict[str, str]) -> int:
             expect_coverage=initial,
             expect_resolutions=state.mode == "verify",
             expected_paths=expected_paths,
+            expected_resolution_ids=expected_ids,
         )
 
     lanes: list[LaneResult] = []
@@ -281,6 +290,11 @@ def _run_one_lane(
         expect_coverage=initial,
         expect_resolutions=state.mode == "verify",
         expected_paths=set(changed_paths_from_diff(collected.diff)) if initial else None,
+        expected_resolution_ids=(
+            {finding.id for finding in state.open_prior}
+            if state.mode == "verify"
+            else None
+        ),
     )
     result.head_sha = collected.head_sha
     return result, collected, state
@@ -295,6 +309,7 @@ def _invoke_lane(
     expect_coverage: bool = False,
     expect_resolutions: bool = False,
     expected_paths: set[str] | None = None,
+    expected_resolution_ids: set[str] | None = None,
 ) -> LaneResult:
     try:
         key = require_openrouter_key(env)
@@ -309,6 +324,7 @@ def _invoke_lane(
             expect_coverage=expect_coverage,
             expect_resolutions=expect_resolutions,
             expected_paths=expected_paths,
+            expected_resolution_ids=expected_resolution_ids,
         )
     except ActionError:
         raise
@@ -359,10 +375,18 @@ def _resolve_loop(
         review_mode=mode_input, event_action=event_action, ledger=ledger
     )
     prior = ledger.findings if ledger is not None and mode == "verify" else ()
-    return ledger, LoopState(mode=mode, round_number=round_number, prior_findings=prior)
+    generation = ledger.generation if ledger is not None and mode == "verify" else ""
+    return ledger, LoopState(
+        mode=mode,
+        round_number=round_number,
+        prior_findings=prior,
+        generation=generation,
+    )
 
 
-def _collect_with_loop(env: dict[str, str]) -> tuple[CollectedReview, LoopState, str]:
+def _collect_with_loop(
+    env: dict[str, str], *, with_replies: bool = True
+) -> tuple[CollectedReview, LoopState, str]:
     pr_number = _pr_number(env)
     github = _github(env)
     ledger, state = _resolve_loop(env, github, pr_number)
@@ -374,11 +398,30 @@ def _collect_with_loop(env: dict[str, str]) -> tuple[CollectedReview, LoopState,
         # cancelled older run can never skip the commits that run covered.
         env_for_collect["EVENT_BEFORE"] = ledger.reviewed_sha
     collected = _collect(env_for_collect)
+    if (
+        state.mode == "verify"
+        and ledger is not None
+        and collected.plan.fallback_notice == COMPARE_FAILED_NOTICE
+    ):
+        # History was rewritten (force-push): the last reviewed SHA is no
+        # longer an ancestor, so a latest-commit verify can never cover the
+        # rewritten work — and its partial verdict would never republish the
+        # ledger, repeating the identical failed round forever. A rewrite
+        # requires a fresh exhaustive pass: reset to a full-PR initial round.
+        print(
+            "notice: history diverged from the last reviewed commit "
+            f"({ledger.reviewed_sha[:12]}); resetting to a full-PR initial review"
+        )
+        env_reset = dict(env)
+        env_reset["REVIEW_MODE"] = "initial"
+        env_reset["REVIEW_SCOPE"] = "full-pr"
+        collected = _collect(env_reset)
+        return collected, LoopState(mode="initial", round_number=1), ""
     agent_replies = ""
-    if state.mode == "verify":
+    if with_replies and state.mode == "verify":
         try:
             agent_replies = render_agent_context(
-                github.list_finding_replies(pr_number),
+                github.list_finding_replies(pr_number, generation=state.generation),
                 github.list_recent_issue_comments(pr_number),
             )
         except ActionError as exc:
@@ -455,9 +498,7 @@ def _finish(
     loop: LoopState | None = None,
 ) -> int:
     if collected is None or loop is None:
-        recollected, recomputed, _replies = _collect_with_loop(env)
-        collected = collected or recollected
-        loop = loop or recomputed
+        collected, loop, _replies = _collect_with_loop(env, with_replies=False)
     # Lanes stamp the commit they actually reviewed; mixed artifacts are
     # irreconcilable and fail closed before anything posts.
     reviewed_sha = _common_lane_sha(lanes) or collected.head_sha
@@ -501,13 +542,21 @@ def _finish(
         # Carried findings from earlier rounds are still open.
         verdict = "issues"
 
+    # The generation token scopes inline finding markers to this loop
+    # generation; a reset mints a new one so old threads can never pair with
+    # new same-numbered findings.
+    generation = (
+        loop.generation
+        if loop.mode == "verify" and loop.generation
+        else reviewed_sha[:12]
+    )
     hidden_marker: str | None = None
     if verdict in {"clean", "issues"}:
         # A partial or error run never publishes authoritative loop state;
         # the previous marker remains the retry boundary, so a truncated or
         # fallback diff cannot permanently skip unseen code.
         hidden_marker = encode_ledger(
-            replace(outcome.ledger, reviewed_sha=reviewed_sha),
+            replace(outcome.ledger, reviewed_sha=reviewed_sha, generation=generation),
             repo=(env.get("GITHUB_REPOSITORY") or "").strip(),
             pr_number=collected.pr_number,
         )
@@ -524,9 +573,16 @@ def _finish(
         hidden_marker=hidden_marker,
         round_lines=round_report(loop, outcome) or None,
     )
-    comments = inline_review_comments(
-        issues, allowed_paths=set(changed_paths_from_diff(collected.diff))
-    )
+    comments: list[dict[str, Any]] = []
+    if verdict in {"clean", "issues"}:
+        # Partial runs never post inline comments: their diff (stale head,
+        # truncated, or fallback) is not what the anchors were computed
+        # against, and a same-round retry would re-issue the same finding ids.
+        comments = inline_review_comments(
+            issues,
+            allowed_lines=diff_right_side_lines(collected.diff),
+            generation=generation,
+        )
     review_url = ""
     try:
         if comments:
@@ -610,13 +666,7 @@ def _live_head(github: GitHub, pr_number: int) -> str | None:
     except ActionError as exc:
         print(f"warning: could not re-check the live PR head: {redact(str(exc))}")
         return None
-    head = pr.get("headRefOid")
-    if isinstance(head, str):
-        return normalize_sha(head)
-    nested = pr.get("head")
-    if isinstance(nested, dict) and isinstance(nested.get("sha"), str):
-        return normalize_sha(nested["sha"])
-    return None
+    return head_sha_from_pr(pr)
 
 
 def _load_lane_dir(directory: Path, expected: list[str]) -> list[LaneResult]:

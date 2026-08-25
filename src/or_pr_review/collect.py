@@ -115,6 +115,11 @@ def resolve_mode(mode: ReviewMode, event_action: str | None) -> ResolvedMode:
     return "initial"
 
 
+def head_sha_from_pr(pr: dict[str, object]) -> str | None:
+    """Normalized head SHA from a PR payload (headRefOid or nested head.sha)."""
+    return normalize_sha(_as_str(pr.get("headRefOid")) or _nested_head(pr))
+
+
 def normalize_sha(value: str | None) -> str | None:
     if value is None:
         return None
@@ -252,7 +257,7 @@ def collect_review(
         raise ActionError("initial review_mode requires review_scope=full-pr")
 
     pr = source.pr_view(pr_number)
-    head_from_pr = normalize_sha(_as_str(pr.get("headRefOid")) or _nested_head(pr))
+    head_from_pr = head_sha_from_pr(pr)
     if scope == "full-pr":
         plan = plan_diff(
             scope=scope,
@@ -271,7 +276,7 @@ def collect_review(
     raw, plan = fetch_scoped_diff(pr_number, plan, source)
     if scope == "full-pr":
         confirmed = source.pr_view(pr_number)
-        confirmed_head = normalize_sha(_as_str(confirmed.get("headRefOid")) or _nested_head(confirmed))
+        confirmed_head = head_sha_from_pr(confirmed)
         if confirmed_head is None:
             raise ActionError("PR head SHA is missing from the PR metadata; retry the review")
         if plan.to_sha and confirmed_head != plan.to_sha:

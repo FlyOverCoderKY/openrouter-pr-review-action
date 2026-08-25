@@ -883,6 +883,7 @@ def _prior_ledger_marker(repo: str) -> str:
             ),
         ),
         reviewed_sha="b" * 40,
+        generation="1234567890ab",
     )
     return encode_ledger(prior, repo=repo, pr_number=1)
 
@@ -897,7 +898,9 @@ class _LoopGitHub:
         assert bot_login == "github-actions[bot]"
         return [f"## OpenRouter pull-request review\n{self.marker}\n"]
 
-    def list_finding_replies(self, number: int) -> list[tuple[str, str, str]]:
+    def list_finding_replies(
+        self, number: int, *, generation: str = ""
+    ) -> list[tuple[str, str, str]]:
         return [("r1-1", "dev", "added the check in abc123")]
 
     def list_recent_issue_comments(self, number: int, limit: int = 30) -> list[tuple[str, str]]:
@@ -965,6 +968,7 @@ def test_verify_round_folds_ledger_and_updates_marker(
     assert updated is not None
     assert updated.round_number == 2
     assert updated.reviewed_sha == "a" * 40
+    assert updated.generation == "1234567890ab"  # generation carries across rounds
     assert updated.findings == ()
     out = (tmp_path / "out.txt").read_text(encoding="utf-8")
     assert "verdict=clean" in out
@@ -1023,7 +1027,16 @@ def test_initial_round_embeds_marker_and_inline_comments(
     from or_pr_review.loop import extract_ledger
 
     repo = "FlyOverCoderKY/openrouter-pr-review-action"
-    diff = "diff --git a/src/api.py b/src/api.py\n--- a/src/api.py\n+++ b/src/api.py\n"
+    diff = (
+        "diff --git a/src/api.py b/src/api.py\n"
+        "--- a/src/api.py\n"
+        "+++ b/src/api.py\n"
+        "@@ -40,3 +40,4 @@\n"
+        " ctx40\n"
+        " ctx41\n"
+        "+added42\n"
+        " ctx43\n"
+    )
     collected = CollectedReview(
         pr_number=1,
         title="t",
@@ -1082,10 +1095,64 @@ def test_initial_round_embeds_marker_and_inline_comments(
     assert len(inline) == 1
     assert inline[0]["path"] == "src/api.py"
     assert inline[0]["line"] == 42
-    assert "<!-- or-finding:r1-1 -->" in inline[0]["body"]
+    # Marker is generation-scoped (initial round mints generation = sha[:12]).
+    assert f"<!-- or-finding:{'a' * 12}:r1-1 -->" in inline[0]["body"]
     out = (tmp_path / "out.txt").read_text(encoding="utf-8")
     assert "round=1" in out
     assert "issue_count=1" in out
+
+
+def test_force_push_resets_to_full_pr_initial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import (
+        COMPARE_FAILED_NOTICE,
+        CollectedReview,
+        DiffPlan,
+        Truncation,
+    )
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+    collected_calls: list[dict[str, str]] = []
+
+    def fake_collect(env: dict[str, str]) -> CollectedReview:
+        collected_calls.append(dict(env))
+        if env.get("REVIEW_MODE") == "verify":
+            plan = DiffPlan(
+                "latest-commit", "single-commit", None, "a" * 40, COMPARE_FAILED_NOTICE
+            )
+            return CollectedReview(
+                1, "t", "", "a" * 40, "main", "feat",
+                plan, Truncation("diff", False, 4, 4, 300), "verify",
+            )
+        plan = DiffPlan("full-pr", "full-pr", None, "a" * 40, None)
+        return CollectedReview(
+            1, "t", "", "a" * 40, "main", "feat",
+            plan, Truncation("diff", False, 4, 4, 300), "initial",
+        )
+
+    monkeypatch.setattr(cli_mod, "_collect", fake_collect)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    env = _base_env(
+        tmp_path,
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY=repo,
+        REVIEW_MODE="verify",
+        REVIEW_SCOPE="latest-commit",
+    )
+    collected, state, replies = cli_mod._collect_with_loop(env)
+    # The diverged range must not livelock in partial verify rounds: a
+    # rewrite resets to a fresh full-PR initial round.
+    assert state.mode == "initial"
+    assert state.round_number == 1
+    assert collected.plan.kind == "full-pr"
+    assert replies == ""
+    assert collected_calls[0]["EVENT_BEFORE"] == "b" * 40  # continuity attempted
+    assert collected_calls[1]["REVIEW_MODE"] == "initial"
+    assert collected_calls[1]["REVIEW_SCOPE"] == "full-pr"
 
 
 def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

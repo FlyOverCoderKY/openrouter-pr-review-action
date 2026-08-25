@@ -151,17 +151,30 @@ def tool_read_file(
     window = lines[start - 1 : start - 1 + count]
     body = "".join(window)
     encoded = body.encode("utf-8")
-    truncated_bytes = len(encoded) > MAX_READ_BYTES
-    if truncated_bytes:
+    if len(encoded) > MAX_READ_BYTES:
+        # Report only what was actually delivered, with a truthful resume
+        # hint — never claim lines that were cut.
         body = encoded[:MAX_READ_BYTES].decode("utf-8", errors="replace")
-    end = min(start + len(window) - 1, total)
-    header = f"[lines {start}-{end} of {total}]\n"
-    if truncated_bytes:
-        footer = f"\n[window truncated after {MAX_READ_BYTES} bytes]"
-    elif end < total:
-        footer = f"\n[file continues; call read_file with start_line={end + 1} for more]"
+        delivered = body.count("\n")
+        if delivered:
+            end = start + delivered - 1
+            footer = (
+                f"\n[window truncated after {MAX_READ_BYTES} bytes; call "
+                f"read_file with start_line={end + 1} for the rest]"
+            )
+        else:
+            end = start
+            footer = (
+                f"\n[window truncated after {MAX_READ_BYTES} bytes; line "
+                f"{start} alone exceeds the byte cap]"
+            )
     else:
-        footer = ""
+        end = min(start + len(window) - 1, total)
+        if end < total:
+            footer = f"\n[file continues; call read_file with start_line={end + 1} for more]"
+        else:
+            footer = ""
+    header = f"[lines {start}-{end} of {total}]\n"
     return header + body + footer
 
 
@@ -313,6 +326,10 @@ def dispatch_tool(root: Path, name: str, arguments: dict[str, object]) -> str:
         return _dispatch_tool(root, name, arguments)
     except LaneError as exc:
         return f"error: {exc}"
+    except Exception as exc:  # noqa: BLE001 — a tool must never kill the lane
+        # Model-facing tools are total: any unexpected failure becomes an
+        # error observation the model can react to, not a lane-wide crash.
+        return f"error: tool {name!r} failed: {exc.__class__.__name__}: {exc}"
 
 
 def _optional_int_arg(value: object) -> tuple[int | None, bool]:
@@ -323,8 +340,13 @@ def _optional_int_arg(value: object) -> tuple[int | None, bool]:
         return None, False
     if isinstance(value, int):
         return value, True
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value.strip()), True
+    if isinstance(value, str):
+        # int() is the authority: isdigit()-style pre-checks accept strings
+        # (unicode digits, doubled signs) that int() then rejects.
+        try:
+            return int(value.strip(), 10), True
+        except ValueError:
+            return None, False
     return None, False
 
 

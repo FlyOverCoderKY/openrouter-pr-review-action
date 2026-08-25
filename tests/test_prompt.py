@@ -4,6 +4,7 @@ from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
 from or_pr_review.prompt import (
     build_messages,
     changed_paths_from_diff,
+    diff_right_side_lines,
     looks_like_ci_or_docs_inventory_change,
 )
 
@@ -45,6 +46,51 @@ def test_changed_paths_from_workflow_diff() -> None:
     paths = changed_paths_from_diff(WORKFLOW_ONLY_DIFF)
     assert paths == [".github/workflows/openrouter-code-review.yml"]
     assert looks_like_ci_or_docs_inventory_change(paths)
+
+
+def test_quoted_non_ascii_diff_headers_are_parsed() -> None:
+    diff = (
+        'diff --git "a/docs/na\\303\\257ve.md" "b/docs/na\\303\\257ve.md"\n'
+        '--- "a/docs/na\\303\\257ve.md"\n'
+        '+++ "b/docs/na\\303\\257ve.md"\n'
+        "@@ -0,0 +1,2 @@\n"
+        "+hello\n"
+        "+world\n"
+        "diff --git a/plain.txt b/plain.txt\n"
+        "--- a/plain.txt\n"
+        "+++ b/plain.txt\n"
+        "@@ -1 +1,2 @@\n"
+        " keep\n"
+        "+add\n"
+    )
+    assert changed_paths_from_diff(diff) == ["docs/naïve.md", "plain.txt"]
+    lines = diff_right_side_lines(diff)
+    assert lines["docs/naïve.md"] == {1, 2}
+    assert lines["plain.txt"] == {1, 2}
+
+
+def test_changed_paths_handles_spaces_without_quoting() -> None:
+    diff = "diff --git a/has space.txt b/has space.txt\n"
+    assert changed_paths_from_diff(diff) == ["has space.txt"]
+
+
+def test_diff_right_side_lines_maps_hunks() -> None:
+    diff = (
+        "diff --git a/src/api.py b/src/api.py\n"
+        "--- a/src/api.py\n"
+        "+++ b/src/api.py\n"
+        "@@ -40,3 +40,4 @@\n"
+        " ctx40\n"
+        " ctx41\n"
+        "+add42\n"
+        " ctx43\n"
+        "@@ -90,2 +91,2 @@\n"
+        "-gone\n"
+        "+swap91\n"
+        " ctx92\n"
+    )
+    lines = diff_right_side_lines(diff)
+    assert lines == {"src/api.py": {40, 41, 42, 43, 91, 92}}
 
 
 def test_changed_paths_ignores_ordinary_python() -> None:

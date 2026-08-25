@@ -659,6 +659,94 @@ def test_initial_lane_fails_open_when_coverage_misses_a_file(tmp_path: Path) -> 
     assert "does not account" in (result.error or "")
 
 
+def test_in_body_error_reaches_salvage(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        if len(payloads) == 2:
+            # HTTP 200 whose body carries an error object — must salvage,
+            # not discard the gathered evidence.
+            return {"error": {"message": "provider exploded upstream"}}
+        assert "response_format" in payload
+        assert "tools" not in payload
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+    assert result.ok
+    assert result.salvaged is True
+    assert len(payloads) == 3
+
+
+def test_in_body_schema_rejection_downgrades_schema() -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"error": {"message": "response_format json_schema is not supported"}}
+        assert "response_format" not in payload
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+    )
+    assert result.ok
+    assert len(payloads) == 2
+
+
+def test_verify_lane_requires_complete_resolutions() -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {
+                "choices": [
+                    {"message": {"content": '{"findings": [], "resolutions": []}'}}
+                ]
+            }
+        assert "missing entries" in payload["messages"][-1]["content"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"findings": [], "resolutions": '
+                            '[{"id": "r1-1", "status": "fixed", "note": ""}]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+        expect_resolutions=True,
+        expected_resolution_ids={"r1-1"},
+    )
+    assert result.ok
+    assert result.resolutions[0].id == "r1-1"
+    assert len(payloads) == 2
+
+
 def test_lane_artifact_roundtrip_with_stats_fields() -> None:
     from or_pr_review.schema import SCHEMA_VERSION, LaneResult, parse_lane_artifact
 

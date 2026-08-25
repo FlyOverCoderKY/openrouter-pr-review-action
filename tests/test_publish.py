@@ -102,6 +102,52 @@ def test_long_reviews_split_into_parts() -> None:
     assert "[Workflow run]" not in parts[0]
 
 
+def test_inline_comments_require_in_hunk_anchors() -> None:
+    from or_pr_review.publish import inline_review_comments
+
+    issues = [
+        MergedIssue("In hunk", "b", "bug", "a.py", 42, ["m"], id="r1-1"),
+        MergedIssue("Out of hunk", "b", "bug", "a.py", 10, ["m"], id="r1-2"),
+        MergedIssue("Out of diff", "b", "bug", "z.py", 1, ["m"], id="r1-3"),
+    ]
+    comments = inline_review_comments(
+        issues, allowed_lines={"a.py": {40, 41, 42, 43}}, generation="1234567890ab"
+    )
+    # One out-of-hunk anchor would 422 the whole batched review; only the
+    # in-hunk finding may post inline.
+    assert [comment["line"] for comment in comments] == [42]
+    assert "<!-- or-finding:1234567890ab:r1-1 -->" in comments[0]["body"]
+
+
+def test_part_one_stays_within_cap_with_marker_and_round_report() -> None:
+    from or_pr_review.publish import MAX_REVIEW_BYTES, render_review_parts
+
+    lane = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None)
+    marker = "<!-- openrouter-review-ledger:v1:" + "A" * 39_900 + " -->"
+    round_lines = ["### Round 2 resolution", ""] + [
+        f"- ⏳ `r1-{n}` unaddressed — **T**: " + "n" * 450 for n in range(1, 31)
+    ]
+    issues = [
+        MergedIssue(f"Finding number {n}", "x" * 5000, "bug", "a.py", n, ["m"])
+        for n in range(1, 6)
+    ]
+    parts = render_review_parts(
+        collected=_collected(),
+        lanes=[lane],
+        issues=issues,
+        verdict="issues",
+        hidden_marker=marker,
+        round_lines=round_lines,
+    )
+    assert all(len(part.encode("utf-8")) <= MAX_REVIEW_BYTES for part in parts)
+    assert "[review body truncated]" not in "\n".join(parts)
+    assert marker in parts[0]
+    assert "more resolution line(s) omitted" in parts[0]
+    joined = "\n".join(parts)
+    for n in range(1, 6):
+        assert f"Finding number {n} " in joined
+
+
 def test_render_includes_partial_banner() -> None:
     lane = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None)
     text = render_review(

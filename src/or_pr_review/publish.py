@@ -13,6 +13,10 @@ from or_pr_review.schema import LaneResult
 # continue long findings lists in follow-up comments instead of dropping them.
 MAX_REVIEW_BYTES = 60_000
 TARGET_REVIEW_BYTES = 58_000
+# The verify-round resolution report lives in the part-1 header alongside the
+# ledger marker (≤40KB); bounding it keeps part 1 under MAX_REVIEW_BYTES so
+# _finalize never has to truncate real content.
+ROUND_REPORT_BYTES = 8_000
 _CONTINUED_HEADING = "## OpenRouter pull-request review — continued"
 
 
@@ -151,7 +155,7 @@ def render_review_parts(
         ]
     )
     if round_lines:
-        header.extend([*round_lines, ""])
+        header.extend([*_cap_block(round_lines, ROUND_REPORT_BYTES), ""])
     if collected.truncation.truncated and collected.truncation.notice:
         header.extend(
             [
@@ -198,6 +202,23 @@ def render_review_parts(
     return bodies
 
 
+def _cap_block(lines: list[str], max_bytes: int) -> list[str]:
+    kept: list[str] = []
+    used = 0
+    for index, line in enumerate(lines):
+        cost = len(line.encode("utf-8")) + 1
+        if used + cost > max_bytes:
+            omitted = len(lines) - index
+            kept.append(
+                f"- [{omitted} more resolution line(s) omitted; the full state "
+                "is carried in the ledger]"
+            )
+            break
+        kept.append(line)
+        used += cost
+    return kept
+
+
 def _finalize(lines: list[str]) -> str:
     text = "\n".join(lines).rstrip() + "\n"
     if len(text.encode("utf-8")) > MAX_REVIEW_BYTES:
@@ -207,20 +228,26 @@ def _finalize(lines: list[str]) -> str:
 
 
 def inline_review_comments(
-    issues: list[MergedIssue], *, allowed_paths: set[str]
+    issues: list[MergedIssue],
+    *,
+    allowed_lines: dict[str, set[int]],
+    generation: str,
 ) -> list[dict[str, Any]]:
-    """Inline review comments for findings that anchor to a diff file.
+    """Inline review comments for findings that anchor inside a diff hunk.
 
-    Out-of-diff (blast-radius) findings stay body-only: GitHub rejects
-    review comments on paths outside the PR diff.
+    GitHub rejects the ENTIRE batched review if any one comment's line is not
+    part of the diff, so anchors are validated against the new-side hunk
+    lines. Out-of-hunk and out-of-diff (blast-radius) findings stay body-only.
     """
     comments: list[dict[str, Any]] = []
     for issue in issues:
         if not issue.file or issue.line is None:
             continue
-        if issue.file not in allowed_paths:
+        if issue.line not in allowed_lines.get(issue.file, set()):
             continue
-        marker = f"{finding_marker(issue.id)}\n" if issue.id else ""
+        marker = (
+            f"{finding_marker(issue.id, generation)}\n" if issue.id and generation else ""
+        )
         comments.append(
             {
                 "path": issue.file,

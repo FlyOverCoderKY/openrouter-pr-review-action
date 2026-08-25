@@ -12,6 +12,12 @@ from or_pr_review.loop import FINDING_MARKER_RE
 from or_pr_review.redaction import redact
 
 STATUS_MARKER = "<!-- openrouter-pr-review-status -->"
+# The harness's own posted bodies (continuation parts, incomplete notices)
+# must never be fed back to a verify round as "fixing agent responses".
+_BOT_BODY_PREFIXES = (
+    "## OpenRouter pull-request review",
+    "## OpenRouter review incomplete",
+)
 
 
 class GitHub:
@@ -133,8 +139,17 @@ class GitHub:
             and isinstance(body := review.get("body"), str)
         ]
 
-    def list_finding_replies(self, number: int) -> list[tuple[str, str, str]]:
-        """(finding_id, login, body) for replies to the bot's inline comments."""
+    def list_finding_replies(
+        self, number: int, *, generation: str
+    ) -> list[tuple[str, str, str]]:
+        """(finding_id, login, body) for replies to the bot's inline comments.
+
+        Only markers from the given loop generation pair: finding ids restart
+        at r1-1 after a loop reset, so an old generation's threads must never
+        be attributed to a new finding that reuses the id.
+        """
+        if not generation:
+            return []
         comments = self._paginated_list(
             f"repos/{self.repository}/pulls/{number}/comments", "review comments"
         )
@@ -144,8 +159,8 @@ class GitHub:
             body = comment.get("body")
             if isinstance(ident, int) and isinstance(body, str):
                 match = FINDING_MARKER_RE.search(body)
-                if match:
-                    finding_by_comment_id[ident] = match.group(1)
+                if match and match.group(1) == generation:
+                    finding_by_comment_id[ident] = match.group(2)
         replies: list[tuple[str, str, str]] = []
         for comment in comments:
             parent = comment.get("in_reply_to_id")
@@ -169,6 +184,8 @@ class GitHub:
         for comment in comments:
             body = comment.get("body")
             if not isinstance(body, str) or STATUS_MARKER in body:
+                continue
+            if body.startswith(_BOT_BODY_PREFIXES):
                 continue
             recent.append((_comment_login(comment), body))
         return recent[-limit:]
@@ -226,11 +243,16 @@ class GitHub:
                 "-",
                 stdin=json.dumps(payload),
             )
-        except ActionError:
+        except ActionError as exc:
             if not comments:
                 raise
             # Inline placement can fail (for example a line outside the diff
-            # hunks); the review body itself must still post.
+            # hunks); the review body itself must still post — but never
+            # silently.
+            print(
+                f"warning: inline comments were rejected and dropped "
+                f"({len(comments)} comment(s)): {redact(str(exc))}"
+            )
             fallback = {"event": "COMMENT", "body": body, "commit_id": commit_id}
             raw = self._gh(
                 "api",

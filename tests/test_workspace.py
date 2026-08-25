@@ -71,3 +71,40 @@ def test_ranged_read_accepts_digit_strings(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
     result = dispatch_tool(tmp_path, "read_file", {"path": "a.txt", "start_line": "2"})
     assert result.startswith("[lines 2-3 of 3]")
+
+
+def test_ranged_read_reports_only_delivered_lines_when_byte_truncated(
+    tmp_path: Path,
+) -> None:
+    from or_pr_review.workspace import MAX_READ_BYTES
+
+    line = "x" * 199 + "\n"  # 200 bytes per line
+    total_lines = 500
+    (tmp_path / "big.txt").write_text(line * total_lines, encoding="utf-8", newline="\n")
+    result = tool_read_file(tmp_path, "big.txt", start_line=1, max_lines=total_lines)
+    delivered = MAX_READ_BYTES // 200
+    assert result.startswith(f"[lines 1-{delivered} of {total_lines}]")
+    assert f"start_line={delivered + 1}" in result
+    assert f"1-{total_lines} of" not in result  # never claim undelivered lines
+
+
+def test_bad_int_arguments_are_tool_errors_not_crashes(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    # These pass isdigit()-style pre-checks but make int() raise; they must
+    # come back as tool error observations, never exceptions.
+    for bad in ("--3", "①", "1.5", "٣٣x"):
+        result = dispatch_tool(tmp_path, "read_file", {"path": "a.txt", "start_line": bad})
+        assert result.startswith("error:"), bad
+
+
+def test_unexpected_tool_exception_becomes_error_observation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import or_pr_review.workspace as ws
+
+    def boom(*_args: object, **_kwargs: object) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ws, "tool_read_file", boom)
+    result = dispatch_tool(tmp_path, "read_file", {"path": "a.txt"})
+    assert result.startswith("error: tool 'read_file' failed: RuntimeError")

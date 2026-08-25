@@ -23,7 +23,12 @@ from dataclasses import dataclass, replace
 
 from or_pr_review.errors import ActionError
 from or_pr_review.merge import MergedIssue, neutralize_mentions
-from or_pr_review.schema import SEVERITIES, Resolution, valid_review_path
+from or_pr_review.schema import (
+    RESOLUTION_STATUSES,
+    SEVERITIES,
+    Resolution,
+    valid_review_path,
+)
 
 LEDGER_VERSION = 1
 LEDGER_PREFIX = "<!-- openrouter-review-ledger:v1:"
@@ -40,10 +45,14 @@ MAX_REPLY_CHARS = 2_000
 MAX_REPLIES_BYTES = 16_000
 
 _FINDING_ID_RE = re.compile(r"^r\d{1,3}-\d{1,3}$")
+_GENERATION_RE = re.compile(r"^[0-9a-f]{0,12}$")
 _LEDGER_RE = re.compile(
     re.escape(LEDGER_PREFIX) + r"([A-Za-z0-9+/=]+)" + re.escape(LEDGER_SUFFIX)
 )
-FINDING_MARKER_RE = re.compile(r"<!-- or-finding:(r\d{1,3}-\d{1,3}) -->")
+# Markers are generation-scoped: finding ids restart at r1-1 whenever the loop
+# resets, so replies to an old generation's r1-1 must never be attributed to a
+# new finding that reuses the id.
+FINDING_MARKER_RE = re.compile(r"<!-- or-finding:([0-9a-f]{12}):(r\d{1,3}-\d{1,3}) -->")
 
 _STATUS_ICONS = {
     "fixed": "✅",
@@ -55,8 +64,9 @@ _STATUS_ICONS = {
 _SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}
 # Conservative cross-lane merge: a higher rank always wins, so a finding is
 # `fixed` only when every lane that resolved it says fixed, and any dispute
-# settles it.
-_RESOLUTION_RANK = {"fixed": 0, "not_fixed": 1, "fixed_incorrectly": 2, "disputed": 3}
+# settles it. Derived from RESOLUTION_STATUSES so a new status can never pass
+# parsing yet KeyError here.
+_RESOLUTION_RANK = {status: rank for rank, status in enumerate(RESOLUTION_STATUSES)}
 
 
 @dataclass(frozen=True)
@@ -76,6 +86,9 @@ class Ledger:
     round_number: int
     findings: tuple[LedgerFinding, ...]
     reviewed_sha: str = ""
+    # 12-hex token minted at the loop's initial round; inline finding markers
+    # carry it so replies pair only within their own loop generation.
+    generation: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +98,7 @@ class LoopState:
     mode: str  # initial | verify
     round_number: int
     prior_findings: tuple[LedgerFinding, ...] = ()
+    generation: str = ""
 
     @property
     def open_prior(self) -> tuple[LedgerFinding, ...]:
@@ -118,9 +132,9 @@ def decide_loop_state(
     return "initial", 1
 
 
-def finding_marker(finding_id: str) -> str:
+def finding_marker(finding_id: str, generation: str) -> str:
     """Invisible marker tying an inline comment to a ledger finding id."""
-    return f"<!-- or-finding:{finding_id} -->"
+    return f"<!-- or-finding:{generation}:{finding_id} -->"
 
 
 def merge_resolutions(
@@ -271,6 +285,7 @@ def _encode(
         "repo": repo,
         "pr": pr_number,
         "sha": ledger.reviewed_sha,
+        "gen": ledger.generation,
         "round": ledger.round_number,
         "findings": [
             {
@@ -339,6 +354,9 @@ def _decode(token: str, *, repo: str, pr_number: int) -> Ledger | None:
     sha = payload.get("sha")
     if not isinstance(sha, str) or (sha != "" and not re.fullmatch(r"[0-9a-f]{40}", sha)):
         return None
+    generation = payload.get("gen", "")
+    if not isinstance(generation, str) or not _GENERATION_RE.fullmatch(generation):
+        return None
     round_number = payload.get("round")
     raw_findings = payload.get("findings")
     if (
@@ -355,7 +373,12 @@ def _decode(token: str, *, repo: str, pr_number: int) -> Ledger | None:
         if finding is None:
             return None
         findings.append(finding)
-    return Ledger(round_number=round_number, findings=tuple(findings), reviewed_sha=sha)
+    return Ledger(
+        round_number=round_number,
+        findings=tuple(findings),
+        reviewed_sha=sha,
+        generation=generation,
+    )
 
 
 def _decode_finding(item: object) -> LedgerFinding | None:
@@ -405,22 +428,38 @@ def render_agent_context(
     finding_replies: list[tuple[str, str, str]],
     issue_comments: list[tuple[str, str]],
 ) -> str:
-    """Render comment-thread replies and PR comments into a bounded prompt block."""
-    lines: list[str] = []
+    """Render comment-thread replies and PR comments into a bounded prompt block.
+
+    Finding replies are the adjudication signal, so they get the byte budget
+    first; issue comments fill what remains. Both clip from the FRONT
+    (dropping the oldest entries) so overflow never evicts the newest reply.
+    """
+    reply_lines: list[str] = []
     for finding_id, login, body in finding_replies:
-        lines.append(f"Reply to finding {finding_id} (from {login}):")
-        lines.append(_clip_reply(body))
-        lines.append("")
+        reply_lines.append(f"Reply to finding {finding_id} (from {login}):")
+        reply_lines.append(_clip_reply(body))
+        reply_lines.append("")
+    comment_lines: list[str] = []
     for login, body in issue_comments:
-        lines.append(f"PR comment (from {login}):")
-        lines.append(_clip_reply(body))
-        lines.append("")
-    text = "\n".join(lines).strip()
+        comment_lines.append(f"PR comment (from {login}):")
+        comment_lines.append(_clip_reply(body))
+        comment_lines.append("")
+    reply_text = _clip_tail("\n".join(reply_lines).strip(), MAX_REPLIES_BYTES)
+    remaining = MAX_REPLIES_BYTES - len(reply_text.encode("utf-8"))
+    comment_text = _clip_tail("\n".join(comment_lines).strip(), max(0, remaining))
+    parts = [part for part in (reply_text, comment_text) if part]
+    return "\n\n".join(parts)
+
+
+def _clip_tail(text: str, max_bytes: int) -> str:
+    """Keep the newest (trailing) portion of an oldest-first block."""
+    if max_bytes <= 0:
+        return ""
     encoded = text.encode("utf-8")
-    if len(encoded) > MAX_REPLIES_BYTES:
-        text = encoded[:MAX_REPLIES_BYTES].decode("utf-8", errors="ignore")
-        text += "\n…[additional replies omitted]"
-    return text
+    if len(encoded) <= max_bytes:
+        return text
+    clipped = encoded[-max_bytes:].decode("utf-8", errors="ignore")
+    return "…[older entries omitted]\n" + clipped
 
 
 def _clip_reply(body: str) -> str:
@@ -435,5 +474,6 @@ def _resolution_line(finding: LedgerFinding, status: str, note: str) -> str:
     label = status.replace("_", " ")
     text = f"- {icon} `{finding.id}` {label} — **{neutralize_mentions(finding.title)}**"
     if note:
-        text += f": {neutralize_mentions(note)}"
+        clipped = note[:400] + ("…" if len(note) > 400 else "")
+        text += f": {neutralize_mentions(clipped)}"
     return text

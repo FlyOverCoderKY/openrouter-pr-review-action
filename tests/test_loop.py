@@ -208,3 +208,32 @@ def test_render_agent_context_clips_long_replies() -> None:
     assert "Reply to finding r1-1 (from dev):" in text
     assert "…[clipped]" in text
     assert "PR comment (from dev):" in text
+
+
+def test_render_agent_context_overflow_keeps_newest() -> None:
+    replies = [
+        ("r1-1", "dev", "OLD reply " + "x" * 3000),
+        ("r1-2", "dev", "NEWEST critical reply"),
+    ]
+    comments = [("dev", f"comment {n} " + "y" * 1900) for n in range(20)]
+    text = render_agent_context(replies, comments)
+    # Finding replies get the budget first; issue-comment overflow drops the
+    # OLDEST entries, never the newest.
+    assert "NEWEST critical reply" in text
+    assert "comment 19 " in text
+    assert "comment 0 " not in text
+    assert "…[older entries omitted]" in text
+    assert len(text.encode("utf-8")) <= 16_000 + 200
+
+
+def test_ledger_generation_roundtrip() -> None:
+    ledger = Ledger(
+        round_number=1,
+        findings=(_finding(),),
+        reviewed_sha="a" * 40,
+        generation="1234567890ab",
+    )
+    marker = encode_ledger(ledger, repo=REPO, pr_number=7)
+    decoded = extract_ledger(marker, repo=REPO, pr_number=7)
+    assert decoded is not None
+    assert decoded.generation == "1234567890ab"

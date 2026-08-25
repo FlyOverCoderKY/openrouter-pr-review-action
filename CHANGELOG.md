@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 — 2026-08-25
 
 Loop-protocol hardening toward Grok parity — first changesets of the merged parity plan in `docs/pr-review-harness-independent-review.md`.
 

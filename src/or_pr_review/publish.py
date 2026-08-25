@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from or_pr_review.collect import CollectedReview
-from or_pr_review.merge import MergedIssue, format_issue_block
+from or_pr_review.merge import MergedIssue, format_issue_block, neutralize_mentions
 from or_pr_review.schema import LaneResult
 
-MAX_REVIEW_CHARS = 60_000
+# GitHub caps comment bodies at 65,536 characters; stay under it in bytes and
+# continue long findings lists in follow-up comments instead of dropping them.
+MAX_REVIEW_BYTES = 60_000
+TARGET_REVIEW_BYTES = 58_000
+_CONTINUED_HEADING = "## OpenRouter pull-request review — continued"
 
 
 def decide_verdict(
@@ -49,6 +53,32 @@ def render_review(
     reviewed_sha: str | None = None,
     extra_notices: list[str] | None = None,
 ) -> str:
+    """Single-body rendering; the first part of render_review_parts."""
+    return render_review_parts(
+        collected=collected,
+        lanes=lanes,
+        issues=issues,
+        verdict=verdict,
+        run_url=run_url,
+        judge_note=judge_note,
+        reviewed_sha=reviewed_sha,
+        extra_notices=extra_notices,
+    )[0]
+
+
+def render_review_parts(
+    *,
+    collected: CollectedReview,
+    lanes: list[LaneResult],
+    issues: list[MergedIssue],
+    verdict: str,
+    run_url: str = "",
+    judge_note: str = "",
+    reviewed_sha: str | None = None,
+    extra_notices: list[str] | None = None,
+) -> list[str]:
+    """The review body plus continuation-comment bodies for long findings
+    lists, so nothing is dropped to fit GitHub's body limit."""
     lane_lines = []
     for lane in lanes:
         if lane.ok:
@@ -67,7 +97,10 @@ def render_review(
                 extra += ", salvaged finish"
             lane_lines.append(f"- `{lane.model}`: ok ({extra})")
         else:
-            lane_lines.append(f"- `{lane.model}`: failed-open — {lane.error or 'unknown error'}")
+            lane_lines.append(
+                f"- `{lane.model}`: failed-open — "
+                f"{neutralize_mentions(lane.error or 'unknown error')}"
+            )
 
     header = [
         "## OpenRouter pull-request review",
@@ -103,22 +136,42 @@ def render_review(
     for notice in extra_notices or []:
         header.extend(["> [!WARNING]", f"> {notice}", ""])
 
-    if issues:
-        header.append("### Findings")
-        header.append("")
-        for index, issue in enumerate(issues, start=1):
-            header.append(format_issue_block(index, issue))
-            header.append("")
-    else:
-        header.append("No structured findings from the successful lane(s).")
-        header.append("")
+    if not issues:
+        lines = [*header, "No structured findings from the successful lane(s).", ""]
+        if run_url:
+            lines.extend([f"[Workflow run]({run_url})", ""])
+        return [_finalize(lines)]
 
-    if run_url:
-        header.extend([f"[Workflow run]({run_url})", ""])
+    header.extend(["### Findings", ""])
+    part_lines: list[list[str]] = []
+    current = header
+    prefix_len = len(current)
+    for index, issue in enumerate(issues, start=1):
+        block = [format_issue_block(index, issue), ""]
+        candidate = "\n".join([*current, *block])
+        if len(candidate.encode("utf-8")) > TARGET_REVIEW_BYTES and len(current) > prefix_len:
+            part_lines.append(current)
+            current = [_CONTINUED_HEADING, "", "### Findings (continued)", ""]
+            prefix_len = len(current)
+        current.extend(block)
+    part_lines.append(current)
 
-    text = "\n".join(header).rstrip() + "\n"
-    if len(text) > MAX_REVIEW_CHARS:
-        text = text[: MAX_REVIEW_CHARS - 80].rstrip() + "\n\n[review body truncated]\n"
+    total = len(part_lines)
+    bodies: list[str] = []
+    for number, lines in enumerate(part_lines, start=1):
+        if total > 1:
+            lines = [*lines, f"_Part {number} of {total}; all findings are preserved._", ""]
+        if number == total and run_url:
+            lines = [*lines, f"[Workflow run]({run_url})", ""]
+        bodies.append(_finalize(lines))
+    return bodies
+
+
+def _finalize(lines: list[str]) -> str:
+    text = "\n".join(lines).rstrip() + "\n"
+    if len(text.encode("utf-8")) > MAX_REVIEW_BYTES:
+        clipped = text.encode("utf-8")[: MAX_REVIEW_BYTES - 80].decode("utf-8", errors="ignore")
+        text = clipped.rstrip() + "\n\n[review body truncated]\n"
     return text
 
 
@@ -128,7 +181,7 @@ def render_incomplete(*, stage: str, reason: str, run_url: str = "") -> str:
         "",
         f"The action stopped during **{stage}**.",
         "",
-        reason,
+        neutralize_mentions(reason),
         "",
     ]
     if run_url:

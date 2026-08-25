@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
+from pathlib import PurePosixPath
 from typing import Any
 
 from or_pr_review.errors import LaneError, SchemaError
@@ -102,6 +103,22 @@ class LaneResult:
         }
 
 
+def valid_review_path(value: str) -> bool:
+    """A safe repository-relative path: no traversal, backslashes, backticks,
+    control characters, or absolute paths. Mirrors the sibling Grok harness."""
+    path = value.strip()
+    if (
+        not path
+        or len(path) > MAX_FILE
+        or "\\" in path
+        or "`" in path
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+    ):
+        return False
+    parsed = PurePosixPath(path)
+    return not parsed.is_absolute() and all(part not in {"", ".", ".."} for part in parsed.parts)
+
+
 def _as_optional_str(value: object) -> str | None:
     if value is None:
         return None
@@ -139,8 +156,10 @@ def parse_finding(raw: object, model_id: str) -> Finding:
     if not isinstance(severity, str) or severity.strip().lower() not in SEVERITIES:
         raise LaneError(f"finding severity must be one of {', '.join(SEVERITIES)}")
     path = _as_optional_str(raw.get("file") if "file" in raw else raw.get("path"))
-    if path and len(path) > MAX_FILE:
-        path = path[:MAX_FILE]
+    if path and not valid_review_path(path):
+        # Fail-open: keep the finding, drop the unsafe path (traversal,
+        # backticks, control characters, absolute or oversized paths).
+        path = None
     return Finding(
         title=title.strip()[:MAX_TITLE],
         body=body.strip()[:MAX_BODY],

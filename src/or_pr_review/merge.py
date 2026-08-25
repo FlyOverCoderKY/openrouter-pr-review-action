@@ -11,6 +11,11 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 _SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}
 
 
+def neutralize_mentions(value: str) -> str:
+    """Stop model-authored text from pinging GitHub users or teams."""
+    return value.replace("@", "@\u200b")
+
+
 @dataclass
 class MergedIssue:
     title: str
@@ -21,7 +26,7 @@ class MergedIssue:
     models: list[str] = field(default_factory=list)
 
     def heading(self, number: int) -> str:
-        return f"Issue {number} - {self.title} ({identified_by(self.models)})"
+        return f"Issue {number} - {neutralize_mentions(self.title)} ({identified_by(self.models)})"
 
 
 def identified_by(models: list[str]) -> str:
@@ -43,7 +48,7 @@ def format_issue_block(number: int, issue: MergedIssue) -> str:
         parts.append(location)
     parts.append(f"Severity: {issue.severity}")
     parts.append("")
-    parts.append(issue.body.rstrip())
+    parts.append(neutralize_mentions(issue.body.rstrip()))
     return "\n".join(parts).rstrip() + "\n"
 
 

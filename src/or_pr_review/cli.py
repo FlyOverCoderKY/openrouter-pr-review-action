@@ -36,7 +36,7 @@ from or_pr_review.publish import (
     decide_verdict,
     fail_on_should_fail,
     render_incomplete,
-    render_review,
+    render_review_parts,
 )
 from or_pr_review.redaction import redact
 from or_pr_review.schema import LaneResult, failed_lane, parse_lane_artifact
@@ -352,7 +352,7 @@ def _finish(
         fallback=collected.plan.fallback_notice is not None,
         stale=stale_notice is not None,
     )
-    body = render_review(
+    bodies = render_review_parts(
         collected=collected,
         lanes=lanes,
         issues=issues,
@@ -364,7 +364,7 @@ def _finish(
     )
     review_url = ""
     try:
-        posted = github.create_review(collected.pr_number, body, reviewed_sha)
+        posted = github.create_review(collected.pr_number, bodies[0], reviewed_sha)
         html = posted.get("html_url")
         review_url = html if isinstance(html, str) else ""
     except ActionError as exc:
@@ -374,6 +374,12 @@ def _finish(
             render_incomplete(stage="post-review", reason=redact(str(exc)), run_url=env.get("RUN_URL") or ""),
         )
         raise ActionError(f"failed to post the GitHub review: {exc}") from exc
+
+    for continuation in bodies[1:]:
+        try:
+            github.create_issue_comment(collected.pr_number, continuation)
+        except ActionError as exc:
+            print(f"warning: could not post a continuation comment: {redact(str(exc))}")
 
     _maybe_status(
         env,

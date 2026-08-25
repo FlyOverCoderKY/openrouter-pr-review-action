@@ -730,6 +730,71 @@ def test_stale_head_marks_review_partial(tmp_path: Path, monkeypatch: pytest.Mon
     assert "verdict=partial" in out
 
 
+def test_long_findings_lists_post_continuation_comments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+
+    reviews: list[str] = []
+    comments: list[str] = []
+
+    class DummyGitHub:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+            reviews.append(body)
+            return {"html_url": "https://example.test/review"}
+
+        def create_issue_comment(self, number: int, body: str) -> dict[str, object]:
+            comments.append(body)
+            return {"html_url": "https://example.test/comment"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    findings = [
+        {
+            "title": f"Finding number {n}",
+            "body": "y" * 6000,
+            "severity": "bug",
+            "file": "src/api.py",
+            "line": n,
+            "model_id": "x-ai/grok-4.6",
+        }
+        for n in range(1, 21)
+    ]
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": findings,
+                "error": None,
+                "head_sha": "a" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert main(["judge"], env) == 0
+    assert len(reviews) == 1
+    assert comments, "long findings lists must continue in comments, not truncate"
+    joined = "\n".join(reviews + comments)
+    for n in range(1, 21):
+        assert f"Finding number {n} " in joined
+
+
 def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from or_pr_review import cli as cli_mod
 

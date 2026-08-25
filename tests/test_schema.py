@@ -135,3 +135,20 @@ def test_lane_artifact_happy_path() -> None:
     assert result.ok
     assert result.findings[0].title == "Leak"
     assert result.elapsed_ms == 1200
+
+
+def test_unsafe_finding_paths_are_dropped_not_fatal() -> None:
+    from or_pr_review.schema import parse_finding
+
+    for bad in ("../etc/passwd", "a`b.py", "/abs/path.py", "dir\\file.py", "a\x00b"):
+        finding = parse_finding(
+            {"title": "t", "body": "b", "severity": "bug", "file": bad, "line": 3},
+            "x-ai/grok-4.6",
+        )
+        assert finding.file is None, bad
+        assert finding.title == "t"
+    ok = parse_finding(
+        {"title": "t", "body": "b", "severity": "bug", "file": "src/app.py", "line": 1},
+        "x-ai/grok-4.6",
+    )
+    assert ok.file == "src/app.py"

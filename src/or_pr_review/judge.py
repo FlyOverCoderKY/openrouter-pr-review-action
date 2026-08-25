@@ -15,11 +15,11 @@ from or_pr_review.merge import MergedIssue
 from or_pr_review.redaction import redact
 from or_pr_review.schema import (
     MAX_BODY,
-    MAX_FILE,
     MAX_FINDINGS,
     MAX_TITLE,
     SEVERITIES,
     extract_json_object,
+    valid_review_path,
 )
 
 # Cheapest/fastest thinking level Gemini 3.1 Flash Lite documents (minimal/off).
@@ -132,8 +132,8 @@ def _parse_one_issue(raw: object, *, allowed: set[str]) -> MergedIssue:
     if file_value is not None and not isinstance(file_value, str):
         raise SchemaError("judge issue file must be a string or null")
     path = file_value.strip() if isinstance(file_value, str) and file_value.strip() else None
-    if path and len(path) > MAX_FILE:
-        path = path[:MAX_FILE]
+    if path and not valid_review_path(path):
+        path = None
     line = raw.get("line")
     if line is None or line == "":
         line_n = None

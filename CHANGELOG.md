@@ -1,9 +1,10 @@
 # Changelog
 
-## 0.1.0 — 2026-08-24
+## 1.0.0 — 2026-08-24
 
 Initial public v1.
 
+- One-lane Grok 4.6 live smoke on PR #2 posted a real `issues` review with the judge skipped.
 - OpenRouter-only PR review action with a custom chat-completions harness and read-only tools (`read_file`, `grep`, `list_dir`) against an inert checkout of the reviewed commit.
 - Default review lane: `x-ai/grok-4.6` (verified live on OpenRouter).
 - `models` is a comma-separated slug list; length is the lane count; hard cap of 4.

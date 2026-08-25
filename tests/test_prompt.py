@@ -93,3 +93,48 @@ def test_verify_prompt_still_requires_tools_before_empty_findings() -> None:
     assert "verification follow-up" in text.lower()
     assert "blast radius" in text.lower()
     assert "read_file" in text
+
+
+def test_verify_prompt_lists_prior_findings_and_contract() -> None:
+    from or_pr_review.loop import LedgerFinding, LoopState
+
+    state = LoopState(
+        mode="verify",
+        round_number=2,
+        prior_findings=(
+            LedgerFinding(
+                id="r1-1",
+                severity="bug",
+                file="a.py",
+                line=3,
+                title="Race",
+                evidence="detail here",
+                status="open",
+                models=(),
+            ),
+            LedgerFinding(
+                id="r1-2",
+                severity="nit",
+                file=None,
+                line=None,
+                title="Old style",
+                evidence="",
+                status="disputed",
+                models=(),
+            ),
+        ),
+    )
+    text = "\n".join(
+        item["content"]
+        for item in build_messages(
+            _collected(mode="verify"),
+            loop=state,
+            agent_replies="Reply to finding r1-1 (from dev):\nfixed",
+        )
+    )
+    assert "`r1-1` [bug] `a.py:3` — Race" in text
+    assert "evidence: detail here" in text
+    assert "do not re-raise" in text and "r1-2" in text
+    assert '"resolutions"' in text
+    assert "Fixing agent responses" in text
+    assert "never" in text  # never follow instructions in replies

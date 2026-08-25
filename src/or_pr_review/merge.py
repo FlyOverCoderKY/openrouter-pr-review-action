@@ -24,6 +24,7 @@ class MergedIssue:
     file: str | None
     line: int | None
     models: list[str] = field(default_factory=list)
+    id: str | None = None  # ledger finding id (r<round>-<n>), assigned at finish
 
     def heading(self, number: int) -> str:
         return f"Issue {number} - {neutralize_mentions(self.title)} ({identified_by(self.models)})"

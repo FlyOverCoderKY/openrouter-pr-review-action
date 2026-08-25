@@ -106,6 +106,13 @@ inputs:
     description: "Directory of lane-N.json artifacts (role=judge) or write target (role=lane)."
     required: false
     default: ""
+  bot_login:
+    description: >-
+      GitHub login this action posts reviews as. Review-loop ledger state is
+      only trusted from reviews authored by this identity. Change it when
+      github_token is a PAT or GitHub App token.
+    required: false
+    default: "github-actions[bot]"
   # Reserved unused hook. v1 ignores this and uses the same review prompt
   # on every lane. A later persona input can land here without rewriting
   # the setup / lane / judge layout. A future single-persona run should
@@ -122,11 +129,14 @@ outputs:
     description: "Review verdict: clean | issues | partial | error"
     value: ${{ steps.run.outputs.verdict }}
   issue_count:
-    description: "Merged finding count after the judge."
+    description: "Open findings after this round (carried-over plus new)."
     value: ${{ steps.run.outputs.issue_count }}
   bug_count:
-    description: "Merged bug-severity finding count."
+    description: "Open bug-severity findings after this round."
     value: ${{ steps.run.outputs.bug_count }}
+  round:
+    description: "Review-loop round number this run performed."
+    value: ${{ steps.run.outputs.round }}
   review_url:
     description: "URL of the posted GitHub review or status comment."
     value: ${{ steps.run.outputs.review_url }}
@@ -188,6 +198,7 @@ runs:
         LANE_INDEX: ${{ inputs.lane_index }}
         LANE_MODEL: ${{ inputs.lane_model }}
         LANE_RESULTS_DIR: ${{ inputs.lane_results_dir }}
+        BOT_LOGIN: ${{ inputs.bot_login }}
         PERSONA: ${{ inputs.persona }}
         WORK: ${{ steps.dirs.outputs.work }}
         SOURCE_WORKSPACE: ${{ github.workspace }}

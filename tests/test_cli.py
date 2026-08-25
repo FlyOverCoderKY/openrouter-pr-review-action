@@ -526,6 +526,7 @@ def test_lane_keeps_matrix_index_when_models_is_single_slug(
                 error=None,
             ),
             None,
+            None,
         ),
     )
     lane_dir = tmp_path / "lanes"
@@ -620,6 +621,7 @@ def test_all_keeps_duplicate_model_lane_results(
         env: dict[str, str],
         lanes: list[LaneResult],
         collected: CollectedReview | None = None,
+        **_kwargs: object,
     ) -> int:
         captured["lanes"] = lanes
         return 0
@@ -631,7 +633,13 @@ def test_all_keeps_duplicate_model_lane_results(
     monkeypatch.setattr(cli_mod, "_invoke_lane", fake_invoke)
     monkeypatch.setattr(cli_mod, "_finish", fake_finish)
 
-    env = _base_env(tmp_path, MODELS="x-ai/grok-4.6,x-ai/grok-4.6")
+    env = _base_env(
+        tmp_path,
+        MODELS="x-ai/grok-4.6,x-ai/grok-4.6",
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
     assert main(["all"], env) == 0
     lanes = captured["lanes"]
     assert len(lanes) == 2
@@ -855,6 +863,229 @@ def test_initial_coverage_count_mismatch_posts_note(
     assert "claims 2 finding(s)" in posted[0]
     out = (tmp_path / "out.txt").read_text(encoding="utf-8")
     assert "verdict=clean" in out
+
+
+def _prior_ledger_marker(repo: str) -> str:
+    from or_pr_review.loop import Ledger, LedgerFinding, encode_ledger
+
+    prior = Ledger(
+        round_number=1,
+        findings=(
+            LedgerFinding(
+                id="r1-1",
+                severity="bug",
+                file="src/api.py",
+                line=42,
+                title="Missing auth check",
+                evidence="Unauthenticated POST is accepted",
+                status="open",
+                models=("x-ai/grok-4.6",),
+            ),
+        ),
+        reviewed_sha="b" * 40,
+    )
+    return encode_ledger(prior, repo=repo, pr_number=1)
+
+
+class _LoopGitHub:
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+        self.posted: list[str] = []
+        self.comments: list[list[dict]] = []
+
+    def list_bot_review_bodies(self, number: int, bot_login: str) -> list[str]:
+        assert bot_login == "github-actions[bot]"
+        return [f"## OpenRouter pull-request review\n{self.marker}\n"]
+
+    def list_finding_replies(self, number: int) -> list[tuple[str, str, str]]:
+        return [("r1-1", "dev", "added the check in abc123")]
+
+    def list_recent_issue_comments(self, number: int, limit: int = 30) -> list[tuple[str, str]]:
+        return []
+
+    def pr_view(self, number: int) -> dict[str, object]:
+        return {"headRefOid": "a" * 40}
+
+    def create_review(
+        self,
+        number: int,
+        body: str,
+        commit_id: str,
+        comments: list[dict] | None = None,
+    ) -> dict[str, object]:
+        self.posted.append(body)
+        self.comments.append(comments or [])
+        return {"html_url": "https://example.test/review"}
+
+
+def _verify_env(tmp_path: Path, lane_dir: Path, repo: str) -> dict[str, str]:
+    return _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY=repo,
+        REVIEW_MODE="verify",
+    )
+
+
+def test_verify_round_folds_ledger_and_updates_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import extract_ledger
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+                "resolutions": [{"id": "r1-1", "status": "fixed", "note": "check added"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["judge"], _verify_env(tmp_path, lane_dir, repo)) == 0
+    body = github.posted[0]
+    assert "### Round 2 resolution" in body
+    assert "✅" in body and "r1-1" in body
+    updated = extract_ledger(body, repo=repo, pr_number=1)
+    assert updated is not None
+    assert updated.round_number == 2
+    assert updated.reviewed_sha == "a" * 40
+    assert updated.findings == ()
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=clean" in out
+    assert "round=2" in out
+    assert "issue_count=0" in out
+
+
+def test_verify_round_carries_unfixed_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import extract_ledger
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+                "resolutions": [
+                    {"id": "r1-1", "status": "not_fixed", "note": "still reachable"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["judge"], _verify_env(tmp_path, lane_dir, repo)) == 0
+    body = github.posted[0]
+    assert "❌" in body
+    updated = extract_ledger(body, repo=repo, pr_number=1)
+    assert updated is not None
+    assert [finding.id for finding in updated.findings] == ["r1-1"]
+    assert updated.findings[0].status == "open"
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=issues" in out
+    assert "issue_count=1" in out
+    assert "bug_count=1" in out
+
+
+def test_initial_round_embeds_marker_and_inline_comments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+    from or_pr_review.loop import extract_ledger
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    diff = "diff --git a/src/api.py b/src/api.py\n--- a/src/api.py\n+++ b/src/api.py\n"
+    collected = CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha="a" * 40,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        truncation=Truncation(diff, False, len(diff), len(diff), 300),
+        mode="initial",
+    )
+    github = _LoopGitHub("unused")
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [
+                    {
+                        "title": "Missing auth check",
+                        "body": "Unauthenticated POST",
+                        "severity": "bug",
+                        "file": "src/api.py",
+                        "line": 42,
+                        "model_id": "x-ai/grok-4.6",
+                    }
+                ],
+                "error": None,
+                "head_sha": "a" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _base_env(
+        tmp_path,
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY=repo,
+    )
+    assert main(["judge"], env) == 0
+    body = github.posted[0]
+    updated = extract_ledger(body, repo=repo, pr_number=1)
+    assert updated is not None
+    assert updated.round_number == 1
+    assert updated.findings[0].id == "r1-1"
+    assert updated.findings[0].evidence.startswith("Unauthenticated POST")
+    inline = github.comments[0]
+    assert len(inline) == 1
+    assert inline[0]["path"] == "src/api.py"
+    assert inline[0]["line"] == 42
+    assert "<!-- or-finding:r1-1 -->" in inline[0]["body"]
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "round=1" in out
+    assert "issue_count=1" in out
 
 
 def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from or_pr_review.collect import CollectedReview
+from or_pr_review.loop import finding_marker
 from or_pr_review.merge import MergedIssue, format_issue_block, neutralize_mentions
 from or_pr_review.schema import LaneResult
 
@@ -31,14 +34,28 @@ def decide_verdict(
     return "issues" if issues else "clean"
 
 
-def fail_on_should_fail(fail_on: str, issues: list[MergedIssue]) -> bool:
+def fail_on_should_fail(
+    fail_on: str,
+    issues: list[MergedIssue],
+    *,
+    open_issue_count: int | None = None,
+    open_bug_count: int | None = None,
+) -> bool:
+    """In verify rounds the open counts (carried plus new findings) drive the
+    policy, so an unfixed bug from an earlier round still fails fail_on=bugs."""
     policy = (fail_on or "never").strip().lower()
+    issue_count = len(issues) if open_issue_count is None else open_issue_count
+    bug_count = (
+        sum(1 for issue in issues if issue.severity == "bug")
+        if open_bug_count is None
+        else open_bug_count
+    )
     if policy == "never":
         return False
     if policy == "bugs":
-        return any(issue.severity == "bug" for issue in issues)
+        return bug_count > 0
     if policy == "any":
-        return bool(issues)
+        return issue_count > 0
     raise ValueError(f"fail_on must be never, bugs, or any; got {fail_on!r}")
 
 
@@ -52,6 +69,8 @@ def render_review(
     judge_note: str = "",
     reviewed_sha: str | None = None,
     extra_notices: list[str] | None = None,
+    hidden_marker: str | None = None,
+    round_lines: list[str] | None = None,
 ) -> str:
     """Single-body rendering; the first part of render_review_parts."""
     return render_review_parts(
@@ -63,6 +82,8 @@ def render_review(
         judge_note=judge_note,
         reviewed_sha=reviewed_sha,
         extra_notices=extra_notices,
+        hidden_marker=hidden_marker,
+        round_lines=round_lines,
     )[0]
 
 
@@ -76,9 +97,15 @@ def render_review_parts(
     judge_note: str = "",
     reviewed_sha: str | None = None,
     extra_notices: list[str] | None = None,
+    hidden_marker: str | None = None,
+    round_lines: list[str] | None = None,
 ) -> list[str]:
     """The review body plus continuation-comment bodies for long findings
-    lists, so nothing is dropped to fit GitHub's body limit."""
+    lists, so nothing is dropped to fit GitHub's body limit.
+
+    `hidden_marker` (the loop ledger) sits directly under the heading so it
+    can never be cut by body truncation; `round_lines` is the visible
+    verify-round resolution report."""
     lane_lines = []
     for lane in lanes:
         if lane.ok:
@@ -102,8 +129,10 @@ def render_review_parts(
                 f"{neutralize_mentions(lane.error or 'unknown error')}"
             )
 
-    header = [
-        "## OpenRouter pull-request review",
+    header = ["## OpenRouter pull-request review"]
+    if hidden_marker:
+        header.append(hidden_marker)
+    header += [
         "",
         f"**Verdict:** `{verdict}`",
         f"**Scope:** `{collected.plan.scope}` ({collected.plan.kind})",
@@ -121,6 +150,8 @@ def render_review_parts(
             "",
         ]
     )
+    if round_lines:
+        header.extend([*round_lines, ""])
     if collected.truncation.truncated and collected.truncation.notice:
         header.extend(
             [
@@ -173,6 +204,35 @@ def _finalize(lines: list[str]) -> str:
         clipped = text.encode("utf-8")[: MAX_REVIEW_BYTES - 80].decode("utf-8", errors="ignore")
         text = clipped.rstrip() + "\n\n[review body truncated]\n"
     return text
+
+
+def inline_review_comments(
+    issues: list[MergedIssue], *, allowed_paths: set[str]
+) -> list[dict[str, Any]]:
+    """Inline review comments for findings that anchor to a diff file.
+
+    Out-of-diff (blast-radius) findings stay body-only: GitHub rejects
+    review comments on paths outside the PR diff.
+    """
+    comments: list[dict[str, Any]] = []
+    for issue in issues:
+        if not issue.file or issue.line is None:
+            continue
+        if issue.file not in allowed_paths:
+            continue
+        marker = f"{finding_marker(issue.id)}\n" if issue.id else ""
+        comments.append(
+            {
+                "path": issue.file,
+                "line": issue.line,
+                "side": "RIGHT",
+                "body": (
+                    f"{marker}**{neutralize_mentions(issue.title)}** (`{issue.severity}`)\n\n"
+                    f"{neutralize_mentions(issue.body)}"
+                ),
+            }
+        )
+    return comments
 
 
 def render_incomplete(*, stage: str, reason: str, run_url: str = "") -> str:

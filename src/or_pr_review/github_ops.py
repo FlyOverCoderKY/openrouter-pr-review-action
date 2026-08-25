@@ -8,6 +8,7 @@ import subprocess
 from typing import Any
 
 from or_pr_review.errors import ActionError
+from or_pr_review.loop import FINDING_MARKER_RE
 from or_pr_review.redaction import redact
 
 STATUS_MARKER = "<!-- openrouter-pr-review-status -->"
@@ -100,6 +101,78 @@ class GitHub:
             f"repos/{self.repository}/commits/{sha}",
         )
 
+    def _paginated_list(self, endpoint: str, label: str) -> list[dict[str, Any]]:
+        raw = self._gh("api", "--paginate", "--slurp", endpoint)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ActionError(f"could not parse {label}") from exc
+        if not isinstance(payload, list):
+            return []
+        items = (
+            [item for page in payload for item in page]
+            if payload and all(isinstance(page, list) for page in payload)
+            else payload
+        )
+        return [item for item in items if isinstance(item, dict)]
+
+    def list_bot_review_bodies(self, number: int, bot_login: str) -> list[str]:
+        """Review bodies authored by the action's own identity, oldest first.
+
+        Only these bodies may carry loop-ledger state: any PR reviewer can
+        post a review, so bodies from other authors are untrusted and never
+        scanned.
+        """
+        reviews = self._paginated_list(
+            f"repos/{self.repository}/pulls/{number}/reviews", "reviews"
+        )
+        return [
+            body
+            for review in reviews
+            if _comment_login(review) == bot_login
+            and isinstance(body := review.get("body"), str)
+        ]
+
+    def list_finding_replies(self, number: int) -> list[tuple[str, str, str]]:
+        """(finding_id, login, body) for replies to the bot's inline comments."""
+        comments = self._paginated_list(
+            f"repos/{self.repository}/pulls/{number}/comments", "review comments"
+        )
+        finding_by_comment_id: dict[int, str] = {}
+        for comment in comments:
+            ident = comment.get("id")
+            body = comment.get("body")
+            if isinstance(ident, int) and isinstance(body, str):
+                match = FINDING_MARKER_RE.search(body)
+                if match:
+                    finding_by_comment_id[ident] = match.group(1)
+        replies: list[tuple[str, str, str]] = []
+        for comment in comments:
+            parent = comment.get("in_reply_to_id")
+            body = comment.get("body")
+            if not isinstance(parent, int) or not isinstance(body, str):
+                continue
+            finding_id = finding_by_comment_id.get(parent)
+            if finding_id is None or FINDING_MARKER_RE.search(body):
+                continue
+            replies.append((finding_id, _comment_login(comment), body))
+        return replies
+
+    def list_recent_issue_comments(
+        self, number: int, limit: int = 30
+    ) -> list[tuple[str, str]]:
+        """(login, body) for the newest PR conversation comments, oldest first."""
+        comments = self._paginated_list(
+            f"repos/{self.repository}/issues/{number}/comments", "issue comments"
+        )
+        recent: list[tuple[str, str]] = []
+        for comment in comments:
+            body = comment.get("body")
+            if not isinstance(body, str) or STATUS_MARKER in body:
+                continue
+            recent.append((_comment_login(comment), body))
+        return recent[-limit:]
+
     def list_issue_comments(self, number: int) -> list[dict[str, Any]]:
         raw = self._gh(
             "api",
@@ -135,15 +208,47 @@ class GitHub:
         )
         return _json_object(raw, "update comment")
 
-    def create_review(self, number: int, body: str, commit_id: str) -> dict[str, Any]:
-        raw = self._gh(
-            "api",
-            f"repos/{self.repository}/pulls/{number}/reviews",
-            "--input",
-            "-",
-            stdin=json.dumps({"event": "COMMENT", "body": body, "commit_id": commit_id}),
-        )
+    def create_review(
+        self,
+        number: int,
+        body: str,
+        commit_id: str,
+        comments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"event": "COMMENT", "body": body, "commit_id": commit_id}
+        if comments:
+            payload["comments"] = comments
+        try:
+            raw = self._gh(
+                "api",
+                f"repos/{self.repository}/pulls/{number}/reviews",
+                "--input",
+                "-",
+                stdin=json.dumps(payload),
+            )
+        except ActionError:
+            if not comments:
+                raise
+            # Inline placement can fail (for example a line outside the diff
+            # hunks); the review body itself must still post.
+            fallback = {"event": "COMMENT", "body": body, "commit_id": commit_id}
+            raw = self._gh(
+                "api",
+                f"repos/{self.repository}/pulls/{number}/reviews",
+                "--input",
+                "-",
+                stdin=json.dumps(fallback),
+            )
         return _json_object(raw, "create review")
+
+
+def _comment_login(item: dict[str, Any]) -> str:
+    user = item.get("user")
+    if isinstance(user, dict):
+        login = user.get("login")
+        if isinstance(login, str):
+            return login
+    return "unknown"
 
 
 def _json_object(raw: str, what: str) -> dict[str, Any]:

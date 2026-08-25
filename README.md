@@ -189,6 +189,7 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `review_mode` | `auto` | `auto` (opened = initial, synchronize = verify) \| `initial` \| `verify`. |
 | `effort` | _empty_ | Optional OpenRouter reasoning effort for **review lanes**. |
 | `max_tool_turns` | `50` | Read-only tool rounds against the inert checkout. `0` disables tools. First-pass default matches the sibling Grok `max_turns`. Follow-up jobs may pass `30`. |
+| `bot_login` | `github-actions[bot]` | Identity the action posts reviews as. Review-loop ledger state is only trusted from this login. Change it when `github_token` is a PAT or App token. |
 | `persona` | _empty_ | **Reserved, unused in v1.** Future single-persona runs should skip the judge. |
 
 ## Outputs
@@ -196,8 +197,9 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | Output | Meaning |
 | --- | --- |
 | `verdict` | `clean` \| `issues` \| `partial` \| `error` |
-| `issue_count` | Merged (or single-lane) finding count |
-| `bug_count` | Bug-severity count |
+| `issue_count` | Open findings after this round (carried-over plus new) |
+| `bug_count` | Open bug-severity findings after this round |
+| `round` | Review-loop round number this run performed |
 | `review_url` | Posted GitHub review |
 | `models_json` | Parsed slug array (`setup` / `all`) |
 | `matrix` | `[{index, model}, …]` for a GitHub Actions matrix |

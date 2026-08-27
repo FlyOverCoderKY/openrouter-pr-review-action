@@ -1,0 +1,63 @@
+# Bench results
+
+Recorded runs of the offline recall bench (see [README.md](README.md)).
+Numbers are means over the listed runs; lanes are nondeterministic, so
+compare means, not single runs. Costs are approximate, from OpenRouter
+usage at the listed provider's pricing on the run date.
+
+## 2026-08-27 — planted-mini, six models
+
+Fixture: `bench/fixtures/planted-mini` (11 labels: 2 bug / 4 risk / 5 nit),
+v1.2.2 exhaustive prompt (PR #7 branch), production effort (empty), 50 tool
+turns, 3 runs per model.
+
+| model | provider | recall | bug recall | precision | ~cost/review | mean time | lanes ok |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| moonshotai/kimi-k3 | Fireworks | **100%** | **100%** | 100% | ~$0.14 | ~95s | 2/3 ¹ |
+| x-ai/grok-4.6 | xAI | 97% | 83% | 100% | $0.049 | 68s | 3/3 |
+| z-ai/glm-5.3-flash | Z.ai | 97% | 83% | 97% | **$0.002** | 149s | 3/3 |
+| qwen/qwen3.8-27b | AkashML (bf16) | 91% | 67% | 94% | $0.034 | 197s | 3/3 |
+| google/gemini-3.7-flash | Google | 82% | 50% | 100% | $0.020 | **42s** | 3/3 |
+| nvidia/nemotron-3.5-lightning:free | free tier | 55% | 25% | 100% | $0 | 489s | 2/3 ² |
+
+¹ Third lane hit an upstream shared-pool rate limit (Fireworks' Kimi
+capacity across OpenRouter users), not a harness failure.
+² One timeout on the free route.
+
+**The tier discriminator** is label B1 (a stale dollar value that only
+falls to checking the figure against its cited source — the same class
+that decided the live side-by-side reviews): kimi 2/2, grok 2/3, glm 2/3,
+qwen 1/3, gemini 0/3, nemotron 0/3. The leaderboard is essentially a
+ranking of who does that verification work.
+
+**Roster take:** glm-5.3-flash delivers grok-tier recall at ~1/25th the
+cost (volume lane); kimi-k3 is the only model that has never missed a
+label (premium depth lane); grok-4.6 remains the incumbent benchmark.
+qwen3.8-27b is dominated by glm on every axis; gemini is fast and precise
+but misses the verification class; the free tier is a universality proof,
+not a reviewer.
+
+### Prompt A/B (same fixture, x-ai/grok-4.6, 3 runs each)
+
+The v1.2.2 exhaustive prompt vs the v1.2.1 prompt, the change PR #7 ships
+(measured before the fixture's custom_instructions de-leak, on the
+original 10 labels):
+
+| prompt | recall | bug recall | notes |
+| --- | --- | --- | --- |
+| v1.2.2 (recall port) | 100% (30/30) | 6/6 | caught B1 in every run |
+| v1.2.1 | 93% (28/30) | 4/6 | missed B1 in 2 of 3 runs |
+
+### GLM-5.3-flash provider shootout (same fixture, 3 runs each)
+
+GLM's wall time is its own 7-9K-token completions at ~55 tps, not the
+host. Pinning uses `--provider` (fallbacks disabled); check a provider's
+`structured_outputs` support before pinning — the schema-enforced
+finalization requires it.
+
+| provider | lanes ok | mean time | notes |
+| --- | --- | --- | --- |
+| Z.ai (default routing) | 3/3 | 149s | 50%-off pricing; recommended |
+| Together | 3/3 | 134s | ~10% faster at 2× price |
+| Novita | 1/3 | 176s | capacity 404s when pinned |
+| BaseTen | 0/3 | — | no structured outputs |

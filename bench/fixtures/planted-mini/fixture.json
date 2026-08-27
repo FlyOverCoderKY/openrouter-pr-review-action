@@ -1,0 +1,12 @@
+{
+  "title": "Register the 2027 HSA cap and add average_contribution",
+  "body": "Adds the 2027 HSA family cap (Rev. Proc. 2026-31), registers hsa-cap-2027 in the rule registry, and adds an average_contribution helper with tests.",
+  "pr_number": 1,
+  "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+  "base_ref": "main",
+  "head_ref": "hsa-2027-cap",
+  "custom_instructions": "On a calculation/logic diff, flag it if there is no unit test, or if the test only mirrors the new code with no citable source. A green test that only mirrors the new code does not count.",
+  "diff_file": "diff.patch",
+  "checkout_dir": "checkout",
+  "labels_file": "labels.json"
+}

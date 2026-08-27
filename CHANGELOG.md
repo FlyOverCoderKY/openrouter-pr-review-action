@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Recall, round two — informed by reading the sibling stack's actual source (xai-org/grok-build plus the sibling action's prompt): the CLI runs headless with the same three read-only tools and turn budget as this harness, so the sibling's recall advantage is promptcraft, and this release ports the three mechanisms the v1.2.1 sweep still lacked.
+
+- **Recall-over-precision framing with the loop rationale**: findings are consumed by a fixing agent that adjudicates and may dispute every finding, so borderline findings are cheap — the prompt now says so and forbids self-censoring, instead of leading with "do not invent issues".
+- **A numeric expectation anchor**: "a thorough first review of a large change may legitimately contain 15-30 findings; do not stop at a representative sample" — an expectation, where the 80-finding schema cap is only a ceiling.
+- **A multi-pass sweep protocol**: sweep every hunk in order asking what input, state, or timing makes it wrong; sweep again hunting what the first pass missed (removed behavior, broken callers, error paths, missing tests, misapplied references, overclaiming docs, mirror tests); repeat until a full sweep finds nothing new.
+- **Offline recall bench** (`python -m or_pr_review.bench`): replays a frozen review fixture through the lane locally — no GitHub, no live PR — and scores findings against curated golden labels (per-severity recall, precision, missed labels, unmatched-finding triage). Ships a committed planted-defect fixture (`bench/fixtures/planted-mini`: 10 labeled defects across bug/risk/nit, including a blast-radius plant outside the diff) plus `bench/capture.py` for capturing real PRs into gitignored local fixtures.
+
 ## 1.2.1 — 2026-08-27
 
 Recall parity with the sibling Grok action. On the first dense side-by-side PR (RetireGolden#325), the same model behind both harnesses reported 12 findings through Grok's scaffold and 1 through this one — same effort, same instructions. The lane found the biggest bug and stopped. Both changes below target that failure mode.

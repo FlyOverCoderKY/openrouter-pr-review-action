@@ -11,3 +11,6 @@ dist/
 build/
 .env
 .env.*
+
+# Real-PR bench fixtures contain private repository code
+bench/fixtures-local/

@@ -1,0 +1,76 @@
+diff --git a/calc.py b/calc.py
+index c8caa70..2b4d2ae 100644
+--- a/calc.py
++++ b/calc.py
+@@ -1,11 +1,15 @@
+ """Contribution calculators for the mini benefits engine."""
+ 
+ CAP_2026 = 8_300  # 2026 family HSA cap per Rev. Proc. 2025-19
++CAP_2027 = 8_300  # 2027 family HSA cap per Rev. Proc. 2026-31
+ 
+ 
+ def apply_cap(amount: int, year: int = 2026) -> int:
+-    """Clamp a contribution to the statutory cap for the plan year."""
+-    caps = {2026: CAP_2026}
++    """Clamp a contribution to the statutory cap for the plan year.
++
++    Handles every plan year from 2020 onward.
++    """
++    caps = {2026: CAP_2026, 2027: CAP_2027}
+     return min(amount, caps[year])
+ 
+ 
+@@ -17,6 +21,10 @@ def validate_amount(amount: int) -> None:
+ def contribution_total(amounts: list[int]) -> int:
+     total = 0
+     for amount in amounts:
+-        validate_amount(amount)
+         total += amount
+     return total
++
++
++def average_contribution(amounts: list[int]) -> float:
++    """Average per-source contribution for the year."""
++    return contribution_total(amounts) / len(amounts)
+diff --git a/rules.py b/rules.py
+index df5a643..86947ad 100644
+--- a/rules.py
++++ b/rules.py
+@@ -8,4 +8,12 @@ RULES = {
+         ],
+         "implemented_by": "calc.apply_cap",
+     },
++    "hsa-cap-2027-modelled": {
++        "statement": "2027 HSA family contributions are capped at the indexed amount.",
++        "authority": [
++            "Rev. Proc. 2026-31: for 2027 the annual limitation shall be",
++            "Rev. Proc. 2026-31: for 2027 the annual limitation shall be",
++        ],
++        "implemented_by": "calc.apply_cap",
++    },
+ }
+diff --git a/tests/test_calc.py b/tests/test_calc.py
+index 89e5156..1f124c5 100644
+--- a/tests/test_calc.py
++++ b/tests/test_calc.py
+@@ -1,10 +1,19 @@
+-from calc import apply_cap, contribution_total
++from calc import CAP_2027, apply_cap, average_contribution, contribution_total
+ 
+ 
+ def test_apply_cap_2026() -> None:
+     assert apply_cap(9_000) == 8_300
+ 
+ 
++def test_apply_cap_2027() -> None:
++    amount = 9_000
++    assert apply_cap(amount, 2027) == min(amount, CAP_2027)
++
++
++def test_average_contribution() -> None:
++    assert average_contribution([100, 300]) == 200.0
++
++
+ def test_contribution_total_rejects_negative() -> None:
+     try:
+         contribution_total([100, -5])

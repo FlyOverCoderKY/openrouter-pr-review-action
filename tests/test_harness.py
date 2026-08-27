@@ -26,6 +26,35 @@ def test_require_key_fail_closed() -> None:
         require_openrouter_key({})
 
 
+def test_run_lane_captures_provider_and_pins_routing(tmp_path: Path) -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        return {
+            "provider": "Baseten",
+            "choices": [{"message": {"content": '{"findings": []}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5},
+        }
+
+    result = run_lane(
+        model="z-ai/glm-5.3-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        provider_order=["baseten"],
+        chat=chat,
+    )
+    assert result.ok
+    assert result.provider == "Baseten"
+    assert payloads[0]["provider"] == {"order": ["baseten"], "allow_fallbacks": False}
+    # Round-trips through the lane artifact.
+    from or_pr_review.schema import parse_lane_artifact
+
+    assert parse_lane_artifact(result.to_dict()).provider == "Baseten"
+
+
 def test_lane_parses_structured_findings(tmp_path: Path) -> None:
     def chat(_payload: dict) -> dict:
         return {
@@ -442,6 +471,36 @@ def test_openrouter_chat_retries_transient_errors(monkeypatch: pytest.MonkeyPatc
     assert parsed == {"choices": []}
     assert attempts["n"] == 3
     assert sleeps == [1.0, 1.0]
+    assert stats["retries"] == 2
+
+
+def test_openrouter_chat_retries_mid_body_connection_drops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import http.client
+
+    from or_pr_review import harness
+
+    attempts = {"n": 0}
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            # A truncated chunked response raises from response.read(), not
+            # from urlopen — it is neither URLError nor HTTPError.
+            raise http.client.IncompleteRead(b"partial")
+        if attempts["n"] == 2:
+            raise ConnectionResetError("peer reset")
+        return _FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    stats: dict[str, int] = {}
+    parsed = harness.openrouter_chat(
+        "sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append, stats=stats
+    )
+    assert parsed == {"choices": []}
+    assert attempts["n"] == 3
     assert stats["retries"] == 2
 
 

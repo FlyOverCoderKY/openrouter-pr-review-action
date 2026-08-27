@@ -1,0 +1,12 @@
+{
+  "title": "Register the 2027 HSA cap and add average_contribution",
+  "body": "Adds the 2027 HSA family cap (Rev. Proc. 2026-31), registers hsa-cap-2027-modelled in the rule registry, and adds an average_contribution helper with tests.",
+  "pr_number": 1,
+  "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+  "base_ref": "main",
+  "head_ref": "hsa-2027-cap",
+  "custom_instructions": "",
+  "diff_file": "diff.patch",
+  "checkout_dir": "checkout",
+  "labels_file": "labels.json"
+}

@@ -137,6 +137,9 @@ class LaneResult:
     retries: int | None = None
     salvaged: bool = False
     head_sha: str | None = None
+    # The upstream provider OpenRouter routed to (last response wins) — a
+    # model slug can be served by several providers with different behavior.
+    provider: str | None = None
     resolutions: list[Resolution] = field(default_factory=list)
     coverage: list[tuple[str, int]] = field(default_factory=list)
 
@@ -156,6 +159,7 @@ class LaneResult:
             "retries": self.retries,
             "salvaged": self.salvaged,
             "head_sha": self.head_sha,
+            "provider": self.provider,
             "resolutions": [resolution.to_dict() for resolution in self.resolutions],
             "coverage": [
                 {"path": path, "findings": count} for path, count in self.coverage
@@ -455,6 +459,14 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         if isinstance(head_sha_value, str) and head_sha_value.strip()
         else None
     )
+    provider_value = payload.get("provider")
+    if provider_value is not None and not isinstance(provider_value, str):
+        raise SchemaError("lane artifact provider must be a string or null")
+    provider = (
+        provider_value.strip()[:100]
+        if isinstance(provider_value, str) and provider_value.strip()
+        else None
+    )
     try:
         resolutions = _parse_resolutions(payload.get("resolutions"), required=False)
         coverage = _parse_coverage(payload.get("coverage"), required=False)
@@ -475,6 +487,7 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         retries=_optional_int(payload.get("retries")),
         salvaged=salvaged,
         head_sha=head_sha,
+        provider=provider,
         resolutions=resolutions,
         coverage=coverage,
     )

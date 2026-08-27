@@ -126,6 +126,8 @@ def render_review_parts(
                 extra += f", {lane.retries} retried request(s)"
             if lane.salvaged:
                 extra += ", salvaged finish"
+            if lane.provider:
+                extra += f", via {lane.provider}"
             lane_lines.append(f"- `{lane.model}`: ok ({extra})")
         else:
             lane_lines.append(

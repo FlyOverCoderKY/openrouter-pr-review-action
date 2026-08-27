@@ -214,6 +214,10 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 
 CI on this repo does not need a live `OPENROUTER_API_KEY`.
 
+For measuring review recall against fixtures with known defects (which DOES
+spend tokens and needs `OPENROUTER_API_KEY`), see the offline bench in
+[bench/README.md](bench/README.md).
+
 ```bash
 python3 -m pip install -e '.[dev]'
 pytest

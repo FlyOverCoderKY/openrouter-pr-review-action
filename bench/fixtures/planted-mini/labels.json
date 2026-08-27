@@ -1,0 +1,142 @@
+[
+  {
+    "id": "B1",
+    "severity": "bug",
+    "file": "calc.py",
+    "title": "CAP_2027 reuses the 2026 dollar value with no sourced 2027 amount",
+    "keywords": [
+      "same (value )?as (the )?2026",
+      "identical to (the )?2026",
+      "not (actually )?indexed",
+      "reuses? the 2026",
+      "copies? the 2026",
+      "2027.{0,40}8[_,]?300",
+      "8[_,]?300.{0,40}2027"
+    ]
+  },
+  {
+    "id": "B2",
+    "severity": "bug",
+    "file": "calc.py",
+    "title": "apply_cap raises KeyError for any year outside 2026/2027",
+    "keywords": [
+      "KeyError",
+      "years? (outside|other than|before|not in)",
+      "any other year",
+      "unsupported year"
+    ]
+  },
+  {
+    "id": "R1",
+    "severity": "risk",
+    "file": "calc.py",
+    "title": "average_contribution divides by zero on an empty list",
+    "keywords": [
+      "ZeroDivision",
+      "divide[sd]? by zero",
+      "division by zero",
+      "empty (list|input|amounts)",
+      "len\\(amounts\\) (is|== ?)0"
+    ]
+  },
+  {
+    "id": "R2",
+    "severity": "risk",
+    "file": null,
+    "title": "validate_amount call removed; negative amounts now accepted",
+    "keywords": [
+      "validate_amount",
+      "negative amounts?",
+      "no longer validate[sd]?",
+      "validation (was )?removed"
+    ]
+  },
+  {
+    "id": "R3",
+    "severity": "risk",
+    "file": "tests/test_calc.py",
+    "title": "2027 cap test mirrors the implementation formula and cannot fail",
+    "keywords": [
+      "mirror",
+      "same formula",
+      "re-?implement",
+      "cannot fail",
+      "tautolog",
+      "min\\(amount, CAP_2027\\)"
+    ]
+  },
+  {
+    "id": "R4",
+    "severity": "risk",
+    "file": null,
+    "title": "docs/rules.md inventory does not list the new 2027 rule id",
+    "keywords": [
+      "rules\\.md",
+      "inventory",
+      "not (listed|in the (docs|table|inventory))",
+      "missing (from|row)",
+      "docs? (table|row) (was )?not updated"
+    ]
+  },
+  {
+    "id": "N1",
+    "severity": "nit",
+    "file": "rules.py",
+    "title": "The 2027 rule quotes the identical authority span twice",
+    "keywords": [
+      "duplicate[sd]?",
+      "twice",
+      "repeated (quote|citation|authority)",
+      "same (quote|citation|span|string) two"
+    ]
+  },
+  {
+    "id": "N2",
+    "severity": "nit",
+    "file": "rules.py",
+    "title": "New id uses 'modelled' while the existing style is 'modeled'",
+    "keywords": [
+      "modelled"
+    ]
+  },
+  {
+    "id": "N3",
+    "severity": "nit",
+    "file": "calc.py",
+    "title": "Docstring overclaims support for every plan year from 2020 onward",
+    "keywords": [
+      "overclaim",
+      "every plan year",
+      "2020 onward",
+      "claims? (to )?(handle|support)",
+      "docstring (says|claims|promises)"
+    ]
+  },
+  {
+    "id": "N4",
+    "severity": "nit",
+    "file": "rules.py",
+    "title": "Authority quote ends mid-sentence ('shall be') with no ellipsis",
+    "keywords": [
+      "mid-?sentence",
+      "truncated",
+      "cut (off|short)",
+      "ellipsis",
+      "incomplete (quote|sentence)",
+      "shall be['\"]?\\)?,? (ends|stops|is cut)"
+    ]
+  },
+  {
+    "id": "N5",
+    "severity": "nit",
+    "file": "rules.py",
+    "title": "2027 rule statement omits the actual dollar amount, unlike the 2026 entry",
+    "keywords": [
+      "omits the (numeric|actual|dollar)? ?cap",
+      "omits the cap amount",
+      "no (dollar|numeric) (amount|figure|cap)",
+      "statement (omits|lacks|does not (state|name))",
+      "unlike the 2026 entry"
+    ]
+  }
+]

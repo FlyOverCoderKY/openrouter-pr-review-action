@@ -125,5 +125,18 @@
       "incomplete (quote|sentence)",
       "shall be['\"]?\\)?,? (ends|stops|is cut)"
     ]
+  },
+  {
+    "id": "N5",
+    "severity": "nit",
+    "file": "rules.py",
+    "title": "2027 rule statement omits the actual dollar amount, unlike the 2026 entry",
+    "keywords": [
+      "omits the (numeric|actual|dollar)? ?cap",
+      "omits the cap amount",
+      "no (dollar|numeric) (amount|figure|cap)",
+      "statement (omits|lacks|does not (state|name))",
+      "unlike the 2026 entry"
+    ]
   }
 ]

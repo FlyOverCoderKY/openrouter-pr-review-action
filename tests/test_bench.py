@@ -21,11 +21,11 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "bench" / "fixtures" / "p
 
 def test_planted_fixture_loads_and_builds_messages() -> None:
     fixture = load_fixture(FIXTURE_DIR)
-    assert len(fixture.labels) == 10
+    assert len(fixture.labels) == 11
     severities = [label.severity for label in fixture.labels]
     assert severities.count("bug") == 2
     assert severities.count("risk") == 4
-    assert severities.count("nit") == 4
+    assert severities.count("nit") == 5
     assert "diff --git a/calc.py" in fixture.diff
     # The blast-radius plant: docs/rules.md is in the checkout but NOT the diff.
     assert (fixture.checkout / "docs" / "rules.md").is_file()

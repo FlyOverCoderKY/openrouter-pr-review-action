@@ -29,6 +29,7 @@ from or_pr_review.loop import (
     Ledger,
     LoopState,
     apply_round,
+    apply_severity_floor,
     decide_loop_state,
     encode_ledger,
     latest_ledger,
@@ -408,11 +409,13 @@ def _resolve_loop(
     )
     prior = ledger.findings if ledger is not None and mode == "verify" else ()
     generation = ledger.generation if ledger is not None and mode == "verify" else ""
+    prior, retired = apply_severity_floor(prior, round_number if mode == "verify" else 1)
     return ledger, LoopState(
         mode=mode,
         round_number=round_number,
         prior_findings=prior,
         generation=generation,
+        retired_prior=retired,
     )
 
 

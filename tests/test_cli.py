@@ -1019,6 +1019,80 @@ def test_verify_round_carries_unfixed_finding(
     assert "bug_count=1" in out
 
 
+def test_verify_round_retires_carried_nits_via_severity_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import Ledger, LedgerFinding, encode_ledger, extract_ledger
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+
+    def _nit(ident: str) -> LedgerFinding:
+        return LedgerFinding(
+            id=ident,
+            severity="nit",
+            file="src/api.py",
+            line=7,
+            title="Duplicated citation",
+            evidence="the same reference twice",
+            status="open",
+            models=("x-ai/grok-4.6",),
+        )
+
+    prior = Ledger(
+        round_number=1,
+        findings=(
+            LedgerFinding(
+                id="r1-1",
+                severity="bug",
+                file="src/api.py",
+                line=42,
+                title="Missing auth check",
+                evidence="Unauthenticated POST is accepted",
+                status="open",
+                models=("x-ai/grok-4.6",),
+            ),
+            _nit("r1-2"),
+            _nit("r1-3"),
+        ),
+        reviewed_sha="b" * 40,
+        generation="1234567890ab",
+    )
+    github = _LoopGitHub(encode_ledger(prior, repo=repo, pr_number=1))
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+                # The floor removes the nits from the resolution contract, so
+                # the lane owes a resolution only for the carried bug.
+                "resolutions": [{"id": "r1-1", "status": "fixed", "note": "check added"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["judge"], _verify_env(tmp_path, lane_dir, repo)) == 0
+    body = github.posted[0]
+    assert "2 nit finding(s) from earlier rounds retired" in body
+    assert "severity floor" in body
+    updated = extract_ledger(body, repo=repo, pr_number=1)
+    assert updated is not None
+    assert updated.findings == ()  # bug fixed, nits retired — loop converges
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=clean" in out
+    assert "issue_count=0" in out
+
+
 def test_initial_round_embeds_marker_and_inline_comments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

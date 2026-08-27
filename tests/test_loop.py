@@ -11,6 +11,7 @@ from or_pr_review.loop import (
     LedgerFinding,
     LoopState,
     apply_round,
+    apply_severity_floor,
     decide_loop_state,
     encode_ledger,
     extract_ledger,
@@ -129,6 +130,44 @@ def test_disputed_resolution_settles_a_finding() -> None:
     assert outcome.ledger.findings[0].status == "disputed"
     assert outcome.open_issue_count == 0
     assert "🤝" in outcome.resolution_lines[0]
+
+
+def test_apply_severity_floor_retires_nits_from_round_two() -> None:
+    findings = (
+        _finding("r1-1"),
+        _finding("r1-2", severity="nit"),
+        _finding("r1-3", severity="risk"),
+        _finding("r1-4", severity="nit", status="disputed"),
+    )
+    carried, retired = apply_severity_floor(findings, 1)
+    assert carried == findings
+    assert retired == ()
+    carried, retired = apply_severity_floor(findings, 2)
+    assert [finding.id for finding in carried] == ["r1-1", "r1-3"]
+    assert [finding.id for finding in retired] == ["r1-2", "r1-4"]
+
+
+def test_round_report_states_severity_floor_retirement() -> None:
+    state = LoopState(
+        mode="verify",
+        round_number=2,
+        prior_findings=(_finding("r1-1"),),
+        retired_prior=(
+            _finding("r1-2", severity="nit"),
+            _finding("r1-3", severity="nit"),
+        ),
+    )
+    resolutions = {"r1-1": Resolution(id="r1-1", status="fixed", note="done")}
+    outcome = apply_round(state, [], resolutions)
+    report = "\n".join(round_report(state, outcome))
+    assert "2 nit finding(s) from earlier rounds retired" in report
+    assert "severity floor" in report
+    # Retired findings leave the ledger and the open counts entirely.
+    assert all(finding.severity != "nit" for finding in outcome.ledger.findings)
+    assert outcome.open_issue_count == 0
+    # No retirement, no line.
+    bare = LoopState(mode="verify", round_number=2, prior_findings=(_finding("r1-1"),))
+    assert "retired" not in "\n".join(round_report(bare, apply_round(bare, [], resolutions)))
 
 
 def test_merge_resolutions_is_conservative() -> None:

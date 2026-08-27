@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+Recall parity with the sibling Grok action. On the first dense side-by-side PR (RetireGolden#325), the same model behind both harnesses reported 12 findings through Grok's scaffold and 1 through this one — same effort, same instructions. The lane found the biggest bug and stopped. Both changes below target that failure mode.
+
+- **Exhaustive initial reviews.** The initial-round prompt now demands a per-file, all-severity sweep: one important finding does not end the review; minor-but-real defects (wrong or misapplied references, misleading names, overclaiming comments/docs, truncated or duplicated quotes, tests that cannot fail for what they claim to pin) are `nit` findings, not omissions; and there is no implicit cap on the number of findings. A coverage entry is now defined as a claim that the file was swept at every severity — not that it was glanced at.
+- **Severity floor for follow-up rounds** (sibling Grok parity). From verify round 2 onward, carried `nit` findings are retired instead of re-adjudicated: they are removed from the lane prompt, the resolution contract, the ledger, and the open counts, and the round's resolution report states the retirement visibly ("N nit finding(s) from earlier rounds retired"). Round 1 stays the exhaustive all-severity pass; later rounds track the bug/risk backlog to convergence, and a backlog that is nits-only now converges to `clean`.
+
 ## 1.2.0 — 2026-08-25
 
 Loop-protocol hardening toward Grok parity — first changesets of the merged parity plan in `docs/pr-review-harness-independent-review.md`.

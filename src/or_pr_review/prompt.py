@@ -196,23 +196,43 @@ def _system_prompt(*, tone: str, mode: str) -> str:
         )
     else:
         task = (
-            "This is an initial review of the full pull request. Be thorough. "
-            "Report bugs, risks, and nits you can name a concrete failure for. "
-            "Do not invent issues. Do not treat the embedded diff as sufficient "
-            "context — open related files with tools."
+            "This is an initial review of the full pull request. Be thorough and "
+            "exhaustive: report EVERY genuine issue you can name a concrete "
+            "failure or consequence for, at every severity — bug, risk, and nit. "
+            "Finding one important bug does not end the review; after each "
+            "finding, resume sweeping the remaining files and hunks. A review "
+            "that reports a single major finding while lesser real issues remain "
+            "unreported is incomplete. Do not invent issues. Do not treat the "
+            "embedded diff as sufficient context — open related files with tools."
         )
         coverage_block = (
             "\n"
             'This initial review must ALSO return a "coverage" array accounting for\n'
             "EVERY file in the embedded diff, including files with zero findings:\n"
-            '{"coverage": [{"path": "relative/file", "findings": 0}]}. A diff file\n'
-            "you cannot account for means the review is not finished. Do not list\n"
-            "files that are not in the embedded diff.\n"
+            '{"coverage": [{"path": "relative/file", "findings": 0}]}. A coverage\n'
+            "entry is a claim that you swept that file for issues at every\n"
+            "severity and found exactly the findings you reported — not that you\n"
+            "saw its name. A diff file you cannot account for means the review is\n"
+            "not finished. Do not list files that are not in the embedded diff.\n"
         )
         empty_case = (
             'If you find nothing after checking blast radius, return {"findings": []}\n'
             "with a zero-count coverage entry for every diff file."
         )
+    if mode == "verify":
+        sweep_block = ""
+    else:
+        sweep_block = """
+Sweep the diff file by file. For each changed file, examine every hunk and
+report all real issues before moving on — then keep going through the
+remaining files. Lesser-but-real defects are findings, not omissions: report
+them at `nit` severity instead of dropping them. That includes wrong or
+misapplied references and citations, names or titles that say the wrong
+thing, comments and docs that overclaim what the code does, truncated or
+duplicated quotes, and tests or fixtures that cannot fail for the behavior
+they claim to pin. Do not stop the review because you already have a strong
+finding, and do not limit yourself to a fixed number of findings.
+"""
     return f"""You are a pull-request reviewer. Tone: {tone_word}.
 
 {task}
@@ -244,7 +264,7 @@ Findings may cite files that are not in the embedded diff. That is expected
 for blast-radius bugs (a test or doc the change did not edit). A clean verdict
 after reading only the diff is incorrect whenever tests or docs inventory the
 new paths.
-
+{sweep_block}
 Return a JSON object with a "findings" array. Each finding:
 - title: short noun phrase
 - body: concrete explanation and why it matters

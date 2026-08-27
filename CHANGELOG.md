@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.2 — 2026-08-27
 
 Recall, round two — informed by reading the sibling stack's actual source (xai-org/grok-build plus the sibling action's prompt): the CLI runs headless with the same three read-only tools and turn budget as this harness, so the sibling's recall advantage is promptcraft, and this release ports the three mechanisms the v1.2.1 sweep still lacked.
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 — 2026-08-27
 
 Recall parity with the sibling Grok action. On the first dense side-by-side PR (RetireGolden#325), the same model behind both harnesses reported 12 findings through Grok's scaffold and 1 through this one — same effort, same instructions. The lane found the biggest bug and stopped. Both changes below target that failure mode.
 

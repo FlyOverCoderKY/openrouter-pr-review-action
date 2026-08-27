@@ -1,0 +1,97 @@
+diff --git a/calc.py b/calc.py
+index c8caa70..040e601 100644
+--- a/calc.py
++++ b/calc.py
+@@ -1,11 +1,14 @@
+ """Contribution calculators for the mini benefits engine."""
+ 
+ CAP_2026 = 8_300  # 2026 family HSA cap per Rev. Proc. 2025-19
++CAP_2027 = 8_550  # 2027 family HSA cap per Rev. Proc. 2026-31
+ 
+ 
+ def apply_cap(amount: int, year: int = 2026) -> int:
+-    """Clamp a contribution to the statutory cap for the plan year."""
+-    caps = {2026: CAP_2026}
++    """Clamp a contribution to the statutory cap for 2026 or 2027."""
++    caps = {2026: CAP_2026, 2027: CAP_2027}
++    if year not in caps:
++        raise ValueError(f"no cap table for plan year {year}")
+     return min(amount, caps[year])
+ 
+ 
+@@ -20,3 +23,10 @@ def contribution_total(amounts: list[int]) -> int:
+         validate_amount(amount)
+         total += amount
+     return total
++
++
++def average_contribution(amounts: list[int]) -> float:
++    """Average per-source contribution; empty input is a caller error."""
++    if not amounts:
++        raise ValueError("amounts must not be empty")
++    return contribution_total(amounts) / len(amounts)
+diff --git a/docs/rules.md b/docs/rules.md
+index b4fd40f..e4e5d67 100644
+--- a/docs/rules.md
++++ b/docs/rules.md
+@@ -5,3 +5,4 @@ Every id in `rules.RULES` must be listed here, one row per rule.
+ | id | statement |
+ | --- | --- |
+ | hsa-cap-2026-modeled | 2026 HSA family contributions are capped at $8,300. |
++| hsa-cap-2027-modeled | 2027 HSA family contributions are capped at $8,550. |
+diff --git a/rules.py b/rules.py
+index df5a643..a1616cc 100644
+--- a/rules.py
++++ b/rules.py
+@@ -8,4 +8,11 @@ RULES = {
+         ],
+         "implemented_by": "calc.apply_cap",
+     },
++    "hsa-cap-2027-modeled": {
++        "statement": "2027 HSA family contributions are capped at $8,550.",
++        "authority": [
++            "Rev. Proc. 2026-31: for 2027 the annual limitation on deductions is $8,550.",
++        ],
++        "implemented_by": "calc.apply_cap",
++    },
+ }
+diff --git a/tests/test_calc.py b/tests/test_calc.py
+index 89e5156..ff5dfd7 100644
+--- a/tests/test_calc.py
++++ b/tests/test_calc.py
+@@ -1,10 +1,34 @@
+-from calc import apply_cap, contribution_total
++from calc import apply_cap, average_contribution, contribution_total
+ 
+ 
+ def test_apply_cap_2026() -> None:
+     assert apply_cap(9_000) == 8_300
+ 
+ 
++def test_apply_cap_2027() -> None:
++    assert apply_cap(9_000, 2027) == 8_550
++
++
++def test_apply_cap_unknown_year() -> None:
++    try:
++        apply_cap(1, 2031)
++    except ValueError:
++        return
++    raise AssertionError("unknown year was accepted")
++
++
++def test_average_contribution() -> None:
++    assert average_contribution([100, 300]) == 200.0
++
++
++def test_average_contribution_rejects_empty() -> None:
++    try:
++        average_contribution([])
++    except ValueError:
++        return
++    raise AssertionError("empty input was accepted")
++
++
+ def test_contribution_total_rejects_negative() -> None:
+     try:
+         contribution_total([100, -5])

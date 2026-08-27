@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from or_pr_review.bench import (
+    Adjudication,
     Label,
     collected_from_fixture,
     load_fixture,
@@ -68,8 +69,10 @@ def test_score_run_recall_precision_and_unmatched() -> None:
     assert score.recall(labels) == (1, 2)
     assert score.recall(labels, "bug") == (1, 1)
     assert score.recall(labels, "nit") == (0, 1)
-    assert score.precision() == (1, 2)
-    assert [f["title"] for f in score.unmatched_findings] == ["unrelated noise"]
+    # Without an adjudication the unmatched finding is a third class, not
+    # auto-false: precision counts only adjudicated outcomes.
+    assert score.precision() == (1, 1)
+    assert [f["title"] for f in score.unadjudicated] == ["unrelated noise"]
 
 
 def test_precision_counts_findings_not_distinct_titles() -> None:
@@ -99,6 +102,87 @@ def test_severity_agreement_tracks_matched_severities() -> None:
     score = score_run(findings, labels)
     assert score.recall(labels) == (2, 2)  # detection is severity-agnostic
     assert score.severity_agreement(labels) == (1, 2)
+
+
+def test_context_strata_and_adjudication_classification() -> None:
+    labels = (
+        Label(id="D1", severity="bug", file="a.py", title="t", keywords=("KeyError",)),
+        Label(
+            id="R9",
+            severity="risk",
+            file=None,
+            title="t",
+            keywords=("inventory",),
+            context="repo",
+        ),
+    )
+    adjudications = (
+        Adjudication(
+            id="A1",
+            verdict="true_positive_unlabeled",
+            file=None,
+            keywords=("missing docstring",),
+        ),
+        Adjudication(id="A2", verdict="false_positive", file=None, keywords=("cosmic ray",)),
+    )
+    findings = [
+        {"file": "a.py", "title": "KeyError on 2025", "body": "", "severity": "bug"},
+        {"file": "b.py", "title": "Missing docstring", "body": "", "severity": "nit"},
+        {"file": "b.py", "title": "cosmic ray hazard", "body": "", "severity": "risk"},
+        {"file": "c.py", "title": "mystery finding", "body": "", "severity": "nit"},
+    ]
+    score = score_run(findings, labels, adjudications)
+    assert score.recall(labels, context="diff") == (1, 1)
+    assert score.recall(labels, context="repo") == (0, 1)
+    assert [f["title"] for f in score.adjudicated_tp] == ["Missing docstring"]
+    assert [f["title"] for f in score.adjudicated_fp] == ["cosmic ray hazard"]
+    assert [f["title"] for f in score.unadjudicated] == ["mystery finding"]
+    # precision: (1 label match + 1 adjudicated TP) over those plus 1 FP;
+    # the unadjudicated finding is a third class, not auto-false.
+    assert score.precision() == (2, 3)
+
+
+def test_planted_fixture_context_labels_and_adjudications() -> None:
+    fixture = load_fixture(FIXTURE_DIR)
+    contexts = {label.id: label.context for label in fixture.labels}
+    assert contexts["R4"] == "repo"  # the docs-inventory plant needs tool use
+    assert all(c == "diff" for lid, c in contexts.items() if lid != "R4")
+    assert any(a.verdict == "true_positive_unlabeled" for a in fixture.adjudications)
+
+
+def test_clean_twin_fixture_loads_with_zero_labels() -> None:
+    clean_dir = FIXTURE_DIR.parent / "planted-mini-clean"
+    fixture = load_fixture(clean_dir)
+    assert fixture.labels == ()
+    assert "diff --git a/calc.py" in fixture.diff
+    # The clean twin fixes the plants: sourced 2027 dollar, year guard,
+    # kept validation, docs row present, consistent id spelling.
+    assert "8_550" in fixture.diff
+    assert (fixture.checkout / "docs" / "rules.md").read_text(encoding="utf-8").count("hsa-cap-") >= 2
+    assert "modelled" not in fixture.diff
+    # Scoring a clean fixture: every finding is a noise candidate.
+    score = score_run(
+        [{"file": "calc.py", "title": "anything", "body": "", "severity": "nit"}],
+        fixture.labels,
+        fixture.adjudications,
+    )
+    assert score.precision() == (0, 0)
+    assert len(score.unadjudicated) == 1
+
+
+def test_committed_checkouts_match_the_generator() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "generate_planted", FIXTURE_DIR.parent / "generate_planted.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for name, head in module.FIXTURE_HEADS.items():
+        checkout = FIXTURE_DIR.parent / name / "checkout"
+        for rel, content in head.items():
+            committed = (checkout / rel).read_text(encoding="utf-8")
+            assert committed == content, f"{name}/{rel} drifted from generate_planted.py"
 
 
 def _write_fixture(fixture_dir: Path, labels: object) -> None:

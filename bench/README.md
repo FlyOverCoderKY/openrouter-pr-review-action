@@ -45,9 +45,40 @@ case-insensitively. Pick keyword fragments a correct finding could not avoid
 mentioning; give several alternates per label.
 
 ```json
-{"id": "B1", "severity": "bug", "file": "calc.py",
+{"id": "B1", "severity": "bug", "file": "calc.py", "context": "diff",
  "title": "Stale 2027 cap", "keywords": ["same value as (the )?2026", "8[_,]?300.{0,40}2027"]}
 ```
+
+`context` records the minimum context needed to find the plant — `diff`
+(visible in the embedded diff), `file` (requires reading the changed file
+beyond its hunks), or `repo` (requires tool use outside the diff). `score`
+reports recall per stratum; a prompt or validation change must not regress
+any stratum, because aggregate recall can hide local-context loss.
+
+## Adjudications and the clean twin
+
+Unmatched findings are three-way classified, never auto-counted as false:
+a fixture may carry an `adjudications.json` of curated verdicts
+(`true_positive_unlabeled` counts toward precision, `false_positive`
+against it; same file+keywords matching as labels), and anything else is
+reported as `UNADJUDICATED` for triage — promote it to a label, adjudicate
+it, or treat it as a prompt problem.
+
+`planted-mini-clean` is the unmutated twin: the same pull request done
+correctly, zero labels. Every finding a lane reports against it is a noise
+candidate, which makes oversensitivity (e.g. a prompt change that invites
+padding) measurable instead of invisible. Run it alongside planted-mini
+whenever a prompt or validator changes.
+
+Fixture checkouts and diffs are regenerated only through
+`bench/fixtures/generate_planted.py`; a unit test pins the committed trees
+to that script, so edit the script, not the checkout.
+
+## Run-count protocol
+
+At least 3 runs for quick screening; at least 5 per configuration for a
+decision that changes production behavior. Compare means and per-label
+detection frequency, not single runs.
 
 ## Capturing a real PR
 

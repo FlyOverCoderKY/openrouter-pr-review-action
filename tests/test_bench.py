@@ -134,8 +134,12 @@ def test_context_strata_and_adjudication_classification() -> None:
     score = score_run(findings, labels, adjudications)
     assert score.recall(labels, context="diff") == (1, 1)
     assert score.recall(labels, context="repo") == (0, 1)
-    assert [f["title"] for f in score.adjudicated_tp] == ["Missing docstring"]
-    assert [f["title"] for f in score.adjudicated_fp] == ["cosmic ray hazard"]
+    assert [(f["title"], aid) for f, aid in score.adjudicated_tp] == [
+        ("Missing docstring", "A1")
+    ]
+    assert [(f["title"], aid) for f, aid in score.adjudicated_fp] == [
+        ("cosmic ray hazard", "A2")
+    ]
     assert [f["title"] for f in score.unadjudicated] == ["mystery finding"]
     # precision: (1 label match + 1 adjudicated TP) over those plus 1 FP;
     # the unadjudicated finding is a third class, not auto-false.
@@ -170,7 +174,7 @@ def test_clean_twin_fixture_loads_with_zero_labels() -> None:
     assert len(score.unadjudicated) == 1
 
 
-def test_committed_checkouts_match_the_generator() -> None:
+def _load_generator():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
@@ -178,11 +182,36 @@ def test_committed_checkouts_match_the_generator() -> None:
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def test_committed_checkouts_match_the_generator() -> None:
+    module = _load_generator()
     for name, head in module.FIXTURE_HEADS.items():
         checkout = FIXTURE_DIR.parent / name / "checkout"
+        # Byte comparison (not text) so newline drift fails too, and the
+        # committed file SET must equal the generator tree — extras fail.
+        committed_files = sorted(
+            str(p.relative_to(checkout)).replace("\\", "/")
+            for p in checkout.rglob("*")
+            if p.is_file()
+        )
+        assert committed_files == sorted(head), f"{name} checkout file set drifted"
         for rel, content in head.items():
-            committed = (checkout / rel).read_text(encoding="utf-8")
-            assert committed == content, f"{name}/{rel} drifted from generate_planted.py"
+            committed = (checkout / rel).read_bytes()
+            assert committed == content.encode("utf-8"), (
+                f"{name}/{rel} drifted from generate_planted.py"
+            )
+
+
+def test_committed_diffs_match_the_generator() -> None:
+    # Regenerate each diff with the generator's isolated git and compare
+    # byte-for-byte, so a stale diff.patch cannot disagree with the checkout.
+    module = _load_generator()
+    for name, head in module.FIXTURE_HEADS.items():
+        committed = (FIXTURE_DIR.parent / name / "diff.patch").read_bytes()
+        regenerated = module.render_diff(head).encode("utf-8")
+        assert committed == regenerated, f"{name}/diff.patch drifted from the generator"
 
 
 def _write_fixture(fixture_dir: Path, labels: object) -> None:
@@ -198,6 +227,18 @@ def test_label_validation_fails_fast(tmp_path: Path) -> None:
     fixture_dir = tmp_path / "f"
     _write_fixture(fixture_dir, [{"id": "X", "severity": "bug", "keywords": ["("]}])
     with pytest.raises(ActionError, match="not a valid regex"):
+        load_fixture(fixture_dir)
+    # context is explicit, never defaulted — a missing or bogus value fails.
+    _write_fixture(
+        fixture_dir, [{"id": "X", "severity": "bug", "keywords": ["ok"]}]
+    )
+    with pytest.raises(ActionError, match="context"):
+        load_fixture(fixture_dir)
+    _write_fixture(
+        fixture_dir,
+        [{"id": "X", "severity": "bug", "keywords": ["ok"], "context": "galaxy"}],
+    )
+    with pytest.raises(ActionError, match="context"):
         load_fixture(fixture_dir)
     _write_fixture(fixture_dir, [{"id": "X", "severity": "urgent", "keywords": ["ok"]}])
     with pytest.raises(ActionError, match="severity"):
@@ -268,14 +309,45 @@ def test_cmd_score_reports_means_and_skips_failed_runs(
     fixture_dir = tmp_path / "f"
     _write_fixture(
         fixture_dir,
-        [{"id": "B1", "severity": "bug", "file": "a.py", "keywords": ["KeyError"]}],
+        [
+            {
+                "id": "B1",
+                "severity": "bug",
+                "file": "a.py",
+                "context": "diff",
+                "keywords": ["KeyError"],
+            },
+            {
+                "id": "R9",
+                "severity": "risk",
+                "file": "docs/map.md",
+                "context": "repo",
+                "keywords": ["inventory"],
+            },
+        ],
+    )
+    (fixture_dir / "adjudications.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "A1",
+                    "verdict": "true_positive_unlabeled",
+                    "file": None,
+                    "keywords": ["missing docstring"],
+                }
+            ]
+        ),
+        encoding="utf-8",
     )
     out = tmp_path / "out"
     out.mkdir()
     good = {
         "ok": True,
         "findings": [
-            {"file": "a.py", "title": "KeyError", "body": "", "severity": "bug"}
+            {"file": "a.py", "title": "KeyError", "body": "", "severity": "bug"},
+            {"file": "docs/map.md", "title": "inventory row absent", "body": "", "severity": "risk"},
+            {"file": "b.py", "title": "Missing docstring", "body": "", "severity": "nit"},
+            {"file": "c.py", "title": "mystery", "body": "", "severity": "nit"},
         ],
     }
     (out / "run-0.json").write_text(json.dumps(good), encoding="utf-8")
@@ -283,5 +355,31 @@ def test_cmd_score_reports_means_and_skips_failed_runs(
     assert main(["score", str(fixture_dir), str(out)]) == 0
     printed = capsys.readouterr().out
     assert "1 scored run(s), 1 failed run(s)" in printed
-    assert "run-0 | 1/1" in printed  # rows named by file, not enumeration
+    assert "run-0 | 2/2" in printed  # rows named by file, not enumeration
     assert "mean | 100%" in printed
+    # The new instrumentation must actually render — fixture.adjudications
+    # threaded through _cmd_score, strata line, frequency line, tags.
+    assert "recall by context: diff 1/1 (100%), repo 1/1 (100%)" in printed
+    assert "label detection frequency: B1 1/1, R9 1/1" in printed
+    assert "<adjudicated TP:A1>" in printed
+    assert "<UNADJUDICATED" in printed
+    # noise column counts adjudicated-FP + unadjudicated (here: 1 of 4).
+    assert "| 3/3 | 1/4 | 4" in printed
+
+
+def test_cmd_score_clean_fixture_reports_noise(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fixture_dir = tmp_path / "clean"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    out.mkdir()
+    payload = {
+        "ok": True,
+        "findings": [{"file": "a.py", "title": "phantom", "body": "", "severity": "nit"}],
+    }
+    (out / "run-0.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert main(["score", str(fixture_dir), str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "clean fixture (no labels): the noise column is the score" in printed
+    assert "| 1/1 | 1" in printed  # noise 1/1, findings 1

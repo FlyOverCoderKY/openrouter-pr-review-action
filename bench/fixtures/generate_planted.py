@@ -279,19 +279,40 @@ def write_tree(root: Path, tree: dict[str, str]) -> None:
 
 
 def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True)
+    # Isolate from the user's git config and environment: autocrlf,
+    # diff.external/noprefix, gpg signing, and abbrev settings would make the
+    # generated patches machine-dependent.
+    import os
+
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_EXTERNAL_DIFF": "",
+    }
+    base_flags = [
+        "-c", "core.autocrlf=false",
+        "-c", "commit.gpgsign=false",
+        "-c", "user.email=bench@example.invalid",
+        "-c", "user.name=Bench",
+    ]
+    result = subprocess.run(
+        ["git", *base_flags, *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    )
     return result.stdout
 
 
-def generate(name: str) -> None:
-    head = FIXTURE_HEADS[name]
-    dest = FIXTURES_DIR / name
+def render_diff(head: dict[str, str]) -> str:
+    """The BASE -> head diff, exactly as generate() writes it to diff.patch."""
     with tempfile.TemporaryDirectory(prefix="planted-gen.") as tmp:
         repo = Path(tmp) / "repo"
         repo.mkdir()
         git(repo, "init", "-q", "-b", "main")
-        git(repo, "config", "user.email", "bench@example.invalid")
-        git(repo, "config", "user.name", "Bench")
         write_tree(repo, BASE)
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", "base")
@@ -299,7 +320,13 @@ def generate(name: str) -> None:
             (repo / rel).unlink()
         write_tree(repo, head)
         git(repo, "add", "-A")
-        diff = git(repo, "diff", "--cached", "--no-color")
+        return git(repo, "diff", "--cached", "--no-color", "--no-ext-diff")
+
+
+def generate(name: str) -> None:
+    head = FIXTURE_HEADS[name]
+    dest = FIXTURES_DIR / name
+    diff = render_diff(head)
     checkout = dest / "checkout"
     if checkout.exists():
         shutil.rmtree(checkout)
@@ -310,6 +337,9 @@ def generate(name: str) -> None:
 
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if which != "all" and which not in FIXTURE_HEADS:
+        valid = " | ".join([*FIXTURE_HEADS, "all"])
+        raise SystemExit(f"unknown fixture {which!r}; expected one of: {valid}")
     names = list(FIXTURE_HEADS) if which == "all" else [which]
     for name in names:
         generate(name)

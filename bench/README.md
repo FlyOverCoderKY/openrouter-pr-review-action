@@ -4,12 +4,15 @@ Offline, repeatable measurement of lane recall/precision — no live PR, no
 GitHub posting. Replays a frozen review fixture through `run_lane` and scores
 the findings against curated golden labels.
 
-Two tiers of fixture:
+Three kinds of fixture:
 
 - **Planted** (`bench/fixtures/planted-mini/`, committed): a small synthetic
   project whose diff contains known defects at every severity. Objective
   ground truth, pennies per run, minutes to iterate. The unit test of
   promptcraft.
+- **Clean twin** (`bench/fixtures/planted-mini-clean/`, committed): the same
+  pull request done correctly, zero labels — measures oversensitivity. Run it
+  alongside the planted fixture whenever a prompt or validator changes.
 - **Real-PR replays** (`bench/fixtures-local/`, gitignored): captured from
   live PRs with `bench/capture.py`, labeled from the adjudicated union of all
   reviewers' validated findings. The integration test. These contain private
@@ -30,12 +33,13 @@ mean row across the successful runs. `run` clears stale `run-*.json` files
 from `--out` first (leftovers would silently mix experiments), exits
 non-zero when any lane fails, and defaults `--effort` to empty to match the
 shipped action (pass `--effort high` explicitly to mirror a caller that sets
-it). `score` reports per-severity recall (detection, regardless of the
-severity the finding reported), a `sev-agree` column (matched labels hit at
-the label's own severity), precision, the labels every run missed, and each
-run's unmatched findings (triage those: a consistent unmatched finding may
-be a new true positive worth adding as a label, or noise worth a prompt
-tweak).
+it). `score` reports per-severity and per-context recall (detection,
+regardless of the severity the finding reported), a `sev-agree` column
+(matched labels hit at the label's own severity), adjudicated precision, a
+`noise` column (adjudicated-false plus unadjudicated findings — the
+oversensitivity headline), per-label detection frequency across runs, the
+labels every run missed, and each run's non-label findings tagged with the
+adjudication verdict that fired or `UNADJUDICATED` for triage.
 
 ## Label format
 

@@ -445,6 +445,36 @@ def test_openrouter_chat_retries_transient_errors(monkeypatch: pytest.MonkeyPatc
     assert stats["retries"] == 2
 
 
+def test_openrouter_chat_retries_mid_body_connection_drops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import http.client
+
+    from or_pr_review import harness
+
+    attempts = {"n": 0}
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            # A truncated chunked response raises from response.read(), not
+            # from urlopen — it is neither URLError nor HTTPError.
+            raise http.client.IncompleteRead(b"partial")
+        if attempts["n"] == 2:
+            raise ConnectionResetError("peer reset")
+        return _FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    stats: dict[str, int] = {}
+    parsed = harness.openrouter_chat(
+        "sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append, stats=stats
+    )
+    assert parsed == {"choices": []}
+    assert attempts["n"] == 3
+    assert stats["retries"] == 2
+
+
 def test_openrouter_chat_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
     from or_pr_review import harness
 

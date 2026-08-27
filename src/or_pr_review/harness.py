@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -145,6 +146,18 @@ def openrouter_chat(
                 sleep(_retry_delay(attempt, None))
                 continue
             raise LaneError(f"OpenRouter request failed: {redact(str(exc.reason))}") from exc
+        except (http.client.HTTPException, OSError) as exc:
+            # A connection that drops mid-body raises from response.read() as
+            # http.client.IncompleteRead / RemoteDisconnected or a bare
+            # ConnectionError — none of which are URLError — and is exactly as
+            # transient as a 502. Common on flaky routes (free tiers).
+            if attempt < MAX_HTTP_ATTEMPTS:
+                _count_retry(stats)
+                sleep(_retry_delay(attempt, None))
+                continue
+            raise LaneError(
+                f"OpenRouter connection failed mid-response: {redact(str(exc))}"
+            ) from exc
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:

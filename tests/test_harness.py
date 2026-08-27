@@ -26,6 +26,35 @@ def test_require_key_fail_closed() -> None:
         require_openrouter_key({})
 
 
+def test_run_lane_captures_provider_and_pins_routing(tmp_path: Path) -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        return {
+            "provider": "Baseten",
+            "choices": [{"message": {"content": '{"findings": []}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5},
+        }
+
+    result = run_lane(
+        model="z-ai/glm-5.3-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        provider_order=["baseten"],
+        chat=chat,
+    )
+    assert result.ok
+    assert result.provider == "Baseten"
+    assert payloads[0]["provider"] == {"order": ["baseten"], "allow_fallbacks": False}
+    # Round-trips through the lane artifact.
+    from or_pr_review.schema import parse_lane_artifact
+
+    assert parse_lane_artifact(result.to_dict()).provider == "Baseten"
+
+
 def test_lane_parses_structured_findings(tmp_path: Path) -> None:
     def chat(_payload: dict) -> dict:
         return {

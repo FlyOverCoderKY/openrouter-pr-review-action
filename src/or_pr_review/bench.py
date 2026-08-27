@@ -266,6 +266,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             max_tool_turns=args.max_tool_turns,
             effort=args.effort,
             timeout=args.timeout,
+            provider_order=(
+                [p.strip() for p in args.provider.split(",") if p.strip()]
+                if args.provider
+                else None
+            ),
             expect_coverage=True,
             expected_paths=expected_paths,
         )
@@ -275,9 +280,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         status = "ok" if lane.ok else f"FAILED: {lane.error}"
         if not lane.ok:
             failures += 1
+        via = f", via {lane.provider}" if lane.provider else ""
         print(
             f"  -> {out_path} ({status}; {len(lane.findings)} finding(s), "
-            f"{lane.tool_rounds or 0} tool round(s))"
+            f"{lane.tool_rounds or 0} tool round(s){via})"
         )
     if failures:
         print(f"{failures}/{args.runs} lane(s) failed")
@@ -374,6 +380,12 @@ def main(argv: list[str] | None = None) -> int:
         help="reasoning effort; empty matches the action's default (no effort field)",
     )
     run_parser.add_argument("--timeout", type=int, default=180)
+    run_parser.add_argument(
+        "--provider",
+        default="",
+        help="pin OpenRouter provider routing (comma-separated order, no fallbacks), "
+        "e.g. 'baseten' — for provider bake-offs",
+    )
     run_parser.set_defaults(func=_cmd_run)
 
     score_parser = sub.add_parser("score", help="score saved runs against fixture labels (offline)")

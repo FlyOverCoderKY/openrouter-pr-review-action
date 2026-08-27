@@ -190,6 +190,7 @@ def run_lane(
     max_tool_turns: int = MAX_TOOL_TURNS,
     effort: str = "",
     timeout: int = DEFAULT_TIMEOUT,
+    provider_order: list[str] | None = None,
     chat: ChatFn | None = None,
     expect_coverage: bool = False,
     expect_resolutions: bool = False,
@@ -204,6 +205,7 @@ def run_lane(
     conversation = list(messages)
     tools = list(READ_ONLY_TOOLS) if workspace is not None and max_tool_turns > 0 else None
     usage: dict[str, int] = {}
+    meta: dict[str, str] = {}
 
     def _validate(content: str) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
         findings, resolutions, coverage = parse_lane_payload(
@@ -238,6 +240,8 @@ def run_lane(
             send=send,
             usage=usage,
             stats=stats,
+            meta=meta,
+            provider_order=provider_order,
             response_schema=findings_json_schema(
                 include_coverage=expect_coverage,
                 include_resolutions=expect_resolutions,
@@ -248,6 +252,7 @@ def run_lane(
     except LaneError as exc:
         failed = failed_lane(model, redact(str(exc)), elapsed_ms=_elapsed_ms(started))
         _attach_stats(failed, stats, usage)
+        failed.provider = meta.get("provider")
         return failed
 
     result = LaneResult(
@@ -259,6 +264,7 @@ def run_lane(
         elapsed_ms=_elapsed_ms(started),
         prompt_tokens=usage.get("prompt_tokens"),
         completion_tokens=usage.get("completion_tokens"),
+        provider=meta.get("provider"),
         resolutions=resolutions,
         coverage=coverage,
     )
@@ -289,6 +295,8 @@ def _run_loop(
     send: ChatFn,
     usage: dict[str, int],
     stats: dict[str, int] | None = None,
+    meta: dict[str, str] | None = None,
+    provider_order: list[str] | None = None,
     response_schema: dict[str, Any] | None = None,
     validate_final: Callable[[str], object] | None = None,
 ) -> str:
@@ -301,6 +309,10 @@ def _run_loop(
     }
     if effort:
         payload_base["reasoning"] = {"effort": effort}
+    if provider_order:
+        # Pin OpenRouter's provider routing (e.g. for provider bake-offs).
+        # No fallbacks: a pinned comparison must not silently reroute.
+        payload_base["provider"] = {"order": list(provider_order), "allow_fallbacks": False}
 
     turns = 0
     repairs = 0
@@ -330,7 +342,7 @@ def _run_loop(
                 stats["requests"] = stats.get("requests", 0) + 1
             try:
                 response = send(payload)
-                _absorb_usage(usage, response)
+                _absorb_usage(usage, response, meta)
                 # In-body errors (HTTP 200 whose JSON carries an error object,
                 # a common OpenRouter provider-failure shape) must reach the
                 # same schema-fallback and salvage handling as HTTP errors.
@@ -553,7 +565,16 @@ def _run_one_tool(workspace: Path, call: object) -> dict[str, Any]:
     return {"role": "tool", "tool_call_id": call_id, "content": result}
 
 
-def _absorb_usage(usage: dict[str, int], response: dict[str, Any]) -> None:
+def _absorb_usage(
+    usage: dict[str, int],
+    response: dict[str, Any],
+    meta: dict[str, str] | None = None,
+) -> None:
+    if meta is not None:
+        provider = response.get("provider")
+        if isinstance(provider, str) and provider.strip():
+            # Last response wins; OpenRouter may reroute between requests.
+            meta["provider"] = provider.strip()
     block = response.get("usage")
     if not isinstance(block, dict):
         return

@@ -31,6 +31,7 @@ _FINDINGS_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "findings": {
             "type": "array",
+            "maxItems": MAX_FINDINGS,
             "items": {
                 "type": "object",
                 "properties": {
@@ -257,6 +258,13 @@ def parse_lane_payload(
     if not isinstance(findings_raw, list):
         raise LaneError("findings must be an array")
     if len(findings_raw) > MAX_FINDINGS:
+        # The response_format schema advertises maxItems, so only the
+        # schema-free tool path can get here. Say so instead of silently
+        # narrowing an "exhaustive" review.
+        print(
+            f"warning: model returned {len(findings_raw)} findings; keeping "
+            f"the first {MAX_FINDINGS}"
+        )
         findings_raw = findings_raw[:MAX_FINDINGS]
     findings = [parse_finding(item, model_id) for item in findings_raw]
     coverage = _parse_coverage(payload.get("coverage"), required=expect_coverage)

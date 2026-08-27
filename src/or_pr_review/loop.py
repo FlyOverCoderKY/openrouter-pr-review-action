@@ -62,6 +62,10 @@ _STATUS_ICONS = {
     "unaddressed": "⏳",
 }
 _SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}
+# From this verify round on, carried nit findings are retired rather than
+# re-adjudicated: round 1 is the exhaustive all-severity sweep, later rounds
+# track the bug/risk backlog to convergence (sibling Grok "severity floor").
+SEVERITY_FLOOR_ROUND = 2
 # Conservative cross-lane merge: a higher rank always wins, so a finding is
 # `fixed` only when every lane that resolved it says fixed, and any dispute
 # settles it. Derived from RESOLUTION_STATUSES so a new status can never pass
@@ -99,6 +103,10 @@ class LoopState:
     round_number: int
     prior_findings: tuple[LedgerFinding, ...] = ()
     generation: str = ""
+    # Carried nit findings retired by the severity floor before this round:
+    # excluded from the prompt, the resolution contract, and the next ledger,
+    # but reported visibly in the round report.
+    retired_prior: tuple[LedgerFinding, ...] = ()
 
     @property
     def open_prior(self) -> tuple[LedgerFinding, ...]:
@@ -130,6 +138,22 @@ def decide_loop_state(
     if (event_action or "").strip().lower() == "synchronize":
         return "verify", next_round
     return "initial", 1
+
+
+def apply_severity_floor(
+    findings: tuple[LedgerFinding, ...], round_number: int
+) -> tuple[tuple[LedgerFinding, ...], tuple[LedgerFinding, ...]]:
+    """(carried, retired): nit findings retire from verify round 2 onward.
+
+    Retired findings leave the loop entirely — they are not shown to the
+    lanes, not owed a resolution, and not written to the next ledger. The
+    round report states the retirement so nothing disappears silently.
+    """
+    if round_number < SEVERITY_FLOOR_ROUND:
+        return findings, ()
+    carried = tuple(f for f in findings if f.severity != "nit")
+    retired = tuple(f for f in findings if f.severity == "nit")
+    return carried, retired
 
 
 def finding_marker(finding_id: str, generation: str) -> str:
@@ -209,7 +233,17 @@ def round_report(state: LoopState, outcome: RoundOutcome) -> list[str]:
     if state.mode != "verify":
         return []
     lines = [f"### Round {state.round_number} resolution", ""]
-    lines.extend(outcome.resolution_lines or ["- No prior findings were open."])
+    if outcome.resolution_lines:
+        lines.extend(outcome.resolution_lines)
+    elif not state.retired_prior:
+        # With retirements the report is not empty, and "no prior findings
+        # were open" would contradict the retirement line that follows.
+        lines.append("- No prior findings were open.")
+    if state.retired_prior:
+        lines.append(
+            f"- {len(state.retired_prior)} nit finding(s) from earlier rounds "
+            "retired (severity floor for follow-up rounds is `risk`)."
+        )
     lines.append(
         f"- Open findings after this round: {outcome.open_issue_count} "
         f"({outcome.open_bug_count} bug-severity)."

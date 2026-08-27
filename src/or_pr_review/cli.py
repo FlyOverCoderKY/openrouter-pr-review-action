@@ -29,6 +29,7 @@ from or_pr_review.loop import (
     Ledger,
     LoopState,
     apply_round,
+    apply_severity_floor,
     decide_loop_state,
     encode_ledger,
     latest_ledger,
@@ -408,11 +409,13 @@ def _resolve_loop(
     )
     prior = ledger.findings if ledger is not None and mode == "verify" else ()
     generation = ledger.generation if ledger is not None and mode == "verify" else ""
+    prior, retired = apply_severity_floor(prior, round_number if mode == "verify" else 1)
     return ledger, LoopState(
         mode=mode,
         round_number=round_number,
         prior_findings=prior,
         generation=generation,
+        retired_prior=retired,
     )
 
 
@@ -455,8 +458,18 @@ def _collect_with_loop(
     agent_replies = ""
     if with_replies and state.mode == "verify":
         try:
+            # Replies to findings the severity floor retired would reintroduce
+            # the retired context and invite re-adjudication; only threads for
+            # carried findings (open or disputed) reach the prompt.
+            carried_ids = {finding.id for finding in state.prior_findings}
             agent_replies = render_agent_context(
-                github.list_finding_replies(pr_number, generation=state.generation),
+                [
+                    reply
+                    for reply in github.list_finding_replies(
+                        pr_number, generation=state.generation
+                    )
+                    if reply[0] in carried_ids
+                ],
                 github.list_recent_issue_comments(pr_number),
             )
         except ActionError as exc:

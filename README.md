@@ -125,6 +125,8 @@ Pin `@main` only until you choose a commit SHA. Do not put first-pass and follow
 
 `latest-commit` never silently falls back to the full PR diff. If `before...after` is missing or the compare fails, the action embeds the **single latest head commit** and says so. A truncated diff posts a visible **partial** verdict and is never treated as clean.
 
+The initial round is the exhaustive pass: the prompt requires a per-file, all-severity sweep (bug, risk, **and** nit), and each coverage entry claims a completed sweep of that file. From verify round 2 onward a **severity floor** applies: carried `nit` findings are retired — stated visibly in the round's resolution section, never silently — so follow-up rounds track the bug/risk backlog to convergence instead of re-adjudicating nits forever.
+
 ## Copy-paste: multi-model bake-off
 
 Use the reusable workflow so lanes are **separate GitHub jobs**. Wall clock ≈ slowest lane + judge. GitHub bills those minutes **in parallel**.
@@ -197,7 +199,7 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | Output | Meaning |
 | --- | --- |
 | `verdict` | `clean` \| `issues` \| `partial` \| `error` |
-| `issue_count` | Open findings after this round (carried-over plus new) |
+| `issue_count` | Open findings after this round (carried-over plus new; nits retired by the severity floor excluded) |
 | `bug_count` | Open bug-severity findings after this round |
 | `round` | Review-loop round number this run performed |
 | `review_url` | Posted GitHub review |

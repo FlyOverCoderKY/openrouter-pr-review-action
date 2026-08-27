@@ -196,14 +196,16 @@ def _system_prompt(*, tone: str, mode: str) -> str:
         )
     else:
         task = (
-            "This is an initial review of the full pull request. Be thorough and "
-            "exhaustive: report EVERY genuine issue you can name a concrete "
-            "failure or consequence for, at every severity — bug, risk, and nit. "
-            "Finding one important bug does not end the review; after each "
-            "finding, resume sweeping the remaining files and hunks. A review "
-            "that reports a single major finding while lesser real issues remain "
-            "unreported is incomplete. Do not invent issues. Do not treat the "
-            "embedded diff as sufficient context — open related files with tools."
+            "This is the initial, exhaustive review (round 1) of an automated "
+            "review loop. Your findings are consumed by a fixing agent that "
+            "evaluates every finding and may dispute it, so prefer recall over "
+            "precision: report every genuine issue you can name a concrete "
+            "failure scenario or cost for, at every severity — bug, risk, and "
+            "nit — and do not self-censor borderline findings. There is no "
+            "expected number of findings: a thorough first review of a large "
+            "change may legitimately contain 15-30. Do not stop at a "
+            "representative sample. Do not treat the embedded diff as "
+            "sufficient context — open related files with tools."
         )
         coverage_block = (
             "\n"
@@ -223,17 +225,21 @@ def _system_prompt(*, tone: str, mode: str) -> str:
         sweep_block = ""
     else:
         sweep_block = """
-Sweep the diff file by file. For each changed file, examine every hunk and
-report all real issues before moving on — then keep going through the
-remaining files. Lesser-but-real defects are findings, not omissions: report
-them at `nit` severity instead of dropping them. That includes wrong or
-misapplied references and citations, names or titles that say the wrong
-thing, comments and docs that overclaim what the code does, truncated or
-duplicated quotes, and tests or fixtures that cannot fail for the behavior
-they claim to pin. Do not stop the review because you already have a strong
-finding, and do not stop early to keep the findings list short. Up to 80
-findings are accepted; if you somehow have more, keep the highest-severity
-ones.
+Process:
+1. Sweep every file and every hunk of the embedded diff, in order. For each
+   hunk, ask what input, state, or timing makes it wrong.
+2. Sweep again, hunting specifically for what the first pass missed: removed
+   behavior, broken callers, error paths, missing tests, wrong or misapplied
+   references and citations, names or titles that say the wrong thing,
+   comments and docs that overclaim what the code does, truncated or
+   duplicated quotes, and tests or fixtures that cannot fail for the
+   behavior they claim to pin.
+3. Repeat until a full sweep finds nothing new. Only then write your output.
+
+Minor-but-real defects are `nit` findings, not omissions. Do not stop the
+review because you already have a strong finding, and do not stop early to
+keep the findings list short. Up to 80 findings are accepted; if you somehow
+have more, keep the highest-severity ones.
 """
     return f"""You are a pull-request reviewer. Tone: {tone_word}.
 

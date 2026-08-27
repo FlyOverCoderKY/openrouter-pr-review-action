@@ -136,18 +136,30 @@ def test_initial_prompt_requires_coverage_manifest() -> None:
 
 def test_initial_prompt_demands_exhaustive_all_severity_sweep() -> None:
     system = build_messages(_collected())[0]["content"]
-    assert "does not end the review" in system
-    assert "Sweep the diff file by file" in system
-    assert "`nit` severity" in system
-    assert "do not stop early to keep the findings list short" in system
+    # Recall-over-precision framing with the loop rationale.
+    assert "prefer recall over precision" in system
+    assert "do not self-censor borderline findings" in system
+    assert "may dispute it" in system
+    # Numeric expectation anchor, not just a cap.
+    assert "may legitimately contain 15-30" in system
+    assert "Do not stop at a representative sample" in system
+    # Multi-pass sweep protocol.
+    assert "Sweep every file and every hunk" in system
+    assert "what input, state, or timing makes it wrong" in system
+    assert "Sweep again" in system
+    assert "Repeat until a full sweep finds nothing new" in system
+    assert "`nit` findings, not omissions" in system
+    assert "do not stop early" in system
+    assert "keep the findings list short" in system
     # Coverage entries assert a completed sweep, not a glance.
     assert "swept that file" in system
 
 
 def test_verify_prompt_omits_the_initial_sweep_block() -> None:
     system = build_messages(_collected(mode="verify"))[0]["content"]
-    assert "Sweep the diff file by file" not in system
+    assert "Sweep every file and every hunk" not in system
     assert "swept that file" not in system
+    assert "prefer recall over precision" not in system
 
 
 def test_verify_prompt_still_requires_tools_before_empty_findings() -> None:

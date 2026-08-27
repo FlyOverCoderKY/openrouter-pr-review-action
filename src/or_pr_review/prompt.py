@@ -231,7 +231,9 @@ misapplied references and citations, names or titles that say the wrong
 thing, comments and docs that overclaim what the code does, truncated or
 duplicated quotes, and tests or fixtures that cannot fail for the behavior
 they claim to pin. Do not stop the review because you already have a strong
-finding, and do not limit yourself to a fixed number of findings.
+finding, and do not stop early to keep the findings list short. Up to 80
+findings are accepted; if you somehow have more, keep the highest-severity
+ones.
 """
     return f"""You are a pull-request reviewer. Tone: {tone_word}.
 

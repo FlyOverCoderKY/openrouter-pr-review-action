@@ -233,7 +233,12 @@ def round_report(state: LoopState, outcome: RoundOutcome) -> list[str]:
     if state.mode != "verify":
         return []
     lines = [f"### Round {state.round_number} resolution", ""]
-    lines.extend(outcome.resolution_lines or ["- No prior findings were open."])
+    if outcome.resolution_lines:
+        lines.extend(outcome.resolution_lines)
+    elif not state.retired_prior:
+        # With retirements the report is not empty, and "no prior findings
+        # were open" would contradict the retirement line that follows.
+        lines.append("- No prior findings were open.")
     if state.retired_prior:
         lines.append(
             f"- {len(state.retired_prior)} nit finding(s) from earlier rounds "

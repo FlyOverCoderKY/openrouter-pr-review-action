@@ -148,14 +148,19 @@ def test_apply_severity_floor_retires_nits_from_round_two() -> None:
 
 
 def test_round_report_states_severity_floor_retirement() -> None:
+    # Build the state the way the CLI does — through the partition — so the
+    # asserts pin that retirement actually strips nits out of loop state.
+    findings = (
+        _finding("r1-1"),
+        _finding("r1-2", severity="nit"),
+        _finding("r1-3", severity="nit"),
+    )
+    carried, retired = apply_severity_floor(findings, 2)
     state = LoopState(
         mode="verify",
         round_number=2,
-        prior_findings=(_finding("r1-1"),),
-        retired_prior=(
-            _finding("r1-2", severity="nit"),
-            _finding("r1-3", severity="nit"),
-        ),
+        prior_findings=carried,
+        retired_prior=retired,
     )
     resolutions = {"r1-1": Resolution(id="r1-1", status="fixed", note="done")}
     outcome = apply_round(state, [], resolutions)
@@ -164,10 +169,30 @@ def test_round_report_states_severity_floor_retirement() -> None:
     assert "severity floor" in report
     # Retired findings leave the ledger and the open counts entirely.
     assert all(finding.severity != "nit" for finding in outcome.ledger.findings)
+    assert outcome.ledger.findings == ()
     assert outcome.open_issue_count == 0
     # No retirement, no line.
     bare = LoopState(mode="verify", round_number=2, prior_findings=(_finding("r1-1"),))
     assert "retired" not in "\n".join(round_report(bare, apply_round(bare, [], resolutions)))
+
+
+def test_round_report_nits_only_backlog_reports_only_retirement() -> None:
+    findings = (
+        _finding("r1-1", severity="nit"),
+        _finding("r1-2", severity="nit"),
+    )
+    carried, retired = apply_severity_floor(findings, 2)
+    assert carried == ()
+    state = LoopState(
+        mode="verify", round_number=2, prior_findings=carried, retired_prior=retired
+    )
+    outcome = apply_round(state, [], {})
+    report = "\n".join(round_report(state, outcome))
+    # The retirement line IS the resolution report; the empty-backlog
+    # fallback would contradict it.
+    assert "No prior findings were open" not in report
+    assert "2 nit finding(s) from earlier rounds retired" in report
+    assert outcome.open_issue_count == 0
 
 
 def test_merge_resolutions_is_conservative() -> None:

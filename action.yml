@@ -129,7 +129,7 @@ outputs:
     description: "Review verdict: clean | issues | partial | error"
     value: ${{ steps.run.outputs.verdict }}
   issue_count:
-    description: "Open findings after this round (carried-over plus new)."
+    description: "Open findings after this round (carried-over plus new; nits retired by the severity floor excluded)."
     value: ${{ steps.run.outputs.issue_count }}
   bug_count:
     description: "Open bug-severity findings after this round."

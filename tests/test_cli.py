@@ -1019,6 +1019,69 @@ def test_verify_round_carries_unfixed_finding(
     assert "bug_count=1" in out
 
 
+def test_verify_prompt_excludes_replies_to_retired_nits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import Ledger, LedgerFinding, encode_ledger
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    prior = Ledger(
+        round_number=1,
+        findings=(
+            LedgerFinding(
+                id="r1-1",
+                severity="bug",
+                file="src/api.py",
+                line=42,
+                title="Missing auth check",
+                evidence="Unauthenticated POST is accepted",
+                status="open",
+                models=("x-ai/grok-4.6",),
+            ),
+            LedgerFinding(
+                id="r1-2",
+                severity="nit",
+                file="src/api.py",
+                line=7,
+                title="Duplicated citation",
+                evidence="the same reference twice",
+                status="open",
+                models=("x-ai/grok-4.6",),
+            ),
+        ),
+        reviewed_sha="b" * 40,
+        generation="1234567890ab",
+    )
+
+    class _RepliesGitHub(_LoopGitHub):
+        def list_finding_replies(
+            self, number: int, *, generation: str = ""
+        ) -> list[tuple[str, str, str]]:
+            return [
+                ("r1-1", "dev", "auth check added"),
+                ("r1-2", "dev", "citation deduplicated"),
+            ]
+
+    github = _RepliesGitHub(encode_ledger(prior, repo=repo, pr_number=1))
+    monkeypatch.setattr(cli_mod, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli_mod, "_github", lambda env: github)
+    env = _base_env(
+        tmp_path,
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY=repo,
+        REVIEW_MODE="verify",
+    )
+    _collected, state, agent_replies = cli_mod._collect_with_loop(env)
+    assert [finding.id for finding in state.prior_findings] == ["r1-1"]
+    assert [finding.id for finding in state.retired_prior] == ["r1-2"]
+    assert "r1-1" in agent_replies
+    assert "auth check added" in agent_replies
+    assert "r1-2" not in agent_replies
+    assert "citation deduplicated" not in agent_replies
+
+
 def test_verify_round_retires_carried_nits_via_severity_floor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -139,7 +139,7 @@ def test_initial_prompt_demands_exhaustive_all_severity_sweep() -> None:
     assert "does not end the review" in system
     assert "Sweep the diff file by file" in system
     assert "`nit` severity" in system
-    assert "do not limit yourself to a fixed number of findings" in system
+    assert "do not stop early to keep the findings list short" in system
     # Coverage entries assert a completed sweep, not a glance.
     assert "swept that file" in system
 

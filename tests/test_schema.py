@@ -167,6 +167,26 @@ def test_coverage_schema_flags() -> None:
     assert "coverage" not in findings_json_schema()["schema"]["properties"]
 
 
+def test_findings_cap_is_advertised_and_overflow_is_loud(capsys) -> None:
+    import json as json_mod
+
+    from or_pr_review.schema import MAX_FINDINGS, findings_json_schema, parse_lane_payload
+
+    assert findings_json_schema()["schema"]["properties"]["findings"]["maxItems"] == MAX_FINDINGS
+    finding = {
+        "title": "t",
+        "body": "b",
+        "severity": "nit",
+        "file": None,
+        "line": None,
+    }
+    text = json_mod.dumps({"findings": [finding] * (MAX_FINDINGS + 5)})
+    findings, _resolutions, _coverage = parse_lane_payload(text, "m")
+    assert len(findings) == MAX_FINDINGS
+    out = capsys.readouterr().out
+    assert f"warning: model returned {MAX_FINDINGS + 5} findings" in out
+
+
 def test_parse_lane_payload_coverage_rules() -> None:
     import pytest
 

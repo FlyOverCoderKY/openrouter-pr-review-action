@@ -23,8 +23,7 @@
       "KeyError",
       "years? (outside|other than|before|not in)",
       "any other year",
-      "unsupported year",
-      "crash(es)? for"
+      "unsupported year"
     ]
   },
   {
@@ -43,7 +42,7 @@
   {
     "id": "R2",
     "severity": "risk",
-    "file": "calc.py",
+    "file": null,
     "title": "validate_amount call removed; negative amounts now accepted",
     "keywords": [
       "validate_amount",
@@ -69,7 +68,7 @@
   {
     "id": "R4",
     "severity": "risk",
-    "file": "docs/rules.md",
+    "file": null,
     "title": "docs/rules.md inventory does not list the new 2027 rule id",
     "keywords": [
       "rules\\.md",
@@ -97,9 +96,7 @@
     "file": "rules.py",
     "title": "New id uses 'modelled' while the existing style is 'modeled'",
     "keywords": [
-      "modelled",
-      "spelling",
-      "inconsisten"
+      "modelled"
     ]
   },
   {

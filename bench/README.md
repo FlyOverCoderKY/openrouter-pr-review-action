@@ -21,15 +21,21 @@ Two tiers of fixture:
 ```bash
 export OPENROUTER_API_KEY=...   # `run` spends real tokens; `score` is offline
 python -m or_pr_review.bench run bench/fixtures/planted-mini \
-    --model x-ai/grok-4.6 --runs 3 --out /tmp/bench-out
+    --model x-ai/grok-4.6 --out /tmp/bench-out
 python -m or_pr_review.bench score bench/fixtures/planted-mini /tmp/bench-out
 ```
 
-Lanes are nondeterministic — run at least 3× and compare means, not single
-runs. `score` reports per-severity recall, precision, the labels every run
-missed, and each run's unmatched findings (triage those: a consistent
-unmatched finding may be a new true positive worth adding as a label, or
-noise worth a prompt tweak).
+Lanes are nondeterministic — `run` defaults to 3 runs, and `score` prints a
+mean row across the successful runs. `run` clears stale `run-*.json` files
+from `--out` first (leftovers would silently mix experiments), exits
+non-zero when any lane fails, and defaults `--effort` to empty to match the
+shipped action (pass `--effort high` explicitly to mirror a caller that sets
+it). `score` reports per-severity recall (detection, regardless of the
+severity the finding reported), a `sev-agree` column (matched labels hit at
+the label's own severity), precision, the labels every run missed, and each
+run's unmatched findings (triage those: a consistent unmatched finding may
+be a new true positive worth adding as a label, or noise worth a prompt
+tweak).
 
 ## Label format
 
@@ -49,6 +55,12 @@ mentioning; give several alternates per label.
 python bench/capture.py --repo RetireGolden/RetireGolden --pr 331 \
     --clone ~/src/RetireGolden --out bench/fixtures-local/rg-331
 ```
+
+Capture pins metadata, diff, and checkout to one PR head (it aborts if the
+PR advances mid-capture — just re-run), records `max_diff_kb` (default 600,
+the org value) so the replay embeds the same truncated diff production
+would, and refuses `--out` under committed `bench/fixtures/` unless
+`--allow-committed` is passed.
 
 Then curate `labels.json` from the PR's adjudicated findings (every
 reviewer's validated true positives — including findings the lane under test

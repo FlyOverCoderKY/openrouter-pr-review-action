@@ -48,11 +48,20 @@ Findings, corrected:
 4. Personas were NOT measured (they remain unimplemented); this experiment
    only sets the bar any persona proposal must beat.
 
-**Recommendation, revised**: two-model lanes are NOT ready to deploy. The
-pre-judge diversity win is real and cheap, so the gating work item for any
-multi-lane v1.3 is **judge recall-safety**: a judge contract that must
-retain every distinct input issue (merge only true duplicates), verified on
-this same judged-pair bench before any lane-roster change ships. Wall-clock
+**Judge fix, measured (same judged-pair bench)**: with the union-merge
+contract plus a deterministic recall floor in code (judge output below the
+largest lane's count, or above the lanes' sum, is replaced by an
+exact-dedup union that cannot lose a finding), the same five pairings
+score **97% recall, B1 4/5, 17.0 mean findings** — vs 86%/1-in-5/9.8 under
+the old contract. The floor fired on 3 of 5 pairs (flash-lite still
+under-merges), so those posts carry the fuller union; a stronger judge
+model is polish, not a blocker. Two-model rosters are deployable again,
+recall-safe by construction.
+
+**Recommendation, final**: with the measured judge fix above, the v1.3
+two-model roster (`models: x-ai/grok-4.6,z-ai/glm-5.3-flash`) is
+deployable — 97% recall / B1 4-in-5 through the full production path at
+~1.04x cost, recall-safe by construction. Wall-clock
 note: two-lane wall time ≈ the slower lane (GLM ~150s fixture-scale) plus
 the judge call.
 

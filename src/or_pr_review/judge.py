@@ -62,11 +62,19 @@ def build_judge_messages(lanes: list[dict[str, Any]]) -> list[dict[str, str]]:
         {
             "role": "system",
             "content": (
-                "You merge already-structured pull-request review findings from "
-                "independent model lanes. You are not a second reviewer and must "
-                "not invent new issues. De-dupe the same underlying problem, keep "
-                "the strongest severity, prefer the clearest body, and list every "
-                "lane model that reported it in `models`.\n\n"
+                "You are a UNION-MERGE for already-structured pull-request review "
+                "findings from independent model lanes — NOT a filter and NOT a "
+                "second reviewer. The output MUST contain every distinct finding "
+                "from every lane: merge two findings into one ONLY when they "
+                "describe the same defect at the same location; when unsure "
+                "whether two findings are the same defect, keep both. Never drop "
+                "a finding for importance, severity, redundancy of theme, style, "
+                "or quality — recall was already decided by the lanes. Do not "
+                "invent new issues. For a merged duplicate keep the strongest "
+                "severity, prefer the clearest body, and list every lane model "
+                "that reported it in `models`. A correct merge has at least as "
+                "many issues as the largest single lane, and usually close to "
+                "the sum of the lanes minus true cross-lane duplicates.\n\n"
                 "Return JSON only: {\"issues\": [{\"title\", \"body\", \"severity\", "
                 "\"file\", \"line\", \"models\"}]}. severity is bug, risk, or nit. "
                 "file/line may be null. Do not think at length; this is clerical merge."
@@ -177,4 +185,74 @@ def run_llm_judge(
         raise SchemaError(f"judge response shape is invalid: {exc}") from exc
     if not content.strip():
         raise SchemaError("judge returned an empty assistant message")
-    return parse_judge_issues(content, allowed_models=allowed)
+    issues = parse_judge_issues(content, allowed_models=allowed)
+    return _enforce_recall_floor(issues, lanes)
+
+
+def deterministic_union(lanes: list[dict[str, Any]]) -> list[MergedIssue]:
+    """Recall-safe fallback merge: concatenate every lane's findings, merging
+    only exact duplicates (same file, line, and case-folded title) by
+    attribution. Noisier than a good LLM merge, but it can never lose a
+    finding."""
+    merged: dict[tuple[str | None, int | None, str], MergedIssue] = {}
+    for lane in lanes:
+        lane_model = str(lane.get("model") or "")
+        for finding in lane.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            title = str(finding.get("title") or "").strip()
+            if not title:
+                continue
+            severity = str(finding.get("severity") or "nit").strip().lower()
+            if severity not in SEVERITIES:
+                severity = "nit"
+            file_value = finding.get("file")
+            path = (
+                file_value.strip()
+                if isinstance(file_value, str) and file_value.strip()
+                else None
+            )
+            if path and not valid_review_path(path):
+                path = None
+            line = finding.get("line")
+            line_n = (
+                line
+                if isinstance(line, int) and not isinstance(line, bool) and line > 0
+                else None
+            )
+            key = (path, line_n, title.casefold())
+            if key in merged:
+                existing = merged[key]
+                if lane_model and lane_model not in existing.models:
+                    existing.models.append(lane_model)
+                continue
+            merged[key] = MergedIssue(
+                title=title[:MAX_TITLE],
+                body=str(finding.get("body") or "").strip()[:MAX_BODY],
+                severity=severity,
+                file=path,
+                line=line_n,
+                models=[lane_model] if lane_model else [],
+            )
+    return list(merged.values())[:MAX_FINDINGS]
+
+
+def _enforce_recall_floor(
+    issues: list[MergedIssue], lanes: list[dict[str, Any]]
+) -> list[MergedIssue]:
+    """A correct cross-lane merge can never yield fewer issues than the
+    largest single lane (lanes are already internally deduped), nor more
+    than the sum of all lanes (the judge must not invent issues). Outside
+    those bounds the judge filtered or fabricated — fall back to the
+    deterministic union rather than publish a recall regression."""
+    lane_counts = [len(lane.get("findings") or []) for lane in lanes]
+    floor = max(lane_counts, default=0)
+    ceiling = sum(lane_counts)
+    if floor <= len(issues) <= max(ceiling, floor):
+        return issues
+    print(
+        f"judge recall floor violated: {len(issues)} issue(s) from lanes of "
+        f"{lane_counts} (floor {floor}, ceiling {ceiling}); using the "
+        "deterministic union instead"
+    )
+    return deterministic_union(lanes)

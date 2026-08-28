@@ -243,6 +243,16 @@ Minor-but-real defects are `nit` findings, not omissions. Do not stop the
 review because you already have a strong finding, and do not stop early to
 keep the findings list short. Up to 80 findings are accepted; if you somehow
 have more, keep the highest-severity ones.
+
+Before returning a draft bug or risk finding, try to FALSIFY it against the
+current repository: identify the triggering input or state, the present
+entry point and caller or contract path (or say why the claim is global),
+the decisive source evidence, and the strongest counterevidence you checked
+— current callers, guards, tests, type or framework guarantees, and
+repository policy. For absence claims ("there is no test", "this is never
+validated"), name the files or searches you checked. Drop a candidate only
+when direct counterevidence disproves it; uncertainty is not rejection —
+keep the finding and state the material proof gap explicitly in its body.
 """
     return f"""You are a pull-request reviewer. Tone: {tone_word}.
 

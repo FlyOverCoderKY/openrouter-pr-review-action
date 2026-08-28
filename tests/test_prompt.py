@@ -153,6 +153,10 @@ def test_initial_prompt_demands_exhaustive_all_severity_sweep() -> None:
     assert "keep the findings list short" in system
     # Coverage entries assert a completed sweep, not a glance.
     assert "swept that file" in system
+    # Falsification pass with the asymmetric guardrail.
+    assert "try to FALSIFY" in system
+    assert "uncertainty is not rejection" in system
+    assert "name the files or searches you checked" in system
 
 
 def test_verify_prompt_omits_the_initial_sweep_block() -> None:
@@ -160,6 +164,7 @@ def test_verify_prompt_omits_the_initial_sweep_block() -> None:
     assert "Sweep every file and every hunk" not in system
     assert "swept that file" not in system
     assert "prefer recall over precision" not in system
+    assert "try to FALSIFY" not in system
 
 
 def test_verify_prompt_still_requires_tools_before_empty_findings() -> None:

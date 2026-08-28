@@ -11,6 +11,31 @@ usage at the listed provider's pricing on the run date.
 > `noise` column, so precision numbers are not directly comparable across
 > that boundary (recall numbers are).
 
+## 2026-08-28 — falsification-pass prompt A/B (x-ai/grok-4.6, 5 runs/arm)
+
+The research report's experiment #1: adding an asymmetric falsification pass
+to the initial prompt (falsify each draft bug/risk against callers, guards,
+tests, and framework guarantees; name searches behind absence claims; drop
+only on direct counterevidence — uncertainty stays as a stated proof gap).
+First experiment scored under three-way adjudication with the noise column
+and both twins.
+
+| arm | recall | bug | diff-stratum | sev-agree | noise (planted) | clean-twin findings/run |
+| --- | --- | --- | --- | --- | --- | --- |
+| v1.2.2 baseline | 91% | 80% | 90% | 30% | 2% | 5.0 |
+| + falsification | **95%** | 80% | **94%** | **42%** | **0%** | **3.8** |
+
+**Adopted**: no downside cell — recall rose (asymmetric guardrail held),
+severity calibration improved, noise fell on both fixtures. Two side
+lessons: (1) baseline recall at n=5 is 91%, not the 97-100% the earlier n=3
+rows suggested — small samples flattered every model above; (2) the clean
+twin's findings are defensible minor observations about genuinely imperfect
+corners of the "clean" code (unvalidated negatives in apply_cap, loose
+exception asserts, under-cap paths untested), NOT fabrications — zero
+invented defects in 10 clean runs. As built, the clean twin measures the
+chattiness floor rather than hallucination; harden the clean head or
+adjudicate its recurring observations to sharpen the question.
+
 ## 2026-08-27 — planted-mini, six models
 
 Fixture: `bench/fixtures/planted-mini` (11 labels: 2 bug / 4 risk / 5 nit),

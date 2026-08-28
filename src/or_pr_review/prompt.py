@@ -6,9 +6,11 @@ without rewriting the lane/judge layout. Do not implement personas here.
 
 from __future__ import annotations
 
+import json
 import re
 
 from or_pr_review.collect import CollectedReview
+from or_pr_review.errors import ActionError
 from or_pr_review.loop import LoopState
 
 # Reserved unused hook. v1 ignores any persona value and sends this same
@@ -87,6 +89,7 @@ def build_messages(
     persona: str = "",
     loop: LoopState | None = None,
     agent_replies: str = "",
+    path_profiles: list[dict] | None = None,
 ) -> list[dict[str, str]]:
     # Reserved unused hook. Keep `_PERSONA_UNUSED` referenced so a later
     # persona feature can land here without rewriting the prompt builder.
@@ -97,11 +100,75 @@ def build_messages(
         custom_instructions=custom_instructions,
         loop=loop,
         agent_replies=agent_replies,
+        path_profiles=path_profiles,
     )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+
+
+def parse_path_profiles(raw: str | None) -> list[dict] | None:
+    """Validate the caller-owned path_profiles input (trusted workflow config).
+
+    JSON array of {"name"?: str, "paths": [glob, ...], "instructions": str}.
+    Profiles are additive guidance only; they can never exclude files from
+    review, so validation is about shape and size, not content policy.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if len(text.encode("utf-8")) > 16_000:
+        raise ActionError("path_profiles exceeds 16,000 UTF-8 bytes")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ActionError(f"path_profiles is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, list) or len(parsed) > 20:
+        raise ActionError("path_profiles must be a JSON array of at most 20 profiles")
+    for index, profile in enumerate(parsed):
+        if not isinstance(profile, dict):
+            raise ActionError(f"path_profiles[{index}] must be an object")
+        paths = profile.get("paths")
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(p, str) and p.strip() for p in paths)
+        ):
+            raise ActionError(
+                f"path_profiles[{index}].paths must be a non-empty list of glob strings"
+            )
+        instructions = profile.get("instructions")
+        if not isinstance(instructions, str) or not instructions.strip():
+            raise ActionError(
+                f"path_profiles[{index}].instructions must be a non-empty string"
+            )
+    return parsed
+
+
+def matched_profiles(
+    profiles: list[dict] | None, changed_paths: list[str]
+) -> list[dict]:
+    """Profiles whose glob patterns match at least one changed path.
+
+    Profiles are ADDITIVE, caller-owned guidance (trusted workflow
+    configuration, never repository content): they may sharpen attention on
+    matching files but never exclude a file or replace the generic sweep.
+    """
+    import fnmatch
+
+    if not profiles:
+        return []
+    matched: list[dict] = []
+    for profile in profiles:
+        patterns = profile.get("paths", [])
+        if any(
+            fnmatch.fnmatch(path, pattern)
+            for pattern in patterns
+            for path in changed_paths
+        ):
+            matched.append(profile)
+    return matched
 
 
 def changed_paths_from_diff(diff: str) -> list[str]:
@@ -312,6 +379,7 @@ def _user_prompt(
     custom_instructions: str,
     loop: LoopState | None = None,
     agent_replies: str = "",
+    path_profiles: list[dict] | None = None,
 ) -> str:
     notices: list[str] = []
     if collected.plan.fallback_notice:
@@ -333,6 +401,7 @@ def _user_prompt(
     paths = changed_paths_from_diff(collected.diff)
     path_block = _changed_paths_block(paths)
     loop_block = _loop_block(loop, agent_replies)
+    profile_block = _profiles_block(matched_profiles(path_profiles, paths))
 
     return f"""## Review metadata
 
@@ -343,7 +412,7 @@ def _user_prompt(
 - Base ref: {collected.base_ref}
 - Head ref: {collected.head_ref}
 
-{notice_block}{extra_block}{loop_block}{path_block}## Untrusted PR title
+{notice_block}{extra_block}{profile_block}{loop_block}{path_block}## Untrusted PR title
 
 {_fence(collected.title)}
 
@@ -391,6 +460,26 @@ def _loop_block(loop: LoopState | None, agent_replies: str) -> str:
                 "",
             ]
         )
+    return "\n".join(lines) + "\n"
+
+
+def _profiles_block(profiles: list[dict]) -> str:
+    if not profiles:
+        return ""
+    lines = [
+        "## Path review profiles (caller-owned; additive to the full sweep)",
+        "",
+        "These caller-configured checks apply because matching files changed.",
+        "They sharpen attention; they never narrow the review — every changed",
+        "file still gets the full sweep.",
+        "",
+    ]
+    for profile in profiles:
+        name = profile.get("name") or ", ".join(profile.get("paths", []))
+        lines.append(f"### {name}")
+        lines.append("")
+        lines.append(str(profile.get("instructions", "")).strip())
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 

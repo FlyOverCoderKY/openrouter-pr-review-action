@@ -59,6 +59,10 @@ inputs:
     description: "Extra prompt instructions (max 16,000 UTF-8 bytes; do not include secrets)."
     required: false
     default: ""
+  path_profiles:
+    description: "Caller-owned additive review profiles as a JSON array of {name?, paths: [globs], instructions} — applied only when a changed path matches; never narrows the review (max 16,000 UTF-8 bytes)."
+    required: false
+    default: ""
   status_comments:
     description: "Post/update a live status comment on the PR."
     required: false
@@ -188,6 +192,7 @@ runs:
         FAIL_ON: ${{ inputs.fail_on }}
         ROAST_LEVEL: ${{ inputs.roast_level }}
         CUSTOM_INSTRUCTIONS: ${{ inputs.custom_instructions }}
+        PATH_PROFILES: ${{ inputs.path_profiles }}
         STATUS_COMMENTS: ${{ inputs.status_comments }}
         MAX_DIFF_KB: ${{ inputs.max_diff_kb }}
         REVIEW_SCOPE: ${{ inputs.review_scope }}

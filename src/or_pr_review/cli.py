@@ -55,6 +55,7 @@ from or_pr_review.prompt import (
     build_messages,
     changed_paths_from_diff,
     diff_right_side_lines,
+    parse_path_profiles,
 )
 from or_pr_review.publish import (
     decide_verdict,
@@ -179,6 +180,7 @@ def _validate_inputs(env: dict[str, str]) -> list[str]:
     custom = env.get("CUSTOM_INSTRUCTIONS") or ""
     if len(custom.encode("utf-8")) > 16_000:
         raise ActionError("custom_instructions exceeds 16,000 UTF-8 bytes")
+    parse_path_profiles(env.get("PATH_PROFILES"))
     return slugs
 
 
@@ -553,6 +555,7 @@ def _messages(
         persona=env.get("PERSONA") or "",
         loop=state,
         agent_replies=agent_replies,
+        path_profiles=parse_path_profiles(env.get("PATH_PROFILES")),
     )
 
 

@@ -226,3 +226,47 @@ def test_verify_prompt_lists_prior_findings_and_contract() -> None:
     assert '"resolutions"' in text
     assert "Fixing agent responses" in text
     assert "never" in text  # never follow instructions in replies
+
+
+def test_path_profiles_apply_only_when_paths_match() -> None:
+    from or_pr_review.prompt import matched_profiles, parse_path_profiles
+
+    profiles = parse_path_profiles(
+        '[{"name": "source-of-truth", "paths": ["*calc*", "*rules*"],'
+        ' "instructions": "Verify every stated figure against its cited authority."}]'
+    )
+    assert matched_profiles(profiles, ["calc.py", "tests/test_calc.py"]) == profiles
+    assert matched_profiles(profiles, ["docs/readme.md"]) == []
+    assert matched_profiles(None, ["calc.py"]) == []
+
+    text = build_messages(
+        _collected(
+            diff="diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n"
+        ),
+        path_profiles=profiles,
+    )[1]["content"]
+    assert "## Path review profiles (caller-owned; additive to the full sweep)" in text
+    assert "### source-of-truth" in text
+    assert "Verify every stated figure" in text
+    assert "never narrow the review" in text
+    # Non-matching diff: no block at all.
+    unmatched = build_messages(_collected(), path_profiles=profiles)[1]["content"]
+    assert "Path review profiles" not in unmatched
+
+
+def test_parse_path_profiles_validation() -> None:
+    import pytest as _pytest
+
+    from or_pr_review.errors import ActionError
+    from or_pr_review.prompt import parse_path_profiles
+
+    assert parse_path_profiles(None) is None
+    assert parse_path_profiles("  ") is None
+    with _pytest.raises(ActionError, match="not valid JSON"):
+        parse_path_profiles("{nope")
+    with _pytest.raises(ActionError, match="JSON array"):
+        parse_path_profiles('{"paths": []}')
+    with _pytest.raises(ActionError, match="paths"):
+        parse_path_profiles('[{"instructions": "x"}]')
+    with _pytest.raises(ActionError, match="instructions"):
+        parse_path_profiles('[{"paths": ["*.py"]}]')

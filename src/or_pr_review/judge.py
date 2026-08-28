@@ -246,6 +246,19 @@ def _severity_sorted(issues: list[MergedIssue]) -> list[MergedIssue]:
     return sorted(issues, key=lambda i: -_SEVERITY_RANK.get(i.severity, 0))
 
 
+def _capped(issues: list[MergedIssue], context: str) -> list[MergedIssue]:
+    """Severity-sorted publishing cap — loud, never silent: the strongest
+    findings are kept and the truncation is logged."""
+    ordered = _severity_sorted(issues)
+    if len(ordered) > MAX_FINDINGS:
+        print(
+            f"judge {context}: {len(ordered)} findings exceed the publishing "
+            f"cap ({MAX_FINDINGS}); keeping the strongest severities and "
+            f"dropping {len(ordered) - MAX_FINDINGS}"
+        )
+    return ordered[:MAX_FINDINGS]
+
+
 def deterministic_union(lanes: list[dict[str, Any]]) -> list[MergedIssue]:
     """Recall-safe fallback merge: concatenate every lane's findings, merging
     only exact duplicates (same file, line, and case-folded title). A merged
@@ -273,7 +286,7 @@ def deterministic_union(lanes: list[dict[str, Any]]) -> list[MergedIssue]:
                 existing.severity = issue.severity
             if len(issue.body) > len(existing.body):
                 existing.body = issue.body
-    return _severity_sorted(list(merged.values()))[:MAX_FINDINGS]
+    return _capped(list(merged.values()), "union")
 
 
 def _verify_coverage(
@@ -351,7 +364,7 @@ def _verify_coverage(
         mode += f"(split+{split})"
     if restored:
         mode += f"(+{restored})"
-    return _severity_sorted(kept)[:MAX_FINDINGS], mode
+    return _capped(kept, "repair"), mode
 
 
 _MERGE_LINE_TOLERANCE = 5

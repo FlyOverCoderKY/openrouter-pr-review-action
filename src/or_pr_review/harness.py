@@ -249,6 +249,8 @@ def run_lane(
             validate_final=_validate,
         )
         findings, resolutions, coverage = _validate(content)
+        if workspace is not None:
+            findings = sanitize_anchors(findings, workspace)
     except LaneError as exc:
         failed = failed_lane(model, redact(str(exc)), elapsed_ms=_elapsed_ms(started))
         _attach_stats(failed, stats, usage)
@@ -587,6 +589,48 @@ def _absorb_usage(
         cached = details.get("cached_tokens")
         if isinstance(cached, int):
             usage["cached_tokens"] = usage.get("cached_tokens", 0) + cached
+
+
+def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:
+    """Deterministic anchor sanity gate: null objectively impossible locations.
+
+    A finding whose path does not exist in the reviewed checkout, or whose
+    line lies beyond the end of its file, keeps its title/body/severity but
+    loses the impossible anchor (path -> body-only, out-of-range line ->
+    path-only). This is a zero-model-call accuracy gate: it removes only
+    locations that cannot exist, never a finding — out-of-diff blast-radius
+    citations of real files pass untouched. Each adjustment is logged.
+    """
+    from dataclasses import replace as _replace
+
+    sanitized: list[Finding] = []
+    for finding in findings:
+        if finding.file is None:
+            sanitized.append(finding)
+            continue
+        target = workspace / finding.file
+        if not target.is_file():
+            print(
+                f"anchor gate: `{finding.file}` does not exist in the reviewed "
+                f"checkout; finding {finding.title[:60]!r} becomes body-only"
+            )
+            sanitized.append(_replace(finding, file=None, line=None))
+            continue
+        if finding.line is not None:
+            try:
+                line_count = sum(1 for _ in target.open("rb"))
+            except OSError:
+                line_count = None
+            if line_count is not None and finding.line > line_count:
+                print(
+                    f"anchor gate: line {finding.line} is beyond the end of "
+                    f"`{finding.file}` ({line_count} line(s)); dropping the line "
+                    f"anchor of {finding.title[:60]!r}"
+                )
+                sanitized.append(_replace(finding, line=None))
+                continue
+        sanitized.append(finding)
+    return sanitized
 
 
 def _elapsed_ms(started: float) -> int:

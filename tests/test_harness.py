@@ -71,6 +71,7 @@ def test_lane_parses_structured_findings(tmp_path: Path) -> None:
             "usage": {"prompt_tokens": 10, "completion_tokens": 20},
         }
 
+    (tmp_path / "db.py").write_text("\n".join(f"line{i}" for i in range(1, 20)), encoding="utf-8")
     result = run_lane(
         model="x-ai/grok-4.6",
         messages=[{"role": "user", "content": "review"}],
@@ -81,7 +82,41 @@ def test_lane_parses_structured_findings(tmp_path: Path) -> None:
     )
     assert result.ok
     assert result.findings[0].title == "Race"
+    # A real path with an in-range line passes the anchor gate untouched.
+    assert result.findings[0].file == "db.py"
+    assert result.findings[0].line == 9
     assert result.prompt_tokens == 10
+
+
+def test_anchor_gate_nulls_impossible_locations(tmp_path: Path) -> None:
+    from or_pr_review.harness import sanitize_anchors
+    from or_pr_review.schema import Finding
+
+    (tmp_path / "real.py").write_text("one\ntwo\n", encoding="utf-8")
+
+    def finding(title: str, file: str | None, line: int | None) -> Finding:
+        return Finding(title=title, body="b", severity="risk", file=file, line=line, model_id="m")
+
+    out = sanitize_anchors(
+        [
+            finding("valid anchor", "real.py", 2),
+            finding("ghost path", "no/such.py", 3),
+            finding("line beyond eof", "real.py", 99),
+            finding("fileless blast radius", None, None),
+        ],
+        tmp_path,
+    )
+    # Never drops a finding — only the impossible parts of its anchor.
+    assert [f.title for f in out] == [
+        "valid anchor",
+        "ghost path",
+        "line beyond eof",
+        "fileless blast radius",
+    ]
+    assert (out[0].file, out[0].line) == ("real.py", 2)
+    assert (out[1].file, out[1].line) == (None, None)
+    assert (out[2].file, out[2].line) == ("real.py", None)
+    assert (out[3].file, out[3].line) == (None, None)
 
 
 def test_lane_tool_call_then_findings(tmp_path: Path) -> None:

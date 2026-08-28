@@ -22,15 +22,23 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "bench" / "fixtures" / "p
 
 def test_planted_fixture_loads_and_builds_messages() -> None:
     fixture = load_fixture(FIXTURE_DIR)
-    assert len(fixture.labels) == 11
+    assert len(fixture.labels) == 13
     severities = [label.severity for label in fixture.labels]
     assert severities.count("bug") == 2
-    assert severities.count("risk") == 4
+    assert severities.count("risk") == 6
     assert severities.count("nit") == 5
     assert "diff --git a/calc.py" in fixture.diff
     # The blast-radius plant: docs/rules.md is in the checkout but NOT the diff.
     assert (fixture.checkout / "docs" / "rules.md").is_file()
     assert "docs/rules.md" not in changed_paths_from_diff(fixture.diff)
+    # Containment: the file/repo-context plants must stay OUT of the planted
+    # diff (their strata claims depend on it) while the clean twin fixes them.
+    assert "SUPPORTED_YEARS" not in fixture.diff
+    assert "report.py" not in fixture.diff
+    assert (fixture.checkout / "report.py").is_file()
+    clean = load_fixture(FIXTURE_DIR.parent / "planted-mini-clean")
+    assert "SUPPORTED_YEARS" in clean.diff
+    assert "report.py" in clean.diff
     # The fixture must NOT hint at its own plants through custom instructions.
     assert fixture.custom_instructions == ""
     collected = collected_from_fixture(fixture)
@@ -150,7 +158,9 @@ def test_planted_fixture_context_labels_and_adjudications() -> None:
     fixture = load_fixture(FIXTURE_DIR)
     contexts = {label.id: label.context for label in fixture.labels}
     assert contexts["R4"] == "repo"  # the docs-inventory plant needs tool use
-    assert all(c == "diff" for lid, c in contexts.items() if lid != "R4")
+    assert contexts["R6"] == "repo"  # the report.py caller plant lives outside the diff
+    assert contexts["F1"] == "file"  # SUPPORTED_YEARS is only visible by reading calc.py
+    assert all(c == "diff" for lid, c in contexts.items() if lid not in {"R4", "R6", "F1"})
     assert any(a.verdict == "true_positive_unlabeled" for a in fixture.adjudications)
 
 

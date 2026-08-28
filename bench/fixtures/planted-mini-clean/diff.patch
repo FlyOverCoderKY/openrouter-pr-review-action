@@ -1,5 +1,5 @@
 diff --git a/calc.py b/calc.py
-index c8caa70..040e601 100644
+index ae65076..44b1c7f 100644
 --- a/calc.py
 +++ b/calc.py
 @@ -1,11 +1,14 @@
@@ -19,7 +19,16 @@ index c8caa70..040e601 100644
      return min(amount, caps[year])
  
  
-@@ -20,3 +23,10 @@ def contribution_total(amounts: list[int]) -> int:
+@@ -19,7 +22,7 @@ def validate_amount(amount: int) -> None:
+ # disagree about which years the engine supports.
+ # The padding around this block keeps it clear of the surrounding diff
+ # hunks' context windows: finding it must require reading the file.
+-SUPPORTED_YEARS = (2026,)
++SUPPORTED_YEARS = (2026, 2027)
+ 
+ 
+ def validate_year(year: int) -> None:
+@@ -33,3 +36,10 @@ def contribution_total(amounts: list[int]) -> int:
          validate_amount(amount)
          total += amount
      return total
@@ -39,6 +48,21 @@ index b4fd40f..e4e5d67 100644
  | --- | --- |
  | hsa-cap-2026-modeled | 2026 HSA family contributions are capped at $8,300. |
 +| hsa-cap-2027-modeled | 2027 HSA family contributions are capped at $8,550. |
+diff --git a/report.py b/report.py
+index b565c33..f55370f 100644
+--- a/report.py
++++ b/report.py
+@@ -5,7 +5,7 @@ from calc import apply_cap, contribution_total, validate_year
+ 
+ def annual_report(amounts: list[int], year: int) -> dict:
+     validate_year(year)
+-    # Shortcut: apply_cap defaults to the current plan year. Safe while
+-    # only one plan year is supported.
+-    capped = apply_cap(contribution_total(amounts))
++    # Cap for the report's own plan year: the default-year shortcut broke
++    # once more than one plan year existed.
++    capped = apply_cap(contribution_total(amounts), year)
+     return {"year": year, "capped_total": capped}
 diff --git a/rules.py b/rules.py
 index df5a643..a1616cc 100644
 --- a/rules.py

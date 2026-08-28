@@ -1,5 +1,5 @@
 diff --git a/calc.py b/calc.py
-index c8caa70..2b4d2ae 100644
+index ae65076..f154a2e 100644
 --- a/calc.py
 +++ b/calc.py
 @@ -1,11 +1,15 @@
@@ -20,7 +20,7 @@ index c8caa70..2b4d2ae 100644
      return min(amount, caps[year])
  
  
-@@ -17,6 +21,10 @@ def validate_amount(amount: int) -> None:
+@@ -30,6 +34,10 @@ def validate_year(year: int) -> None:
  def contribution_total(amounts: list[int]) -> int:
      total = 0
      for amount in amounts:

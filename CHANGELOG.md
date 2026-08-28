@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fixture v2: file- and repo-context plants** (prerequisite the research report set before any context-sensitive prompt change): planted-mini gains F1 (`SUPPORTED_YEARS` still lists only 2026 while `apply_cap` gained 2027 — visible only by reading calc.py beyond the hunks) and R6 (`report.py`'s `annual_report` caps with the default year, wrong once a second plan year exists — visible only by following callers outside the diff). Containment is test-enforced: neither plant may appear in the planted diff, and the clean twin must fix both. 13 labels: 2 bug / 6 risk / 5 nit across 10 diff / 1 file / 2 repo.
+
 - **Deterministic anchor sanity gate** (research report #4, zero model calls): after schema finalization, a finding whose path does not exist in the reviewed checkout becomes body-only, and a line beyond the end of its file loses the line anchor — the finding itself always survives, so out-of-diff blast-radius citations of real files pass untouched, and each adjustment is logged. Safety-validated by replaying all 66 saved bench lane artifacts (535 findings): one anchor altered, and correctly — a model cited `docs/rules.md:8` for a missing inventory row in a 7-line file. Hardened by its own self-review: the gate errs toward keeping anchors — path existence is judged against the commit's full tracked-path manifest (the inert snapshot deliberately omits oversized/non-regular files), directories count as existing, lines are counted the way the read tools number them (str.splitlines), tool-less runs gate against the workflow's own checkout, and judge-merged issues pass through the same gate.
 
 ## 1.2.3 — 2026-08-28

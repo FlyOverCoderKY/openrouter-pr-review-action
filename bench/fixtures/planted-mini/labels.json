@@ -12,7 +12,8 @@
       "copies? the 2026",
       "2027.{0,40}8[_,]?300",
       "8[_,]?300.{0,40}2027"
-    ]
+    ],
+    "context": "diff"
   },
   {
     "id": "B2",
@@ -24,7 +25,8 @@
       "years? (outside|other than|before|not in)",
       "any other year",
       "unsupported year"
-    ]
+    ],
+    "context": "diff"
   },
   {
     "id": "R1",
@@ -37,7 +39,8 @@
       "division by zero",
       "empty (list|input|amounts)",
       "len\\(amounts\\) (is|== ?)0"
-    ]
+    ],
+    "context": "diff"
   },
   {
     "id": "R2",
@@ -49,7 +52,8 @@
       "negative amounts?",
       "no longer validate[sd]?",
       "validation (was )?removed"
-    ]
+    ],
+    "context": "diff"
   },
   {
     "id": "R3",
@@ -63,7 +67,8 @@
       "cannot fail",
       "tautolog",
       "min\\(amount, CAP_2027\\)"
-    ]
+    ],
+    "context": "diff"
   },
   {
     "id": "R4",
@@ -76,7 +81,8 @@
       "not (listed|in the (docs|table|inventory))",
       "missing (from|row)",
       "docs? (table|row) (was )?not updated"
-    ]
+    ],
+    "context": "repo"
   },
   {
     "id": "N1",
@@ -88,7 +94,8 @@
       "twice",
       "repeated (quote|citation|authority)",
       "same (quote|citation|span|string) two"
-    ]
+    ],
+    "context": "diff"
   },
   {
     "id": "N2",
@@ -97,7 +104,8 @@
     "title": "New id uses 'modelled' while the existing style is 'modeled'",
     "keywords": [
       "modelled"
-    ]
+    ],
+    "context": "diff"
   },
   {
     "id": "N3",
@@ -110,7 +118,8 @@
       "2020 onward",
       "claims? (to )?(handle|support)",
       "docstring (says|claims|promises)"
-    ]
+    ],
+    "context": "diff"
   },
   {
     "id": "N4",
@@ -124,7 +133,8 @@
       "ellipsis",
       "incomplete (quote|sentence)",
       "shall be['\"]?\\)?,? (ends|stops|is cut)"
-    ]
+    ],
+    "context": "diff"
   },
   {
     "id": "N5",
@@ -137,6 +147,7 @@
       "no (dollar|numeric) (amount|figure|cap)",
       "statement (omits|lacks|does not (state|name))",
       "unlike the 2026 entry"
-    ]
+    ],
+    "context": "diff"
   }
 ]

@@ -3,15 +3,19 @@
 A fixture is a directory that freezes one review as data — no GitHub, no
 posting, no live PR required:
 
-    fixture.json   review metadata (see load_fixture)
-    diff.patch     the full collected diff; the optional fixture.json field
-                   `max_diff_kb` applies the production embed cap on load
-    checkout/      the inert worktree the read-only tools run against
-    labels.json    golden findings the lane is scored against
+    fixture.json         review metadata (see load_fixture)
+    diff.patch           the full collected diff; the optional fixture.json
+                         field `max_diff_kb` applies the production embed cap
+    checkout/            the inert worktree the read-only tools run against
+    labels.json          golden findings the lane is scored against
+    adjudications.json   optional curated verdicts for recurring unmatched
+                         findings (true_positive_unlabeled | false_positive)
 
-labels.json is a list of label objects:
+labels.json is a list of label objects; `context` (required) records the
+minimum context needed to find the plant — diff | file | repo — and score
+reports recall per stratum:
 
-    {"id": "B1", "severity": "bug", "file": "rules.py",
+    {"id": "B1", "severity": "bug", "file": "rules.py", "context": "diff",
      "title": "Stale 2027 cap", "keywords": ["2025", "stale cap"]}
 
 A reported finding matches a label when it cites the label's file (or the
@@ -20,7 +24,10 @@ case-insensitively. Keywords should be distinctive fragments a correct
 finding could not avoid mentioning. Recall is a DETECTION metric: a finding
 matches regardless of the severity it reported; the score table's `sev-agree`
 column separately reports how many matched labels were hit at the label's own
-severity.
+severity. Findings matching no label are three-way classified via the
+adjudications (never auto-false); the `noise` column (adjudicated-false plus
+unadjudicated) is the oversensitivity headline, and on a zero-label clean
+twin fixture it IS the score.
 
 Usage (needs OPENROUTER_API_KEY in the environment for `run`):
 
@@ -49,6 +56,10 @@ from or_pr_review.prompt import build_messages, changed_paths_from_diff
 from or_pr_review.schema import MAX_COVERAGE_ENTRIES, SEVERITIES
 
 
+LABEL_CONTEXTS = ("diff", "file", "repo")
+ADJUDICATION_VERDICTS = ("false_positive", "true_positive_unlabeled")
+
+
 @dataclass(frozen=True)
 class Label:
     id: str
@@ -56,6 +67,27 @@ class Label:
     file: str | None
     title: str
     keywords: tuple[str, ...]
+    # Minimum context needed to find this plant: visible in the embedded
+    # diff, requires reading the changed file beyond the hunks, or requires
+    # tool use on files outside the diff. Changes must not regress recall in
+    # any stratum — aggregate recall can hide local-context loss.
+    context: str = "diff"
+
+
+@dataclass(frozen=True)
+class Adjudication:
+    """A curated verdict for a recurring unmatched finding.
+
+    Unmatched findings are three-way classified — adjudicated true positive,
+    adjudicated false positive, or unadjudicated — rather than all counting
+    against precision. Verdicts live in the fixture's adjudications.json.
+    """
+
+    id: str
+    verdict: str  # false_positive | true_positive_unlabeled
+    file: str | None
+    keywords: tuple[str, ...]
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -72,6 +104,7 @@ class Fixture:
     max_diff_kb: int | None
     checkout: Path
     labels: tuple[Label, ...]
+    adjudications: tuple[Adjudication, ...] = ()
 
 
 @dataclass
@@ -80,11 +113,26 @@ class RunScore:
 
     # label id -> severities of the findings that matched it
     matched: dict[str, list[str]] = field(default_factory=dict)
-    unmatched_findings: list[dict] = field(default_factory=list)
+    # Findings matching no label, three-way classified via adjudications.
+    # Adjudicated entries are (finding, adjudication_id) so the listing can
+    # show which rule fired.
+    adjudicated_tp: list[tuple[dict, str]] = field(default_factory=list)
+    adjudicated_fp: list[tuple[dict, str]] = field(default_factory=list)
+    unadjudicated: list[dict] = field(default_factory=list)
     finding_count: int = 0
 
-    def recall(self, labels: tuple[Label, ...], severity: str | None = None) -> tuple[int, int]:
-        pool = [l for l in labels if severity is None or l.severity == severity]
+    def recall(
+        self,
+        labels: tuple[Label, ...],
+        severity: str | None = None,
+        context: str | None = None,
+    ) -> tuple[int, int]:
+        pool = [
+            l
+            for l in labels
+            if (severity is None or l.severity == severity)
+            and (context is None or l.context == context)
+        ]
         hit = sum(1 for l in pool if self.matched.get(l.id))
         return hit, len(pool)
 
@@ -95,9 +143,21 @@ class RunScore:
         return agree, len(hit_labels)
 
     def precision(self) -> tuple[int, int]:
-        # Findings that matched at least one label, NOT distinct titles — two
-        # true positives sharing a title must both count.
-        return self.finding_count - len(self.unmatched_findings), self.finding_count
+        """(true positives, adjudicated total) — unadjudicated findings are a
+        third class reported separately, never auto-counted as false."""
+        label_matched = self.finding_count - (
+            len(self.adjudicated_tp) + len(self.adjudicated_fp) + len(self.unadjudicated)
+        )
+        true_positive = label_matched + len(self.adjudicated_tp)
+        return true_positive, true_positive + len(self.adjudicated_fp)
+
+    def noise(self) -> tuple[int, int]:
+        """(adjudicated-false + unadjudicated, total findings).
+
+        The headline oversensitivity metric: padding moves it even when the
+        adjudicated precision column stays perfect, and on a clean twin it IS
+        the score."""
+        return len(self.adjudicated_fp) + len(self.unadjudicated), self.finding_count
 
 
 def _confined(fixture_dir: Path, relative: str, kind: str) -> Path:
@@ -131,6 +191,17 @@ def load_fixture(fixture_dir: Path) -> Fixture:
     except json.JSONDecodeError as exc:
         raise ActionError(f"{labels_path} is not valid JSON: {exc}") from exc
     labels = tuple(_parse_label(item) for item in raw_labels)
+    adjudications: tuple[Adjudication, ...] = ()
+    adjudications_path = fixture_dir / "adjudications.json"
+    if adjudications_path.is_file():
+        try:
+            raw_adjudications = json.loads(adjudications_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ActionError(f"{adjudications_path} is not valid JSON: {exc}") from exc
+        adjudications = tuple(_parse_adjudication(item) for item in raw_adjudications)
+        ids = [adjudication.id for adjudication in adjudications]
+        if len(ids) != len(set(ids)):
+            raise ActionError(f"{adjudications_path} has duplicate adjudication ids")
     max_diff_kb = meta.get("max_diff_kb")
     if max_diff_kb is not None and (
         isinstance(max_diff_kb, bool) or not isinstance(max_diff_kb, int) or max_diff_kb <= 0
@@ -149,6 +220,7 @@ def load_fixture(fixture_dir: Path) -> Fixture:
         max_diff_kb=max_diff_kb,
         checkout=checkout,
         labels=labels,
+        adjudications=adjudications,
     )
 
 
@@ -178,12 +250,52 @@ def _parse_label(item: object) -> Label:
                 f"label {item.get('id')!r} keyword {keyword!r} is not a valid regex: {exc}"
             ) from exc
         keywords.append(keyword)
+    context = item.get("context")
+    if context not in LABEL_CONTEXTS:
+        # Explicit, not defaulted: silently bucketing unannotated labels as
+        # "diff" would make the strata line claim tracking that isn't there.
+        raise ActionError(
+            f"label {item.get('id')!r} context must be one of {LABEL_CONTEXTS}"
+        )
     return Label(
         id=str(item["id"]),
         severity=severity,
         file=item.get("file"),
         title=item.get("title", ""),
         keywords=tuple(keywords),
+        context=context,
+    )
+
+
+def _parse_adjudication(item: object) -> Adjudication:
+    if not isinstance(item, dict):
+        raise ActionError("each adjudication must be a JSON object")
+    if "id" not in item:
+        raise ActionError("an adjudication is missing its id")
+    verdict = item.get("verdict", "")
+    if verdict not in ADJUDICATION_VERDICTS:
+        raise ActionError(
+            f"adjudication {item.get('id')!r} verdict must be one of {ADJUDICATION_VERDICTS}"
+        )
+    raw_keywords = item.get("keywords")
+    if not isinstance(raw_keywords, list) or not raw_keywords:
+        raise ActionError(f"adjudication {item.get('id')!r} keywords must be a non-empty list")
+    for keyword in raw_keywords:
+        if not isinstance(keyword, str) or not keyword.strip():
+            raise ActionError(f"adjudication {item.get('id')!r} has an empty keyword")
+        try:
+            re.compile(keyword)
+        except re.error as exc:
+            raise ActionError(
+                f"adjudication {item.get('id')!r} keyword {keyword!r} is not a valid "
+                f"regex: {exc}"
+            ) from exc
+    return Adjudication(
+        id=str(item["id"]),
+        verdict=verdict,
+        file=item.get("file"),
+        keywords=tuple(raw_keywords),
+        note=item.get("note", ""),
     )
 
 
@@ -202,7 +314,7 @@ def collected_from_fixture(fixture: Fixture) -> CollectedReview:
     )
 
 
-def match_finding(finding: dict, label: Label) -> bool:
+def match_finding(finding: dict, label: Label | Adjudication) -> bool:
     if label.file is not None:
         file_value = finding.get("file") or ""
         if not (file_value == label.file or file_value.endswith("/" + label.file)):
@@ -211,7 +323,11 @@ def match_finding(finding: dict, label: Label) -> bool:
     return any(re.search(keyword, haystack, re.IGNORECASE) for keyword in label.keywords)
 
 
-def score_run(findings: list[dict], labels: tuple[Label, ...]) -> RunScore:
+def score_run(
+    findings: list[dict],
+    labels: tuple[Label, ...],
+    adjudications: tuple[Adjudication, ...] = (),
+) -> RunScore:
     score = RunScore(finding_count=len(findings))
     for finding in findings:
         hit_any = False
@@ -219,8 +335,17 @@ def score_run(findings: list[dict], labels: tuple[Label, ...]) -> RunScore:
             if match_finding(finding, label):
                 score.matched.setdefault(label.id, []).append(finding.get("severity", ""))
                 hit_any = True
-        if not hit_any:
-            score.unmatched_findings.append(finding)
+        if hit_any:
+            continue
+        adjudication = next(
+            (a for a in adjudications if match_finding(finding, a)), None
+        )
+        if adjudication is None:
+            score.unadjudicated.append(finding)
+        elif adjudication.verdict == "true_positive_unlabeled":
+            score.adjudicated_tp.append((finding, adjudication.id))
+        else:
+            score.adjudicated_fp.append((finding, adjudication.id))
     return score
 
 
@@ -308,7 +433,12 @@ def _cmd_score(args: argparse.Namespace) -> int:
             print(f"{run_file.name}: lane failed ({payload.get('error')}); excluded from means")
             failed += 1
             continue
-        scored.append((run_file.stem, score_run(payload.get("findings", []), fixture.labels)))
+        scored.append(
+            (
+                run_file.stem,
+                score_run(payload.get("findings", []), fixture.labels, fixture.adjudications),
+            )
+        )
 
     print(
         f"\nfixture `{fixture.name}`: {len(fixture.labels)} label(s), "
@@ -317,7 +447,19 @@ def _cmd_score(args: argparse.Namespace) -> int:
     if not scored:
         print("no successful runs to score")
         return 1
-    header = ["run", "recall", *[f"recall:{s}" for s in SEVERITIES], "sev-agree", "precision", "findings"]
+    if not fixture.labels:
+        # A clean-twin fixture: there is nothing to recall, so the noise
+        # column IS the score — anything nonzero is oversensitivity.
+        print("clean fixture (no labels): the noise column is the score")
+    header = [
+        "run",
+        "recall",
+        *[f"recall:{s}" for s in SEVERITIES],
+        "sev-agree",
+        "precision",
+        "noise",
+        "findings",
+    ]
     print(" | ".join(header))
     sums: dict[str, list[int]] = {}
 
@@ -333,14 +475,31 @@ def _cmd_score(args: argparse.Namespace) -> int:
             cells.append(_cell(f"recall:{severity}", *score.recall(fixture.labels, severity)))
         cells.append(_cell("sev-agree", *score.severity_agreement(fixture.labels)))
         cells.append(_cell("precision", *score.precision()))
+        cells.append(_cell("noise", *score.noise()))
         cells.append(str(score.finding_count))
         print(" | ".join(cells))
     mean_cells = ["mean"]
-    for key in ("recall", *[f"recall:{s}" for s in SEVERITIES], "sev-agree", "precision"):
+    for key in ("recall", *[f"recall:{s}" for s in SEVERITIES], "sev-agree", "precision", "noise"):
         hit, total = sums[key]
         mean_cells.append(f"{100 * hit / total:.0f}%" if total else "-")
     mean_cells.append(f"{sum(s.finding_count for _, s in scored) / len(scored):.1f}")
     print(" | ".join(mean_cells))
+
+    # Context strata: aggregate recall can hide local-context loss, so a
+    # change must not regress any stratum.
+    if fixture.labels:
+        strata = []
+        for context in LABEL_CONTEXTS:
+            hit = sum(score.recall(fixture.labels, context=context)[0] for _, score in scored)
+            total = sum(score.recall(fixture.labels, context=context)[1] for _, score in scored)
+            if total:
+                strata.append(f"{context} {hit}/{total} ({100 * hit / total:.0f}%)")
+        print("recall by context: " + ", ".join(strata))
+        frequency = ", ".join(
+            f"{label.id} {sum(1 for _, s in scored if s.matched.get(label.id))}/{len(scored)}"
+            for label in fixture.labels
+        )
+        print(f"label detection frequency: {frequency}")
 
     missed = [
         label
@@ -350,14 +509,25 @@ def _cmd_score(args: argparse.Namespace) -> int:
     if missed:
         print("\nlabels missed by every run:")
         for label in missed:
-            print(f"  - {label.id} [{label.severity}] {label.file or '(no file)'} — {label.title}")
+            print(
+                f"  - {label.id} [{label.severity}/{label.context}] "
+                f"{label.file or '(no file)'} — {label.title}"
+            )
     for name, score in scored:
-        if score.unmatched_findings:
-            print(f"\n{name} findings matching no label (triage: new true positive or noise?):")
-            for finding in score.unmatched_findings:
+        listed = [
+            *[(f"adjudicated TP:{aid}", finding) for finding, aid in score.adjudicated_tp],
+            *[(f"adjudicated FP:{aid}", finding) for finding, aid in score.adjudicated_fp],
+            *[
+                ("UNADJUDICATED (triage: label, adjudicate, or prompt-fix)", finding)
+                for finding in score.unadjudicated
+            ],
+        ]
+        if listed:
+            print(f"\n{name} findings matching no label:")
+            for tag_label, finding in listed:
                 print(
                     f"  - [{finding.get('severity')}] {finding.get('file') or '(no file)'} — "
-                    f"{finding.get('title')}"
+                    f"{finding.get('title')}  <{tag_label}>"
                 )
     return 0
 

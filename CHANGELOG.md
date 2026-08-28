@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+Bench upgrades ahead of any further prompt or validation changes — the measurement layer from the external harness research (first of its recommendations to land, per its own "evaluation before behavior" ordering):
+
+- **Clean-twin fixture** (`bench/fixtures/planted-mini-clean`): the same pull request as planted-mini done correctly — zero planted defects, so every reported finding is a noise candidate. Oversensitivity (a prompt change that invites padding) is now measurable instead of invisible.
+- **Context-scope labels**: labels must declare `context: diff | file | repo` (the minimum context needed to find the plant — explicit, never defaulted), and `score` reports recall per stratum plus per-label detection frequency across runs — aggregate recall can no longer hide local-context loss or a chronically weak plant.
+- **Three-way adjudication of unmatched findings**: a fixture may carry curated `adjudications.json` verdicts (`true_positive_unlabeled` counts toward precision, `false_positive` against it); everything else reports as `UNADJUDICATED` for triage instead of silently counting as false. A new `noise` column (adjudicated-false plus unadjudicated per run) is the oversensitivity headline — padding moves it even when adjudicated precision stays perfect, and on the clean twin it is the score. Precision is therefore adjudication-based from here on and not comparable with earlier recorded results.
+- Fixture checkouts and diffs regenerate only through `bench/fixtures/generate_planted.py` (config-isolated git, so patches are machine-independent); unit tests pin the committed file sets, file bytes, and regenerated diffs to the generator.
+- Run-count protocol documented: 3+ runs for screening, 5+ per configuration for decisions that change production behavior.
+
 ## 1.2.2 — 2026-08-27
 
 Recall, round two — informed by reading the sibling stack's actual source (xai-org/grok-build plus the sibling action's prompt): the CLI runs headless with the same three read-only tools and turn budget as this harness, so the sibling's recall advantage is promptcraft, and this release ports the three mechanisms the v1.2.1 sweep still lacked.

@@ -5,6 +5,12 @@ Numbers are means over the listed runs; lanes are nondeterministic, so
 compare means, not single runs. Costs are approximate, from OpenRouter
 usage at the listed provider's pricing on the run date.
 
+> Scoring note: results recorded on 2026-08-27 predate the three-way
+> adjudication change — their precision column counted every unmatched
+> finding as false. Later runs report adjudicated precision plus a separate
+> `noise` column, so precision numbers are not directly comparable across
+> that boundary (recall numbers are).
+
 ## 2026-08-27 — planted-mini, six models
 
 Fixture: `bench/fixtures/planted-mini` (11 labels: 2 bug / 4 risk / 5 nit),

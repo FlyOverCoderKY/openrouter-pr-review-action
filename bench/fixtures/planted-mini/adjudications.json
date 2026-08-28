@@ -1,0 +1,13 @@
+[
+  {
+    "id": "A1",
+    "verdict": "true_positive_unlabeled",
+    "file": null,
+    "keywords": [
+      "(no|missing|lacks?|without) (edge-?case )?tests? for average_contribution",
+      "average_contribution.{0,60}(edge|empty|negative|uneven).{0,50}(test|untested|coverage)",
+      "tests? (do(es)? not|don't|never) (cover|exercise).{0,40}average_contribution"
+    ],
+    "note": "Multiple models (glm, qwen) report the missing edge-case tests for average_contribution; genuine observation adjacent to R1 but distinct enough not to share its label."
+  }
+]

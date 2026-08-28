@@ -11,6 +11,45 @@ usage at the listed provider's pricing on the run date.
 > `noise` column, so precision numbers are not directly comparable across
 > that boundary (recall numbers are).
 
+## 2026-08-28 — falsification-pass prompt A/B (x-ai/grok-4.6, 5 runs/arm)
+
+The research report's experiment #1: adding an asymmetric falsification pass
+to the initial prompt (falsify each draft bug/risk against callers, guards,
+tests, and framework guarantees; name searches behind absence claims; drop
+only on direct counterevidence — uncertainty stays as a stated proof gap).
+First experiment scored under three-way adjudication with the noise column
+and both twins.
+
+| arm | recall | bug | diff-stratum | sev-agree | noise (planted) | clean-twin findings/run |
+| --- | --- | --- | --- | --- | --- | --- |
+| v1.2.2 baseline | 91% | 80% | 90% | 30% | 2% | 5.0 |
+| + falsification | **95%** | 80% | **94%** | **42%** | **0%** | **3.8** |
+
+**Adopted**: no downside cell — recall rose (asymmetric guardrail held),
+severity calibration improved, noise fell on both fixtures. Two side
+lessons: (1) baseline recall at n=5 is 91%, not the 97-100% the earlier n=3
+rows suggested — small samples flattered every model above; (2) the clean
+twin's findings are defensible minor observations about genuinely imperfect
+corners of the "clean" code (unvalidated negatives in apply_cap, loose
+exception asserts, under-cap paths untested), NOT fabrications — zero
+invented defects in 10 clean runs. As built, the clean twin measures the
+chattiness floor rather than hallucination; harden the clean head or
+adjudicate its recurring observations to sharpen the question.
+
+**Cross-model validation (z-ai/glm-5.3-flash, 5 runs/arm)** — the shared
+prompt must not regress other lanes: GLM recall 98%→98% (bug 100%→100%, no
+stratum regressed), clean-twin volume 6.6→6.2 findings/run, noise 2%→4%
+(one finding in 25). Neutral-to-slightly-positive; the over-drop failure
+mode did not appear on a second model family.
+
+**Cost of the pass** (fixture-scale): grok +0.8 tool rounds (2.6→3.4) and
++22% wall time on planted (+5% on clean); GLM +0.2 rounds and +7-14% time.
+Far from the 50-turn budget here — but this fixture is tiny, and behavior
+against a dense real PR near the turn/observation budget is an open proof
+gap (a real-PR replay fixture is the planned check). If the budget does
+exhaust, tools are withdrawn and a schema finish still returns the findings
+gathered so far.
+
 ## 2026-08-27 — planted-mini, six models
 
 Fixture: `bench/fixtures/planted-mini` (11 labels: 2 bug / 4 risk / 5 nit),

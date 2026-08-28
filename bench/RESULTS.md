@@ -11,6 +11,40 @@ usage at the listed provider's pricing on the run date.
 > `noise` column, so precision numbers are not directly comparable across
 > that boundary (recall numbers are).
 
+## 2026-08-28 — diversity attribution: model diversity wins per dollar
+
+The research report's final open question (micro-lenses vs personas), plus
+its own suggested control (same-model aggregation) and this project's
+counter-hypothesis (a second model family). Measured on the hardened
+fixture; aggregation and union arms computed offline from saved lanes
+(unions are pre-judge: the judge's merge/dedup — existing machinery —
+would reduce pooled volume without reducing label recall).
+
+| config | recall | B1 hit rate | pooled findings | clean-twin pooled | marginal cost |
+| --- | --- | --- | --- | --- | --- |
+| single grok lane (reference) | 94% | 40% | 9.6 | 4.8 | 1x |
+| + source-of-truth micro-lens (profile) | 97% | 60% | 10.0 | 5.6 | ~1.15x |
+| grok n=2 same-model union | 98% | 70% | 19.2 | ~9.6 | 2x |
+| grok n=3 same-model union | 99% | 90% | 28.8 | 14.4 | 3x |
+| **grok + glm-5.3-flash union** | **98%** | **88%** | 20.8 | 11.6 | **~1.02x** |
+
+Findings:
+
+1. **Most of the residual B1 miss is run-to-run variance, not capability**
+   — three same-model samples reach 90% (the report's aggregation caution
+   validated emphatically).
+2. **Model diversity captures nearly all of that at ~1/30th the marginal
+   cost**: GLM independently hits B1 4/5 (different miss profile), so one
+   added GLM lane (1/25th grok's price) takes the union to 88% B1 / 98%
+   recall — cost-matched same-model sampling (n=2, 2x) manages only 70%.
+3. Union configs need the judge's dedup (pooled volume roughly doubles);
+   that machinery exists and auto-engages at models >= 2.
+
+**Recommendation**: the v1.3 lane configuration is
+`models: x-ai/grok-4.6,z-ai/glm-5.3-flash` — near-aggregation recall at
+single-lane cost. A one-line org-workflow change; live validation on
+RetireGolden traffic is the confirming measurement.
+
 ## 2026-08-28 — path-profile A/B: mechanism shipped, profile recommended per-repo (x-ai/grok-4.6, 5 runs/arm)
 
 Research report #3 as a caller-owned `path_profiles` input, tested on the

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.4 — 2026-08-28
 
 - **Recall-safe judge** (fixes the recall bottleneck the diversity attribution experiment measured: the old merge/de-dupe contract let the judge silently delete half the pooled findings, dropping two-lane recall below a single lane). The judge is now an identity-tracked union-merge: every input finding carries a source id, every output issue must account for the ids it merged, and deterministic verification (a) restores any unaccounted finding verbatim, (b) splits over-broad merges back into their constituents (sources may merge only when they share a file and sit within a small line window — the same-defect-same-location contract, enforced in code after the judge gamed a count-only floor and then an accounting-only check), and (c) replaces wholly untrustworthy output (unknown or missing source ids) with a deterministic union that keeps the strongest severity and longest body per exact duplicate. The posted review's judge note says `repaired`/`union-fallback` when the machinery fired. Measured on the judged-pair bench (5 grok+glm pairings): recall 86%→95%, B1 1/5→4/5, mean findings 9.8→12.0 with genuine dedup (pooled 20.8); residual point lost to judge paraphrasing vs keyword scoring, not to dropped findings. Two-model lane rosters are deployable again.
 

@@ -11,6 +11,32 @@ usage at the listed provider's pricing on the run date.
 > `noise` column, so precision numbers are not directly comparable across
 > that boundary (recall numbers are).
 
+## 2026-08-28 — path-profile A/B: mechanism shipped, profile recommended per-repo (x-ai/grok-4.6, 5 runs/arm)
+
+Research report #3 as a caller-owned `path_profiles` input, tested on the
+HARDENED fixture (v2.1: de-coached, semantically-tight strata labels — all
+earlier F1/R6 rates were retired as gameable). The tested profile targets
+source-of-truth values on `*calc*` / `*rules*` paths.
+
+| arm | recall | bug | diff-stratum | B1 | N5 | clean-twin/run |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline (falsification prompt) | 94% | 70% | 92% | 2/5 | 4/5 | 4.8 |
+| + source-of-truth profile | 97% | 80% | 96% | 3/5 | 5/5 | 5.6 |
+
+The hardened baseline also settled an open question: **F1 5/5 and R6 5/5
+with zero coaching** — the file/repo strata genuinely hold at 100% under
+the falsification prompt; the earlier concern that those rates were
+artifacts is resolved in the prompt's favor.
+
+**Disposition**: the mechanism ships (opt-in, caller-owned, zero effect
+unless configured). The measured profile is a per-repo recommendation, not
+a default: the gain is real and lands exactly on the targeted
+source-of-truth class (+1/5 B1, +1/5 N5, no stratum regressed), the cost
+is +0.8 findings/run of extra chatter on clean PRs touching matching files.
+At n=5 the B1 movement is one run — treat as directional; the live
+RetireGolden registry PRs (where this class decided the bake-offs) are the
+confirming measurement.
+
 ## 2026-08-28 — contract-map prompt A/B: NOT adopted (x-ai/grok-4.6, 5 runs/arm)
 
 The research report's #2 (build an internal contract/intent map before the

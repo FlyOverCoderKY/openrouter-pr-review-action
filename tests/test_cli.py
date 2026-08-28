@@ -1403,3 +1403,12 @@ def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.Monk
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
     )
     assert main(["judge"], env) == 1
+
+
+def test_setup_rejects_bad_path_profiles(tmp_path: Path) -> None:
+    env = _base_env(
+        tmp_path,
+        MODELS="x-ai/grok-4.6",
+        PATH_PROFILES='[{"instructions": "no paths"}]',
+    )
+    assert main(["setup"], env) == 1

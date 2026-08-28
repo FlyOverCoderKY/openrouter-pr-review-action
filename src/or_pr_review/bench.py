@@ -52,7 +52,7 @@ from pathlib import Path
 from or_pr_review.collect import CollectedReview, DiffPlan, truncate_diff
 from or_pr_review.errors import ActionError
 from or_pr_review.harness import run_lane
-from or_pr_review.prompt import build_messages, changed_paths_from_diff
+from or_pr_review.prompt import build_messages, changed_paths_from_diff, parse_path_profiles
 from or_pr_review.schema import MAX_COVERAGE_ENTRIES, SEVERITIES
 
 
@@ -105,6 +105,7 @@ class Fixture:
     checkout: Path
     labels: tuple[Label, ...]
     adjudications: tuple[Adjudication, ...] = ()
+    path_profiles: list[dict] | None = None
 
 
 @dataclass
@@ -221,6 +222,9 @@ def load_fixture(fixture_dir: Path) -> Fixture:
         checkout=checkout,
         labels=labels,
         adjudications=adjudications,
+        path_profiles=parse_path_profiles(
+            json.dumps(meta["path_profiles"]) if meta.get("path_profiles") else None
+        ),
     )
 
 
@@ -360,7 +364,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raise ActionError("OPENROUTER_API_KEY is not set; `bench run` spends real tokens")
     collected = collected_from_fixture(fixture)
     messages = build_messages(
-        collected, custom_instructions=fixture.custom_instructions
+        collected,
+        custom_instructions=fixture.custom_instructions,
+        path_profiles=fixture.path_profiles,
     )
     # Mirror production: coverage enforcement degrades when the diff names
     # more paths than the manifest may hold (see _coverage_expectations).

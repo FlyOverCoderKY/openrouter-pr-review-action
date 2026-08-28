@@ -24,7 +24,7 @@ First production use is a **single Grok 4.6 lane** beside the existing Grok acti
 - Prefer a **setup → matrix lanes → judge** workflow so wall clock is roughly the slowest lane + judge, not the sum. GitHub **bills the minutes in parallel**. A single-job `role: all` run can still fan lanes in-process; that job is billed as one runner.
 - If a **lane** fails, that lane fail-opens and the judge (or the single-lane poster) continues on whatever structured results arrived. Operational or **schema** errors of the action itself fail the job.
 
-Personas / specialized prompts are **out of v1**. The `persona` input is a reserved unused hook so a later persona feature does not require a rewrite. A future **single-persona** run should skip the judge the same way (one reviewer = no judge).
+Persona lanes are **out of v1** (path-scoped guidance is available via `path_profiles`). The `persona` input is a reserved unused hook so a later persona feature does not require a rewrite. A future **single-persona** run should skip the judge the same way (one reviewer = no judge).
 
 ## Auth
 
@@ -43,9 +43,9 @@ The action fails closed if the key is empty (when a lane or the multi-lane judge
 
 ## Privacy
 
-This action uses OpenRouter as an external processor. The prompt sends PR metadata, the selected diff, and `custom_instructions` to OpenRouter, which routes them to the **upstream model provider** for each slug. When a lane uses `read_file`, `grep`, or `list_dir`, those paths and file contents can also be sent as model context.
+This action uses OpenRouter as an external processor. The prompt sends PR metadata, the selected diff, `custom_instructions`, and any matching `path_profiles` instructions to OpenRouter, which routes them to the **upstream model provider** for each slug. When a lane uses `read_file`, `grep`, or `list_dir`, those paths and file contents can also be sent as model context.
 
-Do not put secrets, credentials, regulated personal data, or unrelated confidential material in PR text, diffs, repository files, or `custom_instructions`. Obtain organizational approval before enabling the action on private or regulated repositories.
+Do not put secrets, credentials, regulated personal data, or unrelated confidential material in PR text, diffs, repository files, `custom_instructions`, or `path_profiles`. Obtain organizational approval before enabling the action on private or regulated repositories.
 
 ## Untrusted pull requests
 
@@ -185,6 +185,7 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `fail_on` | `never` | Finding policy: `never` \| `bugs` \| `any`. Operational/schema errors always fail. |
 | `roast_level` | `professional` | `professional` \| `playful`. |
 | `custom_instructions` | _empty_ | Extra prompt text, max 16,000 UTF-8 bytes. Never put secrets here. |
+| `path_profiles` | _empty_ | Caller-owned additive review profiles: JSON `[{name?, paths: [globs], instructions}]`, applied only when a changed path matches (`*`/`?` stay within a path segment, `**` crosses). Sharpen attention; never narrow the review. Trusted workflow config only — never interpolate PR content, never put secrets here. Max 16,000 UTF-8 bytes. |
 | `status_comments` | `true` | Live status comment on the PR. |
 | `max_diff_kb` | `300` | Embedded diff cap. Truncation ⇒ `partial`, never clean. |
 | `review_scope` | `full-pr` | `full-pr` \| `latest-commit`. Initial rounds require `full-pr`. |

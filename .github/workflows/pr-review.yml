@@ -26,6 +26,9 @@ on:
       custom_instructions:
         type: string
         default: ""
+      path_profiles:
+        type: string
+        default: ""
       status_comments:
         type: string
         default: "true"
@@ -89,6 +92,7 @@ jobs:
           max_diff_kb: ${{ inputs.max_diff_kb }}
           max_tool_turns: ${{ inputs.max_tool_turns }}
           custom_instructions: ${{ inputs.custom_instructions }}
+          path_profiles: ${{ inputs.path_profiles }}
 
   lane:
     needs: setup
@@ -127,6 +131,7 @@ jobs:
           fail_on: ${{ inputs.fail_on }}
           roast_level: ${{ inputs.roast_level }}
           custom_instructions: ${{ inputs.custom_instructions }}
+          path_profiles: ${{ inputs.path_profiles }}
           status_comments: ${{ inputs.status_comments }}
           max_diff_kb: ${{ inputs.max_diff_kb }}
           review_scope: ${{ inputs.review_scope }}
@@ -176,6 +181,7 @@ jobs:
           fail_on: ${{ inputs.fail_on }}
           roast_level: ${{ inputs.roast_level }}
           custom_instructions: ${{ inputs.custom_instructions }}
+          path_profiles: ${{ inputs.path_profiles }}
           status_comments: ${{ inputs.status_comments }}
           max_diff_kb: ${{ inputs.max_diff_kb }}
           review_scope: ${{ inputs.review_scope }}

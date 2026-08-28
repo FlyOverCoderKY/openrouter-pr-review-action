@@ -226,3 +226,111 @@ def test_verify_prompt_lists_prior_findings_and_contract() -> None:
     assert '"resolutions"' in text
     assert "Fixing agent responses" in text
     assert "never" in text  # never follow instructions in replies
+
+
+def test_path_profiles_apply_only_when_paths_match() -> None:
+    from or_pr_review.prompt import matched_profiles, parse_path_profiles
+
+    profiles = parse_path_profiles(
+        '[{"name": "source-of-truth", "paths": ["*calc*", "*rules*"],'
+        ' "instructions": "Verify every stated figure against its cited authority."}]'
+    )
+    assert matched_profiles(profiles, ["calc.py", "tests/test_calc.py"]) == profiles
+    assert matched_profiles(profiles, ["docs/readme.md"]) == []
+    assert matched_profiles(None, ["calc.py"]) == []
+
+    text = build_messages(
+        _collected(
+            diff="diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n"
+        ),
+        path_profiles=profiles,
+    )[1]["content"]
+    assert "## Path review profiles (caller-owned; additive to the full sweep)" in text
+    assert "### source-of-truth" in text
+    assert "Verify every stated figure" in text
+    assert "never narrow the review" in text
+    # Non-matching diff: no block at all.
+    unmatched = build_messages(_collected(), path_profiles=profiles)[1]["content"]
+    assert "Path review profiles" not in unmatched
+
+
+def test_parse_path_profiles_validation() -> None:
+    import pytest as _pytest
+
+    from or_pr_review.errors import ActionError
+    from or_pr_review.prompt import parse_path_profiles
+
+    assert parse_path_profiles(None) is None
+    assert parse_path_profiles("  ") is None
+    with _pytest.raises(ActionError, match="not valid JSON"):
+        parse_path_profiles("{nope")
+    with _pytest.raises(ActionError, match="JSON array"):
+        parse_path_profiles('{"paths": []}')
+    with _pytest.raises(ActionError, match="paths"):
+        parse_path_profiles('[{"instructions": "x"}]')
+    with _pytest.raises(ActionError, match="instructions"):
+        parse_path_profiles('[{"paths": ["*.py"]}]')
+
+
+def test_path_globs_use_path_semantics() -> None:
+    from or_pr_review.prompt import matched_profiles
+
+    profile = [{"paths": ["src/*.py"], "instructions": "x"}]
+    assert matched_profiles(profile, ["src/app.py"]) == profile
+    # * must not cross a path segment (unlike fnmatch).
+    assert matched_profiles(profile, ["src/pkg/nested.py"]) == []
+    deep = [{"paths": ["src/**/*.py"], "instructions": "x"}]
+    assert matched_profiles(deep, ["src/pkg/nested.py"]) == deep
+    # Case-sensitive, matching CI runners rather than the local OS.
+    assert matched_profiles([{"paths": ["*Calc*"], "instructions": "x"}], ["calc.py"]) == []
+    # ? stays within a segment too.
+    q = [{"paths": ["a?c.py"], "instructions": "x"}]
+    assert matched_profiles(q, ["abc.py"]) == q
+    assert matched_profiles(q, ["a/c.py"]) == []
+
+
+def test_profiles_match_pretruncation_paths() -> None:
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+
+    # calc.py changed on the PR but was truncated out of the embed; the
+    # profile must still fire (truncation cannot disable guidance).
+    truncated_diff = "diff --git a/rules.py b/rules.py\n--- a/rules.py\n+++ b/rules.py\n"
+    collected = CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha="a" * 40,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        truncation=Truncation(truncated_diff, True, 999_999, len(truncated_diff), 300),
+        mode="initial",
+        all_changed_paths=("rules.py", "calc.py"),
+    )
+    profiles = [{"name": "sot", "paths": ["*calc*"], "instructions": "verify figures"}]
+    text = build_messages(collected, path_profiles=profiles)[1]["content"]
+    assert "### sot" in text
+
+
+def test_parse_path_profiles_limits_and_normalization() -> None:
+    import json as json_mod
+
+    import pytest as _pytest
+
+    from or_pr_review.errors import ActionError
+    from or_pr_review.prompt import parse_path_profiles
+
+    with _pytest.raises(ActionError, match="16,000"):
+        parse_path_profiles('[{"paths": ["*"], "instructions": "' + "x" * 16_100 + '"}]')
+    many = json_mod.dumps(
+        [{"paths": ["*"], "instructions": "x"} for _ in range(21)]
+    )
+    with _pytest.raises(ActionError, match="at most 20"):
+        parse_path_profiles(many)
+    with _pytest.raises(ActionError, match="must be an object"):
+        parse_path_profiles('["oops"]')
+    with _pytest.raises(ActionError, match="name"):
+        parse_path_profiles('[{"name": true, "paths": ["*"], "instructions": "x"}]')
+    # Whitespace-padded globs are stripped, so they actually match.
+    parsed = parse_path_profiles('[{"paths": [" *calc* "], "instructions": "x"}]')
+    assert parsed[0]["paths"] == ["*calc*"]

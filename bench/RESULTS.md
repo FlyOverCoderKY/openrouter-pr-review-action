@@ -48,13 +48,30 @@ Findings, corrected:
 4. Personas were NOT measured (they remain unimplemented); this experiment
    only sets the bar any persona proposal must beat.
 
-**Recommendation, revised**: two-model lanes are NOT ready to deploy. The
-pre-judge diversity win is real and cheap, so the gating work item for any
-multi-lane v1.3 is **judge recall-safety**: a judge contract that must
-retain every distinct input issue (merge only true duplicates), verified on
-this same judged-pair bench before any lane-roster change ships. Wall-clock
-note: two-lane wall time ≈ the slower lane (GLM ~150s fixture-scale) plus
-the judge call.
+**Judge fix, measured (same judged-pair bench)**: three iterations, each
+defeating how flash-lite gamed the previous guard — (1) a count-only floor
+was satisfiable while dropping a whole lane's uniques; (2) identity
+accounting alone was satisfiable by lumping distinct findings into one
+issue with all ids listed; (3) the shipped design adds a deterministic
+merge-legality check (sources may merge only same-file within a small line
+window) with verbatim split/restore repair, and a full deterministic-union
+fallback for untrustworthy accounting. Scores across the same five
+pairings: old contract 86% / B1 1-in-5 / 9.8 findings; count floor 97% but
+3-of-5 posts were the full chattier union; **shipped identity+legality
+judge: 95% recall, B1 4-in-5, 12.0 mean findings with genuine dedup**
+(residual point lost to judge paraphrasing vs the keyword scorer, not to
+dropped findings — judged text rewrites can under-credit keyword matching).
+
+**Recommendation, final**: with the shipped identity+legality judge, the
+v1.3 two-model roster (`models: x-ai/grok-4.6,z-ai/glm-5.3-flash`) is
+deployable — **measured 95% recall / B1 4-in-5 through the full production
+path** at ~1.04x cost (vs 94% / 2-in-5 single-lane). "Recall-safe" means
+the deterministic coverage/legality/fallback layers structurally prevent
+the judge from silently dropping or lumping away a lane's findings; the
+judge's paraphrasing freedom on legal same-location merges remains, which
+is where the gap to the 98% pre-judge union lives. Wall-clock note:
+two-lane wall time ≈ the slower lane (GLM ~150s fixture-scale) plus the
+judge call.
 
 ## 2026-08-28 — path-profile A/B: mechanism shipped, profile recommended per-repo (x-ai/grok-4.6, 5 runs/arm)
 

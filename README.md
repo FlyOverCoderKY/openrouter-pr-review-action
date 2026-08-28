@@ -13,7 +13,7 @@ First production use is a **single Grok 4.6 lane** beside the existing Grok acti
 - One invocation = one review. Callers own concurrency and merge gating.
 - `models` is a comma-separated list of OpenRouter slugs. **List length is the lane count** (hard-capped at **4**; the action fails clearly if you ask for more).
 - **One lane:** the judge is skipped. That lane’s structured findings are posted directly. No extra OpenRouter call, no merge/de-dupe, no invented cross-model attribution. The finding can still name the model that produced it.
-- **Two or more lanes:** parallel review lanes (same prompt on every lane in v1), then an OpenRouter **judge** merges and de-dupes and posts **one** GitHub review. Attribution looks like:
+- **Two or more lanes:** parallel review lanes (same prompt on every lane in v1), then an OpenRouter **judge** union-merges them into **one** GitHub review under a recall-safe contract: every input finding is identity-tracked, the judge must account for every id, only same-file/nearby-line duplicates may merge, and any unaccounted or over-broadly merged finding is deterministically restored verbatim (the review header notes `repaired`/`union-fallback` when that machinery fired). Attribution looks like:
 
   ```text
   Issue 1 - Missing auth check (identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6)
@@ -154,14 +154,14 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-Two or more slugs **require** a judge. The default judge is `google/gemini-3.1-flash-lite` (verified live on OpenRouter). It is merge/de-dupe of already-structured findings plus JSON schema — not a second reviewer. Thinking/reasoning is pinned to `minimal`.
+Two or more slugs **require** a judge. The default judge is `google/gemini-3.1-flash-lite` (verified live on OpenRouter). It is a recall-safe **union-merge** of already-structured findings plus JSON schema — not a second reviewer and not a filter: identity-tracked coverage plus a same-location merge-legality check restore anything the judge drops or over-merges, so judged output cannot lose a lane's findings. Thinking/reasoning is pinned to `minimal`.
 
 Alternatives (do not change the default unless you mean to):
 
 | Slug | When to use |
 | --- | --- |
 | `openai/gpt-4.1-nano` | Cheaper/faster if you want to trade merge quality |
-| `anthropic/claude-haiku-4.5` | Upgrade if the Flash Lite judge is dropping duplicates |
+| `anthropic/claude-haiku-4.5` | Upgrade if judged reviews frequently carry `repaired`/`union-fallback` notes (the safety net restoring what a weaker judge mishandled) |
 
 A judge schema mismatch fails the job (fail-closed).
 

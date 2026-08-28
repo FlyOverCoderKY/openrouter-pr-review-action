@@ -23,7 +23,12 @@ from or_pr_review.collect import (
 )
 from or_pr_review.errors import ActionError, LaneError, SchemaError
 from or_pr_review.github_ops import GitHub, upsert_status_comment
-from or_pr_review.harness import parse_max_tool_turns, require_openrouter_key, run_lane
+from or_pr_review.harness import (
+    parse_max_tool_turns,
+    require_openrouter_key,
+    run_lane,
+    sanitize_anchors,
+)
 from or_pr_review.judge import run_llm_judge
 from or_pr_review.loop import (
     Ledger,
@@ -323,6 +328,9 @@ def _invoke_lane(
             max_tool_turns=parse_max_tool_turns(env.get("MAX_TOOL_TURNS")),
             effort=(env.get("EFFORT") or "").strip(),
             timeout=_int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180),
+            # Tool-less runs have no inert checkout; the anchor gate then
+            # checks against the workflow's own full checkout of the head.
+            anchor_root=_source_root(env) if workspace is None else None,
             expect_coverage=expect_coverage,
             expect_resolutions=expect_resolutions,
             expected_paths=expected_paths,
@@ -498,6 +506,15 @@ def _collect(env: dict[str, str]) -> CollectedReview:
     )
 
 
+def _source_root(env: dict[str, str]) -> Path | None:
+    """The workflow's own checkout, for anchor checks only (never tool use)."""
+    raw = (env.get("SOURCE_WORKSPACE") or env.get("GITHUB_WORKSPACE") or "").strip()
+    if not raw:
+        return None
+    root = Path(raw).resolve()
+    return root if root.is_dir() else None
+
+
 def _prepare_workspace(env: dict[str, str], collected: CollectedReview, work: Path) -> Path | None:
     if parse_max_tool_turns(env.get("MAX_TOOL_TURNS")) == 0:
         return None
@@ -553,6 +570,14 @@ def _finish(
     successful = [lane for lane in lanes if lane.ok]
     slugs = parse_models(env.get("MODELS"))
     issues, judge_note = _resolve_issues(env, slugs, lanes, successful)
+    # Judge output bypasses the per-lane anchor gate, so gate the merged
+    # issues too when a checkout of the reviewed head is available (the
+    # judge job checks out the same head ref). MergedIssue duck-types the
+    # file/line/title fields the gate touches; single-lane issues were
+    # already gated in run_lane and pass through unchanged.
+    finish_root = _source_root(env)
+    if finish_root is not None:
+        issues = sanitize_anchors(issues, finish_root)  # type: ignore[arg-type]
 
     prior_ids = {finding.id for finding in loop.open_prior}
     resolutions = merge_resolutions([lane.resolutions for lane in successful], prior_ids)

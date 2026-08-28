@@ -108,3 +108,37 @@ def test_unexpected_tool_exception_becomes_error_observation(
     monkeypatch.setattr(ws, "tool_read_file", boom)
     result = dispatch_tool(tmp_path, "read_file", {"path": "a.txt"})
     assert result.startswith("error: tool 'read_file' failed: RuntimeError")
+
+
+def test_materialize_commit_writes_full_manifest_despite_skips(tmp_path):
+    import subprocess
+
+    from or_pr_review.workspace import materialize_commit, tracked_paths
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=T",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=repo, check=True, capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    (repo / "small.py").write_text("print('hi')\n", encoding="utf-8")
+    (repo / "big.bin").write_bytes(b"\0" * (1_100_000))  # over the 1MB cap
+    git("add", "-A")
+    git("commit", "-q", "-m", "c")
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    dest = tmp_path / "inert-checkout"
+    materialize_commit(repo, sha, dest)
+    # The oversized member is skipped on disk but present in the manifest, so
+    # the anchor gate can tell a snapshot hole from a ghost path.
+    assert not (dest / "big.bin").exists()
+    assert (dest / "small.py").is_file()
+    manifest = tracked_paths(dest)
+    assert manifest == {"small.py", "big.bin"}

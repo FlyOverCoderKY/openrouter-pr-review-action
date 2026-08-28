@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import time
 import urllib.error
 import urllib.request
@@ -207,7 +208,7 @@ def run_lane(
     )
     conversation = list(messages)
     tools = list(READ_ONLY_TOOLS) if workspace is not None and max_tool_turns > 0 else None
-    usage: dict[str, int] = {}
+    usage: dict[str, int | float] = {}
     meta: dict[str, str] = {}
 
     def _validate(content: str) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
@@ -278,11 +279,16 @@ def run_lane(
     return result
 
 
-def _attach_stats(result: LaneResult, stats: dict[str, int], usage: dict[str, int]) -> None:
+def _attach_stats(
+    result: LaneResult, stats: dict[str, int], usage: dict[str, int | float]
+) -> None:
     result.requests = stats.get("requests")
     result.tool_rounds = stats.get("tool_rounds")
     result.retries = stats.get("retries")
     result.cached_tokens = usage.get("cached_tokens")
+    cost = usage.get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        result.cost_usd = float(cost)
     result.salvaged = bool(stats.get("salvaged"))
     if result.prompt_tokens is None:
         result.prompt_tokens = usage.get("prompt_tokens")
@@ -299,7 +305,7 @@ def _run_loop(
     max_tool_turns: int,
     effort: str,
     send: ChatFn,
-    usage: dict[str, int],
+    usage: dict[str, int | float],
     stats: dict[str, int] | None = None,
     meta: dict[str, str] | None = None,
     provider_order: list[str] | None = None,
@@ -572,7 +578,7 @@ def _run_one_tool(workspace: Path, call: object) -> dict[str, Any]:
 
 
 def _absorb_usage(
-    usage: dict[str, int],
+    usage: dict[str, int | float],
     response: dict[str, Any],
     meta: dict[str, str] | None = None,
 ) -> None:
@@ -588,6 +594,14 @@ def _absorb_usage(
         value = block.get(key)
         if isinstance(value, int):
             usage[key] = usage.get(key, 0) + value
+    cost = block.get("cost")
+    if (
+        isinstance(cost, (int, float))
+        and not isinstance(cost, bool)
+        and math.isfinite(cost)
+        and cost >= 0
+    ):
+        usage["cost_usd"] = usage.get("cost_usd", 0) + cost
     details = block.get("prompt_tokens_details")
     if isinstance(details, dict):
         cached = details.get("cached_tokens")

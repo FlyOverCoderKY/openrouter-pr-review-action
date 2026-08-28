@@ -68,7 +68,11 @@ def test_lane_parses_structured_findings(tmp_path: Path) -> None:
                     }
                 }
             ],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "cost": 0.004,
+            },
         }
 
     (tmp_path / "db.py").write_text("\n".join(f"line{i}" for i in range(1, 20)), encoding="utf-8")
@@ -86,6 +90,7 @@ def test_lane_parses_structured_findings(tmp_path: Path) -> None:
     assert result.findings[0].file == "db.py"
     assert result.findings[0].line == 9
     assert result.prompt_tokens == 10
+    assert result.cost_usd == 0.004
 
 
 def test_anchor_gate_nulls_impossible_locations(tmp_path: Path) -> None:
@@ -251,7 +256,8 @@ def test_lane_tool_call_then_findings(tmp_path: Path) -> None:
                             ],
                         }
                     }
-                ]
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.001},
             }
         return {
             "choices": [
@@ -260,7 +266,8 @@ def test_lane_tool_call_then_findings(tmp_path: Path) -> None:
                         "content": '{"findings":[]}',
                     }
                 }
-            ]
+            ],
+            "usage": {"prompt_tokens": 15, "completion_tokens": 3, "cost": 0.003},
         }
 
     result = run_lane(
@@ -274,6 +281,9 @@ def test_lane_tool_call_then_findings(tmp_path: Path) -> None:
     assert result.ok
     assert result.findings == []
     assert calls["n"] == 2
+    assert result.prompt_tokens == 25
+    assert result.completion_tokens == 5
+    assert result.cost_usd == 0.004
 
 
 def test_lane_bad_json_fail_opens() -> None:
@@ -745,6 +755,7 @@ def test_failed_lane_still_reports_usage_and_stats(tmp_path: Path) -> None:
             reply["usage"] = {
                 "prompt_tokens": 7,
                 "completion_tokens": 3,
+                "cost": 0.001,
                 "prompt_tokens_details": {"cached_tokens": 5},
             }
             return reply
@@ -761,6 +772,7 @@ def test_failed_lane_still_reports_usage_and_stats(tmp_path: Path) -> None:
     assert result.prompt_tokens == 7
     assert result.completion_tokens == 3
     assert result.cached_tokens == 5
+    assert result.cost_usd == 0.001
     assert result.salvaged is True
     assert result.requests == 3
     assert result.tool_rounds == 1
@@ -962,6 +974,7 @@ def test_lane_artifact_roundtrip_with_stats_fields() -> None:
         prompt_tokens=100,
         completion_tokens=20,
         cached_tokens=80,
+        cost_usd=0.0123,
         requests=5,
         tool_rounds=3,
         retries=1,
@@ -970,6 +983,7 @@ def test_lane_artifact_roundtrip_with_stats_fields() -> None:
     )
     parsed = parse_lane_artifact(lane.to_dict())
     assert parsed.cached_tokens == 80
+    assert parsed.cost_usd == 0.0123
     assert parsed.requests == 5
     assert parsed.tool_rounds == 3
     assert parsed.retries == 1

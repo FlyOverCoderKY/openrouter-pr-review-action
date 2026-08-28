@@ -7,6 +7,7 @@ A lane artifact that does not match this schema fails the job (fail-closed).
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import PurePosixPath
@@ -132,6 +133,7 @@ class LaneResult:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     cached_tokens: int | None = None
+    cost_usd: float | None = None
     requests: int | None = None
     tool_rounds: int | None = None
     retries: int | None = None
@@ -154,6 +156,7 @@ class LaneResult:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "cached_tokens": self.cached_tokens,
+            "cost_usd": self.cost_usd,
             "requests": self.requests,
             "tool_rounds": self.tool_rounds,
             "retries": self.retries,
@@ -482,6 +485,7 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         prompt_tokens=_optional_int(payload.get("prompt_tokens")),
         completion_tokens=_optional_int(payload.get("completion_tokens")),
         cached_tokens=_optional_int(payload.get("cached_tokens")),
+        cost_usd=_optional_float(payload.get("cost_usd")),
         requests=_optional_int(payload.get("requests")),
         tool_rounds=_optional_int(payload.get("tool_rounds")),
         retries=_optional_int(payload.get("retries")),
@@ -499,6 +503,17 @@ def _optional_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise SchemaError("numeric lane fields must be integers or null")
     return value
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SchemaError("cost_usd must be a number or null")
+    converted = float(value)
+    if not math.isfinite(converted) or converted < 0:
+        raise SchemaError("cost_usd must be finite and non-negative")
+    return converted
 
 
 def failed_lane(model: str, error: str, elapsed_ms: int | None = None) -> LaneResult:

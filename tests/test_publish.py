@@ -94,7 +94,7 @@ def test_long_reviews_split_into_parts() -> None:
     assert len(parts) > 1
     joined = "\n".join(parts)
     for n in range(1, 26):
-        assert f"Finding number {n} " in joined
+        assert f"— Finding number {n}" in joined
     assert all(len(part.encode("utf-8")) <= MAX_REVIEW_BYTES for part in parts)
     assert parts[1].startswith("## OpenRouter pull-request review — continued")
     assert f"Part 1 of {len(parts)}" in parts[0]
@@ -145,7 +145,7 @@ def test_part_one_stays_within_cap_with_marker_and_round_report() -> None:
     assert "more resolution line(s) omitted" in parts[0]
     joined = "\n".join(parts)
     for n in range(1, 6):
-        assert f"Finding number {n} " in joined
+        assert f"— Finding number {n}" in joined
 
 
 def test_render_includes_partial_banner() -> None:
@@ -158,3 +158,66 @@ def test_render_includes_partial_banner() -> None:
     )
     assert "partial" in text.lower()
     assert "must not be treated as a clean review" in text
+
+
+def test_cost_renders_on_lane_lines_and_total() -> None:
+    lane_a = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None, cost_usd=0.31)
+    lane_b = LaneResult(SCHEMA_VERSION, True, "z-ai/glm-5.3-flash", [], None, cost_usd=0.0123)
+    text = render_review(
+        collected=_collected(),
+        lanes=[lane_a, lane_b],
+        issues=[],
+        verdict="clean",
+        judge_note="`google/gemini-3.1-flash-lite`",
+        judge_cost=0.0007,
+    )
+    assert ", $0.31)" in text
+    assert ", $0.0123)" in text
+    # One precision per note, chosen so the breakdown visibly adds up.
+    assert "**Cost:** $0.3230 (lanes $0.3223 + judge $0.0007)" in text
+
+
+def test_cost_line_omitted_when_unreported() -> None:
+    lane = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None)
+    text = render_review(
+        collected=_collected(),
+        lanes=[lane],
+        issues=[],
+        verdict="clean",
+    )
+    assert "**Cost:**" not in text
+
+
+def test_inline_comments_carry_severity_emoji() -> None:
+    from or_pr_review.publish import inline_review_comments
+
+    issue = MergedIssue(
+        title="Race",
+        body="check-then-act",
+        severity="bug",
+        file="db.py",
+        line=9,
+        models=["x-ai/grok-4.6"],
+        id="r1-1",
+    )
+    comments = inline_review_comments(
+        [issue], allowed_lines={"db.py": {9}}, generation="abc123"
+    )
+    assert len(comments) == 1
+    assert "\U0001f534 **Race** (`bug`)" in comments[0]["body"]
+
+
+def test_incomplete_cost_totals_are_labeled() -> None:
+    lane_a = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None, cost_usd=0.31)
+    lane_b = LaneResult(SCHEMA_VERSION, True, "z-ai/glm-5.3-flash", [], None)
+    text = render_review(
+        collected=_collected(),
+        lanes=[lane_a, lane_b],
+        issues=[],
+        verdict="clean",
+        judge_note="`google/gemini-3.1-flash-lite`",
+        judge_cost=None,
+        judge_ran=True,
+    )
+    assert "**Cost:** $0.31" in text
+    assert "incomplete: no cost reported for `z-ai/glm-5.3-flash`, the judge" in text

@@ -318,6 +318,9 @@ def _run_loop(
             "type": "json_schema",
             "json_schema": response_schema or findings_json_schema(),
         },
+        # Ask OpenRouter to return the credit cost of each request so the
+        # posted review can report what the run actually spent.
+        "usage": {"include": True},
     }
     if effort:
         payload_base["reasoning"] = {"effort": effort}
@@ -594,19 +597,45 @@ def _absorb_usage(
         value = block.get(key)
         if isinstance(value, int):
             usage[key] = usage.get(key, 0) + value
-    cost = block.get("cost")
-    if (
-        isinstance(cost, (int, float))
-        and not isinstance(cost, bool)
-        and math.isfinite(cost)
-        and cost >= 0
-    ):
-        usage["cost_usd"] = usage.get("cost_usd", 0) + cost
+    spend = _response_spend(block)
+    if spend is not None:
+        usage["cost_usd"] = usage.get("cost_usd", 0) + spend
     details = block.get("prompt_tokens_details")
     if isinstance(details, dict):
         cached = details.get("cached_tokens")
         if isinstance(cached, int):
             usage["cached_tokens"] = usage.get("cached_tokens", 0) + cached
+
+
+def _response_spend(block: dict[str, Any]) -> float | None:
+    """What this request actually cost the operator, from one usage block.
+
+    Non-BYOK responses put the charge in `cost` AND mirror the same figure
+    in cost_details.upstream_inference_cost — summing both double-counts.
+    BYOK responses put 0 in `cost` (plus any OpenRouter BYOK fee) and the
+    provider-billed spend in upstream_inference_cost. So: BYOK = upstream
+    plus any positive `cost`; otherwise `cost` alone. A BYOK block with no
+    upstream figure is an unknown, not a $0 observation.
+    """
+    def _valid(value: object) -> bool:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        )
+
+    cost = block.get("cost")
+    details = block.get("cost_details")
+    upstream = (
+        details.get("upstream_inference_cost") if isinstance(details, dict) else None
+    )
+    if block.get("is_byok") is True:
+        if not _valid(upstream):
+            return None
+        fee = cost if _valid(cost) and cost > 0 else 0.0
+        return float(upstream) + float(fee)
+    return float(cost) if _valid(cost) else None
 
 
 def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:

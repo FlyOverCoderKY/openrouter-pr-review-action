@@ -989,3 +989,56 @@ def test_lane_artifact_roundtrip_with_stats_fields() -> None:
     assert parsed.retries == 1
     assert parsed.salvaged is True
     assert parsed.head_sha == "a" * 40
+
+
+def test_run_lane_sums_byok_upstream_cost_and_requests_usage(tmp_path: Path) -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        return {
+            "choices": [{"message": {"content": '{"findings": []}'}}],
+            # BYOK shape: OpenRouter credits are 0 (any positive cost is
+            # the BYOK fee) and the provider-billed spend arrives in
+            # cost_details.upstream_inference_cost.
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 5,
+                "cost": 0.002,
+                "is_byok": True,
+                "cost_details": {"upstream_inference_cost": 0.009},
+            },
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        chat=chat,
+    )
+    assert result.ok
+    assert result.cost_usd == pytest.approx(0.011)  # 0.009 upstream + 0.002 BYOK fee
+    assert payloads[0]["usage"] == {"include": True}
+    # Round-trips through the lane artifact.
+    from or_pr_review.schema import parse_lane_artifact
+
+    assert parse_lane_artifact(result.to_dict()).cost_usd == pytest.approx(0.011)
+
+
+def test_response_spend_policy() -> None:
+    from or_pr_review.harness import _response_spend
+
+    # Non-BYOK mirrors the charge into cost_details: count it once.
+    assert _response_spend(
+        {"cost": 0.011, "is_byok": False, "cost_details": {"upstream_inference_cost": 0.011}}
+    ) == pytest.approx(0.011)
+    # BYOK: upstream is the spend; positive cost is the BYOK fee on top.
+    assert _response_spend(
+        {"cost": 0.0, "is_byok": True, "cost_details": {"upstream_inference_cost": 0.009}}
+    ) == pytest.approx(0.009)
+    # BYOK with no upstream figure is unknown spend, not a $0 observation.
+    assert _response_spend({"cost": 0.0, "is_byok": True}) is None
+    # Free non-BYOK routes legitimately cost $0.
+    assert _response_spend({"cost": 0}) == 0.0

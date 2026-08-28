@@ -26,12 +26,12 @@ def test_heading_and_body_format() -> None:
         models=["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"],
     )
     block = format_issue_block(1, issue)
-    assert block.startswith(
-        "Issue 1 - Missing auth check (identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6)\n"
-    )
+    assert block.startswith("#### \U0001f534 Issue 1 — Missing auth check\n")
+    assert (
+        "`src/api.py:42` · `bug` · identified by x-ai/grok-4.6 "
+        "and anthropic/claude-sonnet-4.6"
+    ) in block
     assert "The handler accepts unauthenticated POSTs." in block
-    assert "Location: `src/api.py:42`" in block
-    assert "Severity: bug" in block
 
 
 def test_heading_preserves_issue_number() -> None:
@@ -43,4 +43,6 @@ def test_heading_preserves_issue_number() -> None:
         line=None,
         models=["x-ai/grok-4.6"],
     )
-    assert issue.heading(3) == "Issue 3 - Docs typo (identified by x-ai/grok-4.6)"
+    block = format_issue_block(3, issue)
+    assert block.startswith("#### \U0001f535 Issue 3 — Docs typo\n")
+    assert "`nit` · identified by x-ai/grok-4.6" in block

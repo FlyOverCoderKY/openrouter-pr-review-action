@@ -42,10 +42,8 @@ def test_parse_judge_issues_happy_path() -> None:
         allowed_models=["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"],
     )
     assert len(issues) == 1
-    assert issues[0].heading(1) == (
-        "Issue 1 - Missing auth check "
-        "(identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6)"
-    )
+    assert issues[0].title == "Missing auth check"
+    assert issues[0].models == ["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"]
 
 
 def test_parse_judge_issues_schema_mismatch_fail_closed() -> None:
@@ -85,7 +83,14 @@ def test_run_llm_judge_sends_schema_and_minimal_reasoning() -> None:
                         )
                     }
                 }
-            ]
+            ],
+            # Non-BYOK shape: cost_details mirrors the same charge — it
+            # must NOT be double-counted.
+            "usage": {
+                "cost": 0.0021,
+                "is_byok": False,
+                "cost_details": {"upstream_inference_cost": 0.0021},
+            },
         }
 
     issues = run_llm_judge(
@@ -106,11 +111,13 @@ def test_run_llm_judge_sends_schema_and_minimal_reasoning() -> None:
         api_key="sk-test",
         chat=chat,
     )
-    issues, mode = issues
+    issues, mode, cost = issues
     assert mode == "merged"
+    assert cost == pytest.approx(0.0021)
     assert issues[0].title == "Race"
     assert seen["model"] == "google/gemini-3.1-flash-lite"
     assert seen["reasoning"] == {"effort": "minimal"}
+    assert seen["usage"] == {"include": True}
     assert seen["response_format"]["type"] == "json_schema"
 
 
@@ -154,7 +161,7 @@ def test_coverage_repairs_unaccounted_findings() -> None:
             )}}]
         }
 
-    issues, mode = run_llm_judge(
+    issues, mode, _cost = run_llm_judge(
         model="google/gemini-3.1-flash-lite", lanes=lanes, api_key="sk-test", chat=dropping_chat
     )
     assert mode == "repaired(+1)"
@@ -185,7 +192,7 @@ def test_coverage_falls_back_on_untrusted_sources() -> None:
             )}}]
         }
 
-    issues, mode = run_llm_judge(
+    issues, mode, _cost = run_llm_judge(
         model="google/gemini-3.1-flash-lite", lanes=lanes, api_key="sk-test", chat=fabricating_chat
     )
     assert mode == "union-fallback"
@@ -221,7 +228,7 @@ def test_coverage_accepts_a_fully_accounted_merge() -> None:
             )}}]
         }
 
-    issues, mode = run_llm_judge(
+    issues, mode, _cost = run_llm_judge(
         model="google/gemini-3.1-flash-lite", lanes=lanes, api_key="sk-test", chat=merging_chat
     )
     assert mode == "merged"
@@ -267,7 +274,7 @@ def test_over_broad_merge_is_split_back() -> None:
             )}}]
         }
 
-    issues, mode = run_llm_judge(
+    issues, mode, _cost = run_llm_judge(
         model="google/gemini-3.1-flash-lite", lanes=lanes, api_key="sk-test", chat=lumping_chat
     )
     assert mode == "repaired(split+2)"

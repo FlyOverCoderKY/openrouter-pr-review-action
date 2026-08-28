@@ -214,3 +214,32 @@ finalization requires it.
 | Together | 3/3 | 134s | ~10% faster at 2× price |
 | Novita | 1/3 | 176s | capacity 404s when pinned |
 | BaseTen | 0/3 | — | no structured outputs |
+
+## Body-formatting instruction screening (2026-08-28, pre-1.2.5)
+
+Change under test: the shared prompt now requires finding bodies written
+for a skimming human — short paragraphs separated by blank lines
+(failure scenario, then evidence, then what was checked), markdown
+bullets for multi-instance findings, backticks on identifiers — with an
+explicit "formatting only, never trim substance" clause. Renderer
+changes (severity-emoji headings, metadata line, cost line) are
+model-invisible and were not screened.
+
+Screening: 3 runs, planted-mini (hardened, 13 labels), grok-4.6,
+effort=high — the low-risk-change protocol (5+ runs reserved for
+production decisions).
+
+| metric | screen (n=3) | baseline (n=5, hardened fixture) |
+| --- | --- | --- |
+| recall | 90% (13/13, 11/13, 11/13) | 94% |
+| bug recall | 67% (B1 1/3) | 70% (B1 2/5) |
+| precision / noise | 100% / 0% | 100% / low |
+| misses | B1 ×2, N5 ×2 only | B1, N5 are the two flaky labels |
+
+Every label except B1/N5 detected 3/3; file and repo strata 100%. The
+misses land exactly on the two labels with known ~40% detection
+variance, so n=3 at 90% is indistinguishable from the 94% baseline — no
+regression signal. Formatting effect confirmed mechanically: 28/28
+findings across the three runs are multi-paragraph (previously single
+dense blocks); zero bullets, as expected on single-instance fixture
+plants. ADOPTED.

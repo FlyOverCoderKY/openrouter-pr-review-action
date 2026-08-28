@@ -26,9 +26,6 @@ class MergedIssue:
     models: list[str] = field(default_factory=list)
     id: str | None = None  # ledger finding id (r<round>-<n>), assigned at finish
 
-    def heading(self, number: int) -> str:
-        return f"Issue {number} - {neutralize_mentions(self.title)} ({identified_by(self.models)})"
-
 
 def identified_by(models: list[str]) -> str:
     names = _unique(models)
@@ -41,15 +38,26 @@ def identified_by(models: list[str]) -> str:
     return f"identified by {', '.join(names[:-1])}, and {names[-1]}"
 
 
+SEVERITY_EMOJI = {"bug": "\U0001f534", "risk": "\U0001f7e0", "nit": "\U0001f535"}
+
+
+def severity_emoji(severity: str) -> str:
+    return SEVERITY_EMOJI.get(severity, "⚪")
+
+
 def format_issue_block(number: int, issue: MergedIssue) -> str:
-    heading = issue.heading(number)
-    parts = [heading, ""]
-    location = _location_line(issue)
-    if location:
-        parts.append(location)
-    parts.append(f"Severity: {issue.severity}")
-    parts.append("")
-    parts.append(neutralize_mentions(issue.body.rstrip()))
+    """A scannable block: emoji-severity heading, one metadata line, body."""
+    heading = (
+        f"#### {severity_emoji(issue.severity)} Issue {number} — "
+        f"{neutralize_mentions(issue.title)}"
+    )
+    meta = [f"`{issue.severity}`"]
+    if issue.file and issue.line:
+        meta.insert(0, f"`{issue.file}:{issue.line}`")
+    elif issue.file:
+        meta.insert(0, f"`{issue.file}`")
+    meta.append(identified_by(issue.models))
+    parts = [heading, "", " · ".join(meta), "", neutralize_mentions(issue.body.rstrip())]
     return "\n".join(parts).rstrip() + "\n"
 
 
@@ -146,14 +154,6 @@ def _unique(items: list[str]) -> list[str]:
             seen.add(item)
             out.append(item)
     return out
-
-
-def _location_line(issue: MergedIssue) -> str | None:
-    if issue.file and issue.line:
-        return f"Location: `{issue.file}:{issue.line}`"
-    if issue.file:
-        return f"Location: `{issue.file}`"
-    return None
 
 
 def _sort_key(issue: MergedIssue) -> tuple[int, str, str]:

@@ -200,7 +200,8 @@ def test_one_lane_posts_without_judge(tmp_path: Path, monkeypatch: pytest.Monkey
     assert main(["judge"], env) == 0
     assert judge_calls["n"] == 0
     assert posted
-    assert "Issue 1 - Missing auth check (identified by x-ai/grok-4.6)" in posted[0]
+    assert "Issue 1 — Missing auth check" in posted[0]
+    assert "identified by x-ai/grok-4.6" in posted[0]
     assert "single review lane" in posted[0]
     assert "OPENROUTER_API_KEY=should-not-be-used-for-judge" not in posted[0]
 
@@ -244,7 +245,7 @@ def test_two_lanes_require_judge_and_attribution(tmp_path: Path, monkeypatch: py
                 line=42,
                 models=["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"],
             )
-        ], "merged"
+        ], "merged", 0.0021
 
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
@@ -288,11 +289,14 @@ def test_two_lanes_require_judge_and_attribution(tmp_path: Path, monkeypatch: py
     assert main(["judge"], env) == 0
     assert judge_calls["n"] == 1
     assert posted
-    assert (
-        "Issue 1 - Missing auth check "
-        "(identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6)"
-    ) in posted[0]
+    assert "Issue 1 — Missing auth check" in posted[0]
+    assert "identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6" in posted[0]
     assert "`google/gemini-3.1-flash-lite`" in posted[0]
+    # The production wiring must render the judge cost on the posted body
+    # (the lane artifacts in this test carry no cost, so the sum is
+    # labeled incomplete rather than posing as the run total).
+    assert "**Cost:** $0.0021" in posted[0]
+    assert "incomplete: no cost reported for" in posted[0]
 
 
 def test_two_lanes_judge_schema_mismatch_fail_closed(
@@ -385,7 +389,7 @@ def test_judge_merges_valid_artifacts(tmp_path: Path, monkeypatch: pytest.Monkey
                 line=42,
                 models=["x-ai/grok-4.6"],
             )
-        ], "merged"
+        ], "merged", 0.0021
 
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
@@ -439,7 +443,8 @@ def test_judge_merges_valid_artifacts(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     assert main(["judge"], env) == 0
     assert posted
-    assert "Issue 1 - Missing auth check (identified by x-ai/grok-4.6)" in posted[0]
+    assert "Issue 1 — Missing auth check" in posted[0]
+    assert "identified by x-ai/grok-4.6" in posted[0]
     assert "failed-open" in posted[0]
     out = (tmp_path / "out.txt").read_text(encoding="utf-8")
     assert "verdict=issues" in out
@@ -801,7 +806,7 @@ def test_long_findings_lists_post_continuation_comments(
     assert comments, "long findings lists must continue in comments, not truncate"
     joined = "\n".join(reviews + comments)
     for n in range(1, 21):
-        assert f"Finding number {n} " in joined
+        assert f"— Finding number {n}" in joined
 
 
 def test_initial_coverage_count_mismatch_posts_note(

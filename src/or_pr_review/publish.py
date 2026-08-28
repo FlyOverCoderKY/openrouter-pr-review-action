@@ -6,7 +6,12 @@ from typing import Any
 
 from or_pr_review.collect import CollectedReview
 from or_pr_review.loop import finding_marker
-from or_pr_review.merge import MergedIssue, format_issue_block, neutralize_mentions
+from or_pr_review.merge import (
+    MergedIssue,
+    format_issue_block,
+    neutralize_mentions,
+    severity_emoji,
+)
 from or_pr_review.schema import LaneResult
 
 # GitHub caps comment bodies at 65,536 characters; stay under it in bytes and
@@ -71,6 +76,8 @@ def render_review(
     verdict: str,
     run_url: str = "",
     judge_note: str = "",
+    judge_cost: float | None = None,
+    judge_ran: bool = False,
     reviewed_sha: str | None = None,
     extra_notices: list[str] | None = None,
     hidden_marker: str | None = None,
@@ -84,6 +91,8 @@ def render_review(
         verdict=verdict,
         run_url=run_url,
         judge_note=judge_note,
+        judge_cost=judge_cost,
+        judge_ran=judge_ran,
         reviewed_sha=reviewed_sha,
         extra_notices=extra_notices,
         hidden_marker=hidden_marker,
@@ -99,6 +108,8 @@ def render_review_parts(
     verdict: str,
     run_url: str = "",
     judge_note: str = "",
+    judge_cost: float | None = None,
+    judge_ran: bool = False,
     reviewed_sha: str | None = None,
     extra_notices: list[str] | None = None,
     hidden_marker: str | None = None,
@@ -128,10 +139,17 @@ def render_review_parts(
                 extra += ", salvaged finish"
             if lane.provider:
                 extra += f", via {lane.provider}"
+            if lane.cost_usd is not None:
+                extra += f", {_fmt_cost(lane.cost_usd)}"
             lane_lines.append(f"- `{lane.model}`: ok ({extra})")
         else:
+            spent = (
+                f" ({_fmt_cost(lane.cost_usd)} spent)"
+                if lane.cost_usd is not None
+                else ""
+            )
             lane_lines.append(
-                f"- `{lane.model}`: failed-open — "
+                f"- `{lane.model}`: failed-open{spent} — "
                 f"{neutralize_mentions(lane.error or 'unknown error')}"
             )
 
@@ -147,6 +165,9 @@ def render_review_parts(
     ]
     if judge_note:
         header.append(f"**Judge:** {judge_note}")
+    cost_note = _cost_note(lanes, judge_cost, judge_ran)
+    if cost_note:
+        header.append(f"**Cost:** {cost_note}")
     header.extend(
         [
             "",
@@ -204,6 +225,40 @@ def render_review_parts(
     return bodies
 
 
+def _fmt_cost(value: float, precision: int | None = None) -> str:
+    """OpenRouter credits are USD. Two decimals reads best above a dime;
+    four below it so cheap lanes do not render as $0.00. Pass `precision`
+    to keep every figure in one note visually consistent (so a breakdown
+    adds up to its total on the page)."""
+    if precision is None:
+        precision = 2 if value >= 0.1 else 4
+    return f"${value:.{precision}f}"
+
+
+def _cost_note(
+    lanes: list[LaneResult], judge_cost: float | None, judge_ran: bool = False
+) -> str:
+    lane_costs = [lane.cost_usd for lane in lanes if lane.cost_usd is not None]
+    if not lane_costs and judge_cost is None:
+        return ""
+    total = sum(lane_costs) + (judge_cost or 0.0)
+    figures = [total, *lane_costs, *([judge_cost] if judge_cost is not None else [])]
+    precision = 2 if min(figures) >= 0.1 else 4
+    note = _fmt_cost(total, precision)
+    if judge_cost is not None and lane_costs:
+        note += (
+            f" (lanes {_fmt_cost(sum(lane_costs), precision)}"
+            f" + judge {_fmt_cost(judge_cost, precision)})"
+        )
+    # A sum missing a known spender must not read as the full run cost.
+    unreported = [f"`{lane.model}`" for lane in lanes if lane.cost_usd is None]
+    if judge_ran and judge_cost is None:
+        unreported.append("the judge")
+    if unreported:
+        note += f" — incomplete: no cost reported for {', '.join(unreported)}"
+    return note
+
+
 def _cap_block(lines: list[str], max_bytes: int) -> list[str]:
     kept: list[str] = []
     used = 0
@@ -256,7 +311,8 @@ def inline_review_comments(
                 "line": issue.line,
                 "side": "RIGHT",
                 "body": (
-                    f"{marker}**{neutralize_mentions(issue.title)}** (`{issue.severity}`)\n\n"
+                    f"{marker}{severity_emoji(issue.severity)} "
+                    f"**{neutralize_mentions(issue.title)}** (`{issue.severity}`)\n\n"
                     f"{neutralize_mentions(issue.body)}"
                 ),
             }

@@ -157,8 +157,10 @@
     "context": "file",
     "title": "SUPPORTED_YEARS still lists only 2026 while apply_cap gained 2027",
     "keywords": [
-      "SUPPORTED_YEARS",
-      "validate_year"
+      "SUPPORTED_YEARS.{0,140}(2026|stale|out of (sync|date)|not (updated|include)|missing|still|only)",
+      "(stale|missing|not in|out of sync|still|only).{0,100}SUPPORTED_YEARS",
+      "validate_year.{0,140}(reject|rais|refus|unsupported).{0,60}2027",
+      "2027.{0,100}(rejected|unsupported|refused).{0,80}validate_year"
     ]
   },
   {

@@ -61,6 +61,26 @@ def test_planted_fixture_loads_and_builds_messages() -> None:
         "body": "Callers relying on the default get 2026 caps. Falsification: checked report.py, rules.py, tests.",
     }
     assert not match_finding(default_confounder, r6)
+    # Bare-symbol mentions with unrelated semantics must not credit either
+    # context label (the Codex P1 vector).
+    assert not match_finding(
+        {"file": "report.py", "severity": "nit",
+         "title": "annual_report returns a bare dict",
+         "body": "A typed result object would be clearer than a dict."},
+        r6,
+    )
+    assert not match_finding(
+        {"file": "calc.py", "severity": "nit",
+         "title": "validate_year lacks a docstring",
+         "body": "It raises ValueError for unsupported years but never documents that."},
+        f1,
+    )
+    assert match_finding(
+        {"file": "calc.py", "severity": "risk",
+         "title": "Year gate out of date",
+         "body": "SUPPORTED_YEARS still lists only 2026, so validate_year rejects 2027 even though apply_cap now supports it."},
+        f1,
+    )
     genuine_r6 = {
         "file": "report.py", "severity": "risk",
         "title": "annual_report caps with the default year",

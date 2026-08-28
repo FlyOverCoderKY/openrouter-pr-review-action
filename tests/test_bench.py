@@ -39,6 +39,38 @@ def test_planted_fixture_loads_and_builds_messages() -> None:
     clean = load_fixture(FIXTURE_DIR.parent / "planted-mini-clean")
     assert "SUPPORTED_YEARS" in clean.diff
     assert "report.py" in clean.diff
+    # Semantic containment: the file/repo labels must be UNMATCHABLE from the
+    # diff alone — including via hunk headers — and must not cross-credit
+    # correct diff-stratum findings (the exact vectors the self-review found).
+    diff_finding = {"file": "calc.py", "title": "quotes the diff", "body": fixture.diff, "severity": "risk"}
+    for lid in ("F1", "R6"):
+        label = next(l for l in fixture.labels if l.id == lid)
+        assert not match_finding(diff_finding, label), lid
+        assert not match_finding({**diff_finding, "file": None}, label), lid
+    f1 = next(l for l in fixture.labels if l.id == "F1")
+    b2_confounder = {
+        "file": "calc.py", "severity": "bug",
+        "title": "apply_cap raises KeyError for unsupported years",
+        "body": "Year validation is missing or out of sync: caps has only 2026 and 2027 and other years crash despite the docstring.",
+    }
+    assert not match_finding(b2_confounder, f1)
+    r6 = next(l for l in fixture.labels if l.id == "R6")
+    default_confounder = {
+        "file": "calc.py", "severity": "nit",
+        "title": "apply_cap default year stays 2026",
+        "body": "Callers relying on the default get 2026 caps. Falsification: checked report.py, rules.py, tests.",
+    }
+    assert not match_finding(default_confounder, r6)
+    genuine_r6 = {
+        "file": "report.py", "severity": "risk",
+        "title": "annual_report caps with the default year",
+        "body": "annual_report ignores its year argument when capping: apply_cap uses the default 2026 even for year=2027.",
+    }
+    assert match_finding(genuine_r6, r6)
+    # The fixture must not coach its own plants: no fourth-wall language.
+    for banned in ("padding", "must require reading", "outside the diff"):
+        assert banned not in (fixture.checkout / "calc.py").read_text(encoding="utf-8")
+        assert banned not in clean.diff
     # The fixture must NOT hint at its own plants through custom instructions.
     assert fixture.custom_instructions == ""
     collected = collected_from_fixture(fixture)

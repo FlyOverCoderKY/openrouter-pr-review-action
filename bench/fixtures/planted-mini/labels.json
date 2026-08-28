@@ -158,9 +158,7 @@
     "title": "SUPPORTED_YEARS still lists only 2026 while apply_cap gained 2027",
     "keywords": [
       "SUPPORTED_YEARS",
-      "validate_year.{0,80}2027",
-      "2027.{0,80}validate_year",
-      "year (validation|gate).{0,60}(stale|not updated|missing|disagree|out of sync)"
+      "validate_year"
     ]
   },
   {
@@ -170,10 +168,9 @@
     "context": "repo",
     "title": "report.py annual_report caps with the default year, wrong once 2027 exists",
     "keywords": [
-      "annual_report",
-      "report\\.py",
-      "default (plan )?year.{0,80}(cap|apply_cap)",
-      "apply_cap.{0,80}(without|omits|ignores|default).{0,30}year"
+      "annual_report.{0,120}(default|2026)",
+      "(default|2026).{0,120}annual_report",
+      "report\\.py.{0,120}(default year|caps? (with|at|using).{0,24}(2026|the default))"
     ]
   }
 ]

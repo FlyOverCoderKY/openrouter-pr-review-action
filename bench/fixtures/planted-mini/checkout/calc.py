@@ -18,17 +18,17 @@ def validate_amount(amount: int) -> None:
         raise ValueError("amount must be non-negative")
 
 
-# Plan-year gate used by report generation. Every year that has a cap in
-# apply_cap must also be listed here, or year validation and capping
-# disagree about which years the engine supports.
-# The padding around this block keeps it clear of the surrounding diff
-# hunks' context windows: finding it must require reading the file.
+# Every plan year with a cap in apply_cap must also be listed here.
 SUPPORTED_YEARS = (2026,)
 
 
 def validate_year(year: int) -> None:
     if year not in SUPPORTED_YEARS:
         raise ValueError(f"unsupported plan year {year}")
+
+
+def sorted_amounts(amounts: list[int]) -> list[int]:
+    return sorted(amounts)
 
 
 def contribution_total(amounts: list[int]) -> int:

@@ -42,17 +42,17 @@ def validate_amount(amount: int) -> None:
         raise ValueError("amount must be non-negative")
 
 
-# Plan-year gate used by report generation. Every year that has a cap in
-# apply_cap must also be listed here, or year validation and capping
-# disagree about which years the engine supports.
-# The padding around this block keeps it clear of the surrounding diff
-# hunks' context windows: finding it must require reading the file.
+# Every plan year with a cap in apply_cap must also be listed here.
 SUPPORTED_YEARS = (2026,)
 
 
 def validate_year(year: int) -> None:
     if year not in SUPPORTED_YEARS:
         raise ValueError(f"unsupported plan year {year}")
+
+
+def sorted_amounts(amounts: list[int]) -> list[int]:
+    return sorted(amounts)
 
 
 def contribution_total(amounts: list[int]) -> int:
@@ -64,11 +64,10 @@ def contribution_total(amounts: list[int]) -> int:
 ''',
     "report.py": '''"""Annual report assembly for the mini benefits engine."""
 
-from calc import apply_cap, contribution_total, validate_year
+from calc import apply_cap, contribution_total
 
 
 def annual_report(amounts: list[int], year: int) -> dict:
-    validate_year(year)
     # Shortcut: apply_cap defaults to the current plan year. Safe while
     # only one plan year is supported.
     capped = apply_cap(contribution_total(amounts))
@@ -131,17 +130,17 @@ def validate_amount(amount: int) -> None:
         raise ValueError("amount must be non-negative")
 
 
-# Plan-year gate used by report generation. Every year that has a cap in
-# apply_cap must also be listed here, or year validation and capping
-# disagree about which years the engine supports.
-# The padding around this block keeps it clear of the surrounding diff
-# hunks' context windows: finding it must require reading the file.
+# Every plan year with a cap in apply_cap must also be listed here.
 SUPPORTED_YEARS = (2026,)
 
 
 def validate_year(year: int) -> None:
     if year not in SUPPORTED_YEARS:
         raise ValueError(f"unsupported plan year {year}")
+
+
+def sorted_amounts(amounts: list[int]) -> list[int]:
+    return sorted(amounts)
 
 
 def contribution_total(amounts: list[int]) -> int:
@@ -222,17 +221,17 @@ def validate_amount(amount: int) -> None:
         raise ValueError("amount must be non-negative")
 
 
-# Plan-year gate used by report generation. Every year that has a cap in
-# apply_cap must also be listed here, or year validation and capping
-# disagree about which years the engine supports.
-# The padding around this block keeps it clear of the surrounding diff
-# hunks' context windows: finding it must require reading the file.
+# Every plan year with a cap in apply_cap must also be listed here.
 SUPPORTED_YEARS = (2026, 2027)
 
 
 def validate_year(year: int) -> None:
     if year not in SUPPORTED_YEARS:
         raise ValueError(f"unsupported plan year {year}")
+
+
+def sorted_amounts(amounts: list[int]) -> list[int]:
+    return sorted(amounts)
 
 
 def contribution_total(amounts: list[int]) -> int:
@@ -255,9 +254,9 @@ from calc import apply_cap, contribution_total, validate_year
 
 
 def annual_report(amounts: list[int], year: int) -> dict:
+    # Validate and cap for the report's own plan year: the default-year
+    # shortcut broke once more than one plan year existed.
     validate_year(year)
-    # Cap for the report's own plan year: the default-year shortcut broke
-    # once more than one plan year existed.
     capped = apply_cap(contribution_total(amounts), year)
     return {"year": year, "capped_total": capped}
 ''',

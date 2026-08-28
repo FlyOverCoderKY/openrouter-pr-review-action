@@ -1,4 +1,6 @@
-# Bench fixtures are byte-exact test data: no newline conversion, ever.
-# (A CRLF-converted diff.patch would change the embedded diff per platform,
-# and the drift-guard tests compare bytes against the generator.)
-bench/fixtures/** -text
+# Fixture checkouts and diffs are byte-exact test data pinned to the
+# generator: no newline conversion, ever. (A CRLF-converted diff.patch
+# would change the embedded diff per platform.) Generator source and
+# JSON metadata stay under normal text handling.
+bench/fixtures/*/checkout/** -text
+bench/fixtures/*/diff.patch -text

@@ -7,7 +7,9 @@ the findings against curated golden labels.
 Three kinds of fixture:
 
 - **Planted** (`bench/fixtures/planted-mini/`, committed): a small synthetic
-  project whose diff contains known defects at every severity. Objective
+  project seeded with known defects at every severity and context stratum —
+  most visible in the diff, but some findable only by reading a changed file
+  in full (`file`) or following callers outside the diff (`repo`). Objective
   ground truth, pennies per run, minutes to iterate. The unit test of
   promptcraft.
 - **Clean twin** (`bench/fixtures/planted-mini-clean/`, committed): the same

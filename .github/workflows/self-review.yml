@@ -3,7 +3,10 @@
 # release gate the unit suite cannot provide — it exercises the real
 # OpenRouter round-trip (reasoning_details echo, json_schema variants,
 # coverage compliance), the posted review, the ledger marker, inline
-# comments, and (on synchronize) a verify round with continuity.
+# comments, and (on synchronize, once the loop is seeded) a verify round
+# with continuity. An unseeded synchronize SKIPS green with a notice —
+# that head is NOT reviewed until the next push or a workflow_dispatch
+# seed; a skipped follow-up means "not reviewed yet", not "clean".
 #
 # Advisory only: fail_on is never and this must not become a required check.
 # Fork PRs do not receive OPENROUTER_API_KEY and fail fast with a clear error.

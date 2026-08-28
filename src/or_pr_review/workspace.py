@@ -42,18 +42,47 @@ _BLOCKED_SUFFIXES = (".pem", ".p12", ".pfx", ".key")
 
 
 def materialize_commit(repo: Path, sha: str, dest: Path) -> Path:
-    """Extract tracked files for `sha` into dest. Symlinks and huge files skipped."""
+    """Extract tracked files for `sha` into dest. Symlinks and huge files skipped.
+
+    The snapshot is deliberately incomplete (oversized and non-regular members
+    are omitted), so the COMPLETE tracked path list is written next to the
+    checkout for consumers — like the anchor gate — that must distinguish "not
+    tracked at this commit" from "tracked but not materialized"."""
     dest.mkdir(parents=True, exist_ok=True)
     archive = _git_archive(repo, sha)
+    tracked: list[str] = []
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
             for member in tar.getmembers():
+                if not member.isdir():
+                    tracked.append(member.name)
                 if not _safe_member(member):
                     continue
                 tar.extract(member, path=dest, filter="data")
     except (tarfile.TarError, OSError) as exc:
         raise ActionError(f"failed to materialize reviewed commit {sha[:12]}: {exc}") from exc
+    _manifest_path(dest).write_text(
+        "\n".join(tracked) + ("\n" if tracked else ""), encoding="utf-8"
+    )
     return dest
+
+
+def _manifest_path(workspace: Path) -> Path:
+    # Beside the checkout, not inside it: the read-only tools must never see it.
+    return workspace.parent / f"{workspace.name}.paths"
+
+
+def tracked_paths(workspace: Path) -> set[str] | None:
+    """The commit's complete tracked file list, or None when no manifest exists
+    (e.g. bench fixture checkouts, which are complete trees)."""
+    manifest = _manifest_path(workspace)
+    if not manifest.is_file():
+        return None
+    return {
+        line.strip()
+        for line in manifest.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
 
 
 def _git_archive(repo: Path, sha: str) -> bytes:

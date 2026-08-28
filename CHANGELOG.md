@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Deterministic anchor sanity gate** (research report #4, zero model calls): after schema finalization, a finding whose path does not exist in the reviewed checkout becomes body-only, and a line beyond the end of its file loses the line anchor — the finding itself always survives, so out-of-diff blast-radius citations of real files pass untouched, and each adjustment is logged. Safety-validated by replaying all 66 saved bench lane artifacts (535 findings): one anchor altered, and correctly — a model cited `docs/rules.md:8` for a missing inventory row in a 7-line file.
+- **Deterministic anchor sanity gate** (research report #4, zero model calls): after schema finalization, a finding whose path does not exist in the reviewed checkout becomes body-only, and a line beyond the end of its file loses the line anchor — the finding itself always survives, so out-of-diff blast-radius citations of real files pass untouched, and each adjustment is logged. Safety-validated by replaying all 66 saved bench lane artifacts (535 findings): one anchor altered, and correctly — a model cited `docs/rules.md:8` for a missing inventory row in a 7-line file. Hardened by its own self-review: the gate errs toward keeping anchors — path existence is judged against the commit's full tracked-path manifest (the inert snapshot deliberately omits oversized/non-regular files), directories count as existing, lines are counted the way the read tools number them (str.splitlines), tool-less runs gate against the workflow's own checkout, and judge-merged issues pass through the same gate.
 
 ## 1.2.3 — 2026-08-28
 

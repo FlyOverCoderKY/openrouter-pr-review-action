@@ -119,6 +119,114 @@ def test_anchor_gate_nulls_impossible_locations(tmp_path: Path) -> None:
     assert (out[3].file, out[3].line) == (None, None)
 
 
+def test_anchor_gate_respects_snapshot_holes_and_directories(tmp_path: Path) -> None:
+    from or_pr_review.harness import sanitize_anchors
+    from or_pr_review.schema import Finding
+
+    workspace = tmp_path / "inert-checkout"
+    (workspace / "pkg").mkdir(parents=True)
+    (workspace / "pkg" / "small.py").write_text("one\n", encoding="utf-8")
+    # The manifest records the commit's FULL tracked list — including a large
+    # generated file that materialization deliberately skipped.
+    (tmp_path / "inert-checkout.paths").write_text(
+        "pkg/small.py\npackage-lock.json\n", encoding="utf-8"
+    )
+
+    def finding(title: str, file: str | None, line: int | None):
+        return Finding(title=title, body="b", severity="risk", file=file, line=line, model_id="m")
+
+    out = sanitize_anchors(
+        [
+            finding("tracked but not materialized", "package-lock.json", 4021),
+            finding("directory citation", "pkg", None),
+            finding("truly untracked", "ghost.py", 1),
+        ],
+        workspace,
+    )
+    # A snapshot hole is NOT a ghost path: anchor kept, line uncheckable so kept.
+    assert (out[0].file, out[0].line) == ("package-lock.json", 4021)
+    # A real directory exists; the path anchor survives.
+    assert (out[1].file, out[1].line) == ("pkg", None)
+    assert (out[2].file, out[2].line) == (None, None)
+
+
+def test_anchor_gate_counts_lines_like_the_read_tools(tmp_path: Path) -> None:
+    from or_pr_review.harness import sanitize_anchors
+    from or_pr_review.schema import Finding
+
+    # Three tool-visible lines, but only one \n byte: U+2028 and a bare \r
+    # also split under str.splitlines, which is how read_file/grep number.
+    (tmp_path / "odd.py").write_bytes("a b\rc\n".encode("utf-8"))
+    finding = Finding(
+        title="cites the tool-visible last line", body="b", severity="risk",
+        file="odd.py", line=3, model_id="m",
+    )
+    out = sanitize_anchors([finding], tmp_path)
+    assert (out[0].file, out[0].line) == ("odd.py", 3)
+
+
+def test_run_lane_applies_the_anchor_gate(tmp_path: Path) -> None:
+    (tmp_path / "real.py").write_text("one\ntwo\n", encoding="utf-8")
+
+    def chat(_payload: dict) -> dict:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"findings":['
+                            '{"title":"ghost","body":"b","severity":"risk","file":"no.py","line":1},'
+                            '{"title":"eof","body":"b","severity":"nit","file":"real.py","line":99}'
+                            "]}"
+                        )
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=0,
+    )
+    assert result.ok
+    assert (result.findings[0].file, result.findings[0].line) == (None, None)
+    assert (result.findings[1].file, result.findings[1].line) == ("real.py", None)
+
+
+def test_run_lane_gates_toolless_runs_via_anchor_root(tmp_path: Path) -> None:
+    def chat(_payload: dict) -> dict:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"findings":[{"title":"ghost","body":"b","severity":"risk",'
+                            '"file":"no.py","line":1}]}'
+                        )
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        anchor_root=tmp_path,
+        chat=chat,
+        max_tool_turns=0,
+    )
+    assert result.ok
+    assert (result.findings[0].file, result.findings[0].line) == (None, None)
+
+
 def test_lane_tool_call_then_findings(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     calls = {"n": 0}

@@ -191,6 +191,9 @@ def run_lane(
     effort: str = "",
     timeout: int = DEFAULT_TIMEOUT,
     provider_order: list[str] | None = None,
+    # Anchor-gate reference tree for tool-less runs (workspace None): a full
+    # checkout of the reviewed head, used only for path/line existence checks.
+    anchor_root: Path | None = None,
     chat: ChatFn | None = None,
     expect_coverage: bool = False,
     expect_resolutions: bool = False,
@@ -249,8 +252,9 @@ def run_lane(
             validate_final=_validate,
         )
         findings, resolutions, coverage = _validate(content)
-        if workspace is not None:
-            findings = sanitize_anchors(findings, workspace)
+        gate_root = workspace if workspace is not None else anchor_root
+        if gate_root is not None:
+            findings = sanitize_anchors(findings, gate_root)
     except LaneError as exc:
         failed = failed_lane(model, redact(str(exc)), elapsed_ms=_elapsed_ms(started))
         _attach_stats(failed, stats, usage)
@@ -594,31 +598,46 @@ def _absorb_usage(
 def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:
     """Deterministic anchor sanity gate: null objectively impossible locations.
 
-    A finding whose path does not exist in the reviewed checkout, or whose
-    line lies beyond the end of its file, keeps its title/body/severity but
-    loses the impossible anchor (path -> body-only, out-of-range line ->
-    path-only). This is a zero-model-call accuracy gate: it removes only
-    locations that cannot exist, never a finding — out-of-diff blast-radius
-    citations of real files pass untouched. Each adjustment is logged.
+    A finding whose path is not tracked at the reviewed commit becomes
+    body-only; a line beyond the end of its materialized file loses the line
+    anchor. The finding itself always survives. The gate errs toward keeping
+    anchors: the inert snapshot deliberately omits oversized and non-regular
+    files, so path existence is judged against the commit's tracked-path
+    manifest when one is present (falling back to the filesystem, where a
+    directory also counts as existing), and the line check runs only on files
+    that were actually materialized, counted the way the read-only tools
+    number lines. Each adjustment is logged.
     """
     from dataclasses import replace as _replace
 
+    from or_pr_review.workspace import tracked_paths
+
+    manifest = tracked_paths(workspace)
     sanitized: list[Finding] = []
     for finding in findings:
         if finding.file is None:
             sanitized.append(finding)
             continue
         target = workspace / finding.file
-        if not target.is_file():
+        exists = (
+            finding.file in manifest if manifest is not None else target.exists()
+        ) or target.exists()
+        if not exists:
             print(
-                f"anchor gate: `{finding.file}` does not exist in the reviewed "
-                f"checkout; finding {finding.title[:60]!r} becomes body-only"
+                f"anchor gate: `{finding.file}` is not tracked at the reviewed "
+                f"commit; finding {finding.title[:60]!r} becomes body-only"
             )
             sanitized.append(_replace(finding, file=None, line=None))
             continue
-        if finding.line is not None:
+        if finding.line is not None and target.is_file():
+            line_count: int | None
             try:
-                line_count = sum(1 for _ in target.open("rb"))
+                with target.open("rb") as handle:
+                    # Count lines exactly the way read_file/grep number them
+                    # (str.splitlines also splits U+2028/NEL/bare \r).
+                    line_count = len(
+                        handle.read().decode("utf-8", errors="replace").splitlines()
+                    )
             except OSError:
                 line_count = None
             if line_count is not None and finding.line > line_count:

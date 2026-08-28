@@ -18,6 +18,19 @@ def validate_amount(amount: int) -> None:
         raise ValueError("amount must be non-negative")
 
 
+# Every plan year with a cap in apply_cap must also be listed here.
+SUPPORTED_YEARS = (2026,)
+
+
+def validate_year(year: int) -> None:
+    if year not in SUPPORTED_YEARS:
+        raise ValueError(f"unsupported plan year {year}")
+
+
+def sorted_amounts(amounts: list[int]) -> list[int]:
+    return sorted(amounts)
+
+
 def contribution_total(amounts: list[int]) -> int:
     total = 0
     for amount in amounts:

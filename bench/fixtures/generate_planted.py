@@ -42,12 +42,36 @@ def validate_amount(amount: int) -> None:
         raise ValueError("amount must be non-negative")
 
 
+# Every plan year with a cap in apply_cap must also be listed here.
+SUPPORTED_YEARS = (2026,)
+
+
+def validate_year(year: int) -> None:
+    if year not in SUPPORTED_YEARS:
+        raise ValueError(f"unsupported plan year {year}")
+
+
+def sorted_amounts(amounts: list[int]) -> list[int]:
+    return sorted(amounts)
+
+
 def contribution_total(amounts: list[int]) -> int:
     total = 0
     for amount in amounts:
         validate_amount(amount)
         total += amount
     return total
+''',
+    "report.py": '''"""Annual report assembly for the mini benefits engine."""
+
+from calc import apply_cap, contribution_total
+
+
+def annual_report(amounts: list[int], year: int) -> dict:
+    # Shortcut: apply_cap defaults to the current plan year. Safe while
+    # only one plan year is supported.
+    capped = apply_cap(contribution_total(amounts))
+    return {"year": year, "capped_total": capped}
 ''',
     "rules.py": '''"""Rule registry for the mini benefits engine."""
 
@@ -106,6 +130,19 @@ def validate_amount(amount: int) -> None:
         raise ValueError("amount must be non-negative")
 
 
+# Every plan year with a cap in apply_cap must also be listed here.
+SUPPORTED_YEARS = (2026,)
+
+
+def validate_year(year: int) -> None:
+    if year not in SUPPORTED_YEARS:
+        raise ValueError(f"unsupported plan year {year}")
+
+
+def sorted_amounts(amounts: list[int]) -> list[int]:
+    return sorted(amounts)
+
+
 def contribution_total(amounts: list[int]) -> int:
     total = 0
     for amount in amounts:
@@ -117,6 +154,7 @@ def average_contribution(amounts: list[int]) -> float:
     """Average per-source contribution for the year."""
     return contribution_total(amounts) / len(amounts)
 ''',
+    "report.py": BASE["report.py"],
     "rules.py": '''"""Rule registry for the mini benefits engine."""
 
 RULES = {
@@ -183,6 +221,19 @@ def validate_amount(amount: int) -> None:
         raise ValueError("amount must be non-negative")
 
 
+# Every plan year with a cap in apply_cap must also be listed here.
+SUPPORTED_YEARS = (2026, 2027)
+
+
+def validate_year(year: int) -> None:
+    if year not in SUPPORTED_YEARS:
+        raise ValueError(f"unsupported plan year {year}")
+
+
+def sorted_amounts(amounts: list[int]) -> list[int]:
+    return sorted(amounts)
+
+
 def contribution_total(amounts: list[int]) -> int:
     total = 0
     for amount in amounts:
@@ -196,6 +247,18 @@ def average_contribution(amounts: list[int]) -> float:
     if not amounts:
         raise ValueError("amounts must not be empty")
     return contribution_total(amounts) / len(amounts)
+''',
+    "report.py": '''"""Annual report assembly for the mini benefits engine."""
+
+from calc import apply_cap, contribution_total, validate_year
+
+
+def annual_report(amounts: list[int], year: int) -> dict:
+    # Validate and cap for the report's own plan year: the default-year
+    # shortcut broke once more than one plan year existed.
+    validate_year(year)
+    capped = apply_cap(contribution_total(amounts), year)
+    return {"year": year, "capped_total": capped}
 ''',
     "rules.py": '''"""Rule registry for the mini benefits engine."""
 

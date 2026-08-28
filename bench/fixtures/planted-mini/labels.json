@@ -149,5 +149,30 @@
       "unlike the 2026 entry"
     ],
     "context": "diff"
+  },
+  {
+    "id": "F1",
+    "severity": "risk",
+    "file": "calc.py",
+    "context": "file",
+    "title": "SUPPORTED_YEARS still lists only 2026 while apply_cap gained 2027",
+    "keywords": [
+      "SUPPORTED_YEARS.{0,140}(2026|stale|out of (sync|date)|not (updated|include)|missing|still|only)",
+      "(stale|missing|not in|out of sync|still|only).{0,100}SUPPORTED_YEARS",
+      "validate_year.{0,140}(reject|rais|refus|unsupported).{0,60}2027",
+      "2027.{0,100}(rejected|unsupported|refused).{0,80}validate_year"
+    ]
+  },
+  {
+    "id": "R6",
+    "severity": "risk",
+    "file": null,
+    "context": "repo",
+    "title": "report.py annual_report caps with the default year, wrong once 2027 exists",
+    "keywords": [
+      "annual_report.{0,120}(default|2026)",
+      "(default|2026).{0,120}annual_report",
+      "report\\.py.{0,120}(default year|caps? (with|at|using).{0,24}(2026|the default))"
+    ]
   }
 ]

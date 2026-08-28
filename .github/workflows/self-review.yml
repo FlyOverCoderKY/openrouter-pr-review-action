@@ -3,7 +3,10 @@
 # release gate the unit suite cannot provide — it exercises the real
 # OpenRouter round-trip (reasoning_details echo, json_schema variants,
 # coverage compliance), the posted review, the ledger marker, inline
-# comments, and (on synchronize) a verify round with continuity.
+# comments, and (on synchronize, once the loop is seeded) a verify round
+# with continuity. An unseeded synchronize SKIPS green with a notice —
+# that head is NOT reviewed until the next push or a workflow_dispatch
+# seed; a skipped follow-up means "not reviewed yet", not "clean".
 #
 # Advisory only: fail_on is never and this must not become a required check.
 # Fork PRs do not receive OPENROUTER_API_KEY and fail fast with a clear error.
@@ -116,17 +119,40 @@ jobs:
           echo "::error::OPENROUTER_API_KEY is empty (fork PRs do not receive repository secrets)."
           exit 1
 
+      # Ledger-based gating, ported from the org reusable: a synchronize that
+      # outruns the first-pass (or lands while it is mid-flight, so its review
+      # posts stale/partial and never seeds) SKIPS with a notice instead of
+      # failing red. Seed with workflow_dispatch (pr_number). The per-page
+      # count + awk sum drains pagination so pipefail can never SIGPIPE gh.
+      - name: Require a seeded review loop
+        id: seeded
+        run: |
+          set -euo pipefail
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          if ! matches="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+              --jq '[.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | contains("<!-- openrouter-review-ledger:v1:")))] | length' \
+              | awk '{sum += $1} END {print sum + 0}')"; then
+            echo "::warning::Could not list PR reviews for the ledger check; skipping the follow-up without spend. Re-run or dispatch a first-pass."
+            exit 0
+          fi
+          if [ "${matches:-0}" -gt 0 ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Review-loop ledger found; running the verify round."
+          else
+            echo "::notice::Skipping the self-review follow-up: no review-loop ledger on this PR yet (first-pass still running or never seeded). Dispatch the Self review workflow with this pr_number to seed. No OpenRouter spend."
+          fi
+
       - name: Checkout PR head
+        if: steps.seeded.outputs.ready == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      # A synchronize that outruns the very first first-pass fails closed with
-      # "run an initial full-PR review first" — that is the loop's designed
-      # behavior, not a smoke failure.
       - name: Run self review follow-up (verify round)
+        if: steps.seeded.outputs.ready == 'true'
         uses: ./
         with:
           github_token: ${{ github.token }}

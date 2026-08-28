@@ -22,15 +22,75 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "bench" / "fixtures" / "p
 
 def test_planted_fixture_loads_and_builds_messages() -> None:
     fixture = load_fixture(FIXTURE_DIR)
-    assert len(fixture.labels) == 11
+    assert len(fixture.labels) == 13
     severities = [label.severity for label in fixture.labels]
     assert severities.count("bug") == 2
-    assert severities.count("risk") == 4
+    assert severities.count("risk") == 6
     assert severities.count("nit") == 5
     assert "diff --git a/calc.py" in fixture.diff
     # The blast-radius plant: docs/rules.md is in the checkout but NOT the diff.
     assert (fixture.checkout / "docs" / "rules.md").is_file()
     assert "docs/rules.md" not in changed_paths_from_diff(fixture.diff)
+    # Containment: the file/repo-context plants must stay OUT of the planted
+    # diff (their strata claims depend on it) while the clean twin fixes them.
+    assert "SUPPORTED_YEARS" not in fixture.diff
+    assert "report.py" not in fixture.diff
+    assert (fixture.checkout / "report.py").is_file()
+    clean = load_fixture(FIXTURE_DIR.parent / "planted-mini-clean")
+    assert "SUPPORTED_YEARS" in clean.diff
+    assert "report.py" in clean.diff
+    # Semantic containment: the file/repo labels must be UNMATCHABLE from the
+    # diff alone — including via hunk headers — and must not cross-credit
+    # correct diff-stratum findings (the exact vectors the self-review found).
+    diff_finding = {"file": "calc.py", "title": "quotes the diff", "body": fixture.diff, "severity": "risk"}
+    for lid in ("F1", "R6"):
+        label = next(l for l in fixture.labels if l.id == lid)
+        assert not match_finding(diff_finding, label), lid
+        assert not match_finding({**diff_finding, "file": None}, label), lid
+    f1 = next(l for l in fixture.labels if l.id == "F1")
+    b2_confounder = {
+        "file": "calc.py", "severity": "bug",
+        "title": "apply_cap raises KeyError for unsupported years",
+        "body": "Year validation is missing or out of sync: caps has only 2026 and 2027 and other years crash despite the docstring.",
+    }
+    assert not match_finding(b2_confounder, f1)
+    r6 = next(l for l in fixture.labels if l.id == "R6")
+    default_confounder = {
+        "file": "calc.py", "severity": "nit",
+        "title": "apply_cap default year stays 2026",
+        "body": "Callers relying on the default get 2026 caps. Falsification: checked report.py, rules.py, tests.",
+    }
+    assert not match_finding(default_confounder, r6)
+    # Bare-symbol mentions with unrelated semantics must not credit either
+    # context label (the Codex P1 vector).
+    assert not match_finding(
+        {"file": "report.py", "severity": "nit",
+         "title": "annual_report returns a bare dict",
+         "body": "A typed result object would be clearer than a dict."},
+        r6,
+    )
+    assert not match_finding(
+        {"file": "calc.py", "severity": "nit",
+         "title": "validate_year lacks a docstring",
+         "body": "It raises ValueError for unsupported years but never documents that."},
+        f1,
+    )
+    assert match_finding(
+        {"file": "calc.py", "severity": "risk",
+         "title": "Year gate out of date",
+         "body": "SUPPORTED_YEARS still lists only 2026, so validate_year rejects 2027 even though apply_cap now supports it."},
+        f1,
+    )
+    genuine_r6 = {
+        "file": "report.py", "severity": "risk",
+        "title": "annual_report caps with the default year",
+        "body": "annual_report ignores its year argument when capping: apply_cap uses the default 2026 even for year=2027.",
+    }
+    assert match_finding(genuine_r6, r6)
+    # The fixture must not coach its own plants: no fourth-wall language.
+    for banned in ("padding", "must require reading", "outside the diff"):
+        assert banned not in (fixture.checkout / "calc.py").read_text(encoding="utf-8")
+        assert banned not in clean.diff
     # The fixture must NOT hint at its own plants through custom instructions.
     assert fixture.custom_instructions == ""
     collected = collected_from_fixture(fixture)
@@ -150,7 +210,9 @@ def test_planted_fixture_context_labels_and_adjudications() -> None:
     fixture = load_fixture(FIXTURE_DIR)
     contexts = {label.id: label.context for label in fixture.labels}
     assert contexts["R4"] == "repo"  # the docs-inventory plant needs tool use
-    assert all(c == "diff" for lid, c in contexts.items() if lid != "R4")
+    assert contexts["R6"] == "repo"  # the report.py caller plant lives outside the diff
+    assert contexts["F1"] == "file"  # SUPPORTED_YEARS is only visible by reading calc.py
+    assert all(c == "diff" for lid, c in contexts.items() if lid not in {"R4", "R6", "F1"})
     assert any(a.verdict == "true_positive_unlabeled" for a in fixture.adjudications)
 
 

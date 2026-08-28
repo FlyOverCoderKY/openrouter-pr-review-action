@@ -11,6 +11,26 @@ usage at the listed provider's pricing on the run date.
 > `noise` column, so precision numbers are not directly comparable across
 > that boundary (recall numbers are).
 
+## 2026-08-28 — contract-map prompt A/B: NOT adopted (x-ai/grok-4.6, 5 runs/arm)
+
+The research report's #2 (build an internal contract/intent map before the
+sweeps), tested on fixture v2 (13 labels incl. the new file/repo-context
+plants) against the falsification-prompt baseline:
+
+| arm | recall | bug | diff-stratum | B1 | N5 | clean-twin/run | time (planted/clean) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline | 91% | 70% | 88% | 2/5 | 2/5 | 4.6 | 87s / 172s |
+| + contract map | 91% | 70% | 88% | 2/5 | 3/5 | 5.0 | 102s / 183s |
+
+**Not adopted**: recall identical in every stratum, the hypothesized target
+(B1, the stale source-of-truth dollar) unmoved, clean-twin volume slightly
+up, +10-16% wall time. The exhaustive+falsification prompt already does the
+cross-file work the map was meant to add — fixture v2's validation run
+showed F1 (file-context year-gate drift) and R6 (repo-context caller break)
+at 5/5 under the baseline. Negative result recorded so the idea is not
+re-tried without new evidence; the remaining headroom (B1/N5, both
+source-of-truth-value class) points at a targeted guidance profile instead.
+
 ## 2026-08-28 — falsification-pass prompt A/B (x-ai/grok-4.6, 5 runs/arm)
 
 The research report's experiment #1: adding an asymmetric falsification pass

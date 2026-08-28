@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.5 — 2026-08-28
 
 - **Review cost on the posted review**: every OpenRouter request now asks for
   usage accounting (`usage: {include: true}`), lanes accumulate the returned

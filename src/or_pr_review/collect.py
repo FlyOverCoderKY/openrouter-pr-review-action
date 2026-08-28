@@ -91,6 +91,10 @@ class CollectedReview:
     plan: DiffPlan
     truncation: Truncation
     mode: ResolvedMode
+    # Changed paths from the FULL collected diff, before the embed cap:
+    # consumers that reason about "what changed on this PR" (path profiles)
+    # must not be blinded by byte truncation of the prompt embed.
+    all_changed_paths: tuple[str, ...] = ()
 
     @property
     def diff(self) -> str:
@@ -310,7 +314,15 @@ def collect_review(
         plan=plan,
         truncation=truncate_diff(raw, max_diff_kb),
         mode=mode,
+        all_changed_paths=_all_changed_paths(raw),
     )
+
+
+def _all_changed_paths(diff: str) -> tuple[str, ...]:
+    # Local import: prompt imports CollectedReview from this module.
+    from or_pr_review.prompt import changed_paths_from_diff
+
+    return tuple(changed_paths_from_diff(diff))
 
 
 def _as_str(value: object) -> str | None:

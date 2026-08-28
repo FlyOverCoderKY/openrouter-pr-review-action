@@ -270,3 +270,67 @@ def test_parse_path_profiles_validation() -> None:
         parse_path_profiles('[{"instructions": "x"}]')
     with _pytest.raises(ActionError, match="instructions"):
         parse_path_profiles('[{"paths": ["*.py"]}]')
+
+
+def test_path_globs_use_path_semantics() -> None:
+    from or_pr_review.prompt import matched_profiles
+
+    profile = [{"paths": ["src/*.py"], "instructions": "x"}]
+    assert matched_profiles(profile, ["src/app.py"]) == profile
+    # * must not cross a path segment (unlike fnmatch).
+    assert matched_profiles(profile, ["src/pkg/nested.py"]) == []
+    deep = [{"paths": ["src/**/*.py"], "instructions": "x"}]
+    assert matched_profiles(deep, ["src/pkg/nested.py"]) == deep
+    # Case-sensitive, matching CI runners rather than the local OS.
+    assert matched_profiles([{"paths": ["*Calc*"], "instructions": "x"}], ["calc.py"]) == []
+    # ? stays within a segment too.
+    q = [{"paths": ["a?c.py"], "instructions": "x"}]
+    assert matched_profiles(q, ["abc.py"]) == q
+    assert matched_profiles(q, ["a/c.py"]) == []
+
+
+def test_profiles_match_pretruncation_paths() -> None:
+    from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
+
+    # calc.py changed on the PR but was truncated out of the embed; the
+    # profile must still fire (truncation cannot disable guidance).
+    truncated_diff = "diff --git a/rules.py b/rules.py\n--- a/rules.py\n+++ b/rules.py\n"
+    collected = CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha="a" * 40,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        truncation=Truncation(truncated_diff, True, 999_999, len(truncated_diff), 300),
+        mode="initial",
+        all_changed_paths=("rules.py", "calc.py"),
+    )
+    profiles = [{"name": "sot", "paths": ["*calc*"], "instructions": "verify figures"}]
+    text = build_messages(collected, path_profiles=profiles)[1]["content"]
+    assert "### sot" in text
+
+
+def test_parse_path_profiles_limits_and_normalization() -> None:
+    import json as json_mod
+
+    import pytest as _pytest
+
+    from or_pr_review.errors import ActionError
+    from or_pr_review.prompt import parse_path_profiles
+
+    with _pytest.raises(ActionError, match="16,000"):
+        parse_path_profiles('[{"paths": ["*"], "instructions": "' + "x" * 16_100 + '"}]')
+    many = json_mod.dumps(
+        [{"paths": ["*"], "instructions": "x"} for _ in range(21)]
+    )
+    with _pytest.raises(ActionError, match="at most 20"):
+        parse_path_profiles(many)
+    with _pytest.raises(ActionError, match="must be an object"):
+        parse_path_profiles('["oops"]')
+    with _pytest.raises(ActionError, match="name"):
+        parse_path_profiles('[{"name": true, "paths": ["*"], "instructions": "x"}]')
+    # Whitespace-padded globs are stripped, so they actually match.
+    parsed = parse_path_profiles('[{"paths": [" *calc* "], "instructions": "x"}]')
+    assert parsed[0]["paths"] == ["*calc*"]

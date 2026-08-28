@@ -60,7 +60,7 @@ inputs:
     required: false
     default: ""
   path_profiles:
-    description: "Caller-owned additive review profiles as a JSON array of {name?, paths: [globs], instructions} — applied only when a changed path matches; never narrows the review (max 16,000 UTF-8 bytes)."
+    description: "Caller-owned additive review profiles as a JSON array of {name?, paths: [globs], instructions} — applied only when a changed path matches (path-glob semantics: * and ? stay within a segment, ** crosses); never narrows the review (max 16,000 UTF-8 bytes). TRUSTED workflow configuration only: never interpolate PR content or repository files into this input, and do not include secrets."
     required: false
     default: ""
   status_comments:

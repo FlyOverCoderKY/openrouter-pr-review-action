@@ -138,12 +138,41 @@ def parse_path_profiles(raw: str | None) -> list[dict] | None:
             raise ActionError(
                 f"path_profiles[{index}].paths must be a non-empty list of glob strings"
             )
+        profile["paths"] = [p.strip() for p in paths]
+        name = profile.get("name")
+        if name is not None and not isinstance(name, str):
+            raise ActionError(f"path_profiles[{index}].name must be a string when present")
         instructions = profile.get("instructions")
         if not isinstance(instructions, str) or not instructions.strip():
             raise ActionError(
                 f"path_profiles[{index}].instructions must be a non-empty string"
             )
     return parsed
+
+
+def _path_glob_regex(pattern: str) -> re.Pattern[str]:
+    """GitHub-Actions-style path glob: `*`/`?` never cross `/`, `**` does.
+
+    fnmatch would let `src/*.py` match `src/pkg/nested.py` (and is
+    case-insensitive on Windows/macOS, diverging from CI) — the wrong
+    semantics for path scoping.
+    """
+    parts: list[str] = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**", index):
+            parts.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            parts.append("[^/]")
+            index += 1
+        else:
+            parts.append(re.escape(pattern[index]))
+            index += 1
+    return re.compile("^" + "".join(parts) + "$")
 
 
 def matched_profiles(
@@ -154,19 +183,15 @@ def matched_profiles(
     Profiles are ADDITIVE, caller-owned guidance (trusted workflow
     configuration, never repository content): they may sharpen attention on
     matching files but never exclude a file or replace the generic sweep.
+    Globs use path semantics (`*`/`?` stay within a segment, `**` crosses),
+    matched case-sensitively like CI runners.
     """
-    import fnmatch
-
     if not profiles:
         return []
     matched: list[dict] = []
     for profile in profiles:
-        patterns = profile.get("paths", [])
-        if any(
-            fnmatch.fnmatch(path, pattern)
-            for pattern in patterns
-            for path in changed_paths
-        ):
+        regexes = [_path_glob_regex(pattern) for pattern in profile.get("paths", [])]
+        if any(regex.match(path) for regex in regexes for path in changed_paths):
             matched.append(profile)
     return matched
 
@@ -401,7 +426,10 @@ def _user_prompt(
     paths = changed_paths_from_diff(collected.diff)
     path_block = _changed_paths_block(paths)
     loop_block = _loop_block(loop, agent_replies)
-    profile_block = _profiles_block(matched_profiles(path_profiles, paths))
+    # Profiles match against what changed on the PR, not what survived the
+    # byte-capped embed — truncation must not silently disable guidance.
+    profile_paths = list(collected.all_changed_paths) or paths
+    profile_block = _profiles_block(matched_profiles(path_profiles, profile_paths))
 
     return f"""## Review metadata
 

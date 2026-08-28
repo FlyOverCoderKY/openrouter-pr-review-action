@@ -11,6 +11,51 @@ usage at the listed provider's pricing on the run date.
 > `noise` column, so precision numbers are not directly comparable across
 > that boundary (recall numbers are).
 
+## 2026-08-28 — diversity attribution, corrected: pre-judge diversity is real; the judge loses it
+
+Measured on the hardened fixture. Union arms are computed offline from
+saved lanes; the judged row runs the REAL production judge
+(google/gemini-3.1-flash-lite) over the same lane pairs. Statistics
+corrected after this entry's own self-review: same-model union rates below
+are in-sample subset coverage of 5 saved runs (biased upward); the
+independence-model expectation is shown beside them.
+
+| config | recall | B1 (measured) | B1 (independence model) | pooled/judged findings | marginal cost basis |
+| --- | --- | --- | --- | --- | --- |
+| single grok lane | 94% | 40% (2/5) | — | 9.6 | 1.00× ($0.049/review) |
+| single glm-5.3-flash lane | 95% | 80% (4/5) | — | ~10; clean 6.8/run | 0.04× ($0.002/review) |
+| + source-of-truth profile (grok) | 97% | 60% (3/5) | — | 10.0 | ≈1× + ~15% tokens |
+| grok n=2 same-model union (pre-judge) | 98% | 70% in-sample | 64% | 19.2 | 2.00× |
+| grok n=3 same-model union (pre-judge) | 99% | 90% in-sample | 78% | 28.8 | 3.00× |
+| grok+glm union (pre-judge) | 98% | 88% (22/25) | 88% | 20.8; clean 11.6 | 1.04× |
+| **grok+glm THROUGH THE JUDGE (n=5)** | **86%** | **20% (1/5)** | — | 20.8 → 9.8 | 1.04× + judge |
+
+Findings, corrected:
+
+1. Most of the residual B1 miss is run-to-run **variance**, not capability
+   (independent 3-lane expectation 78% vs 40% single).
+2. The grok+glm union's 88% B1 equals the independence prediction
+   1−(0.6×0.2) exactly — the gain comes from GLM's higher marginal B1 rate
+   (80% solo) at ~1/25th the price of an extra grok lane, NOT from any
+   demonstrated complementary miss profile.
+3. **The production judge is a recall bottleneck.** Two-model runs always
+   engage the judge, and measured judged output loses the entire union
+   advantage and more: 86% recall (below the 94% single lane), B1 1/5,
+   pooled findings halved. The judge prompt asks for merge/de-dupe with no
+   requirement to retain every distinct input issue, and flash-lite at
+   minimal effort deletes aggressively — exactly the "validator that
+   silently deletes findings" failure the research report warned against.
+4. Personas were NOT measured (they remain unimplemented); this experiment
+   only sets the bar any persona proposal must beat.
+
+**Recommendation, revised**: two-model lanes are NOT ready to deploy. The
+pre-judge diversity win is real and cheap, so the gating work item for any
+multi-lane v1.3 is **judge recall-safety**: a judge contract that must
+retain every distinct input issue (merge only true duplicates), verified on
+this same judged-pair bench before any lane-roster change ships. Wall-clock
+note: two-lane wall time ≈ the slower lane (GLM ~150s fixture-scale) plus
+the judge call.
+
 ## 2026-08-28 — path-profile A/B: mechanism shipped, profile recommended per-repo (x-ai/grok-4.6, 5 runs/arm)
 
 Research report #3 as a caller-owned `path_profiles` input, tested on the

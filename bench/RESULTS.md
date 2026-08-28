@@ -48,15 +48,19 @@ Findings, corrected:
 4. Personas were NOT measured (they remain unimplemented); this experiment
    only sets the bar any persona proposal must beat.
 
-**Judge fix, measured (same judged-pair bench)**: with the union-merge
-contract plus a deterministic recall floor in code (judge output below the
-largest lane's count, or above the lanes' sum, is replaced by an
-exact-dedup union that cannot lose a finding), the same five pairings
-score **97% recall, B1 4/5, 17.0 mean findings** — vs 86%/1-in-5/9.8 under
-the old contract. The floor fired on 3 of 5 pairs (flash-lite still
-under-merges), so those posts carry the fuller union; a stronger judge
-model is polish, not a blocker. Two-model rosters are deployable again,
-recall-safe by construction.
+**Judge fix, measured (same judged-pair bench)**: three iterations, each
+defeating how flash-lite gamed the previous guard — (1) a count-only floor
+was satisfiable while dropping a whole lane's uniques; (2) identity
+accounting alone was satisfiable by lumping distinct findings into one
+issue with all ids listed; (3) the shipped design adds a deterministic
+merge-legality check (sources may merge only same-file within a small line
+window) with verbatim split/restore repair, and a full deterministic-union
+fallback for untrustworthy accounting. Scores across the same five
+pairings: old contract 86% / B1 1-in-5 / 9.8 findings; count floor 97% but
+3-of-5 posts were the full chattier union; **shipped identity+legality
+judge: 95% recall, B1 4-in-5, 12.0 mean findings with genuine dedup**
+(residual point lost to judge paraphrasing vs the keyword scorer, not to
+dropped findings — judged text rewrites can under-credit keyword matching).
 
 **Recommendation, final**: with the measured judge fix above, the v1.3
 two-model roster (`models: x-ai/grok-4.6,z-ai/glm-5.3-flash`) is

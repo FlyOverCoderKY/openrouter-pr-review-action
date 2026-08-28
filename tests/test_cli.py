@@ -244,7 +244,7 @@ def test_two_lanes_require_judge_and_attribution(tmp_path: Path, monkeypatch: py
                 line=42,
                 models=["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"],
             )
-        ]
+        ], "merged"
 
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
@@ -385,7 +385,7 @@ def test_judge_merges_valid_artifacts(tmp_path: Path, monkeypatch: pytest.Monkey
                 line=42,
                 models=["x-ai/grok-4.6"],
             )
-        ]
+        ], "merged"
 
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())

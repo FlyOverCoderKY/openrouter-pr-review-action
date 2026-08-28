@@ -210,13 +210,18 @@ def _resolve_issues(
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
     key = require_openrouter_key(env)
     print(f"judge running with `{judge_model}` (reasoning effort=minimal)")
-    issues = run_llm_judge(
+    issues, mode = run_llm_judge(
         model=judge_model,
         lanes=[lane.to_dict() for lane in lanes],
         api_key=key,
         timeout=_int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180),
     )
-    return issues, f"`{judge_model}`"
+    # Recall-safety outcomes are visible on the posted review, not only in
+    # the job log: readers must be able to tell a clean merge from a
+    # repaired or fallback (chattier, exact-dedup union) post.
+    if mode == "merged":
+        return issues, f"`{judge_model}`"
+    return issues, f"`{judge_model}` ({mode}: recall-safe coverage enforced)"
 
 
 def _role_all(env: dict[str, str]) -> int:

@@ -318,6 +318,9 @@ def _run_loop(
             "type": "json_schema",
             "json_schema": response_schema or findings_json_schema(),
         },
+        # Ask OpenRouter to return the credit cost of each request so the
+        # posted review can report what the run actually spent.
+        "usage": {"include": True},
     }
     if effort:
         payload_base["reasoning"] = {"effort": effort}

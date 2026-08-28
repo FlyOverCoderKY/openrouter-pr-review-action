@@ -392,6 +392,15 @@ Return a JSON object with a "findings" array. Each finding:
 - severity: bug | risk | nit
 - file: repository-relative path or null
 - line: 1-based line number if known, otherwise null
+
+Write each body for a human skimming a review, not as one dense block: short
+paragraphs separated by blank lines (Markdown needs a blank line to break a
+paragraph) — the concrete failure scenario first, then the evidence and
+mechanism, then what you checked (and any proof gap) as its own final
+paragraph. When one finding covers several concrete instances, list the
+instances as markdown bullets, one per line, instead of chaining them through
+a paragraph. Use backticks around identifiers, paths, and quoted code. This
+changes only formatting: never trim substance to make a body shorter.
 {coverage_block}
 {empty_case}
 Do not wrap the JSON in commentary after you are done using tools.

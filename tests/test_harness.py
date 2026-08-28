@@ -989,3 +989,30 @@ def test_lane_artifact_roundtrip_with_stats_fields() -> None:
     assert parsed.retries == 1
     assert parsed.salvaged is True
     assert parsed.head_sha == "a" * 40
+
+
+def test_run_lane_accumulates_cost_and_requests_usage(tmp_path: Path) -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        return {
+            "choices": [{"message": {"content": '{"findings": []}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "cost": 0.011},
+        }
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        chat=chat,
+    )
+    assert result.ok
+    assert result.cost_usd == pytest.approx(0.011)
+    assert payloads[0]["usage"] == {"include": True}
+    # Round-trips through the lane artifact.
+    from or_pr_review.schema import parse_lane_artifact
+
+    assert parse_lane_artifact(result.to_dict()).cost_usd == pytest.approx(0.011)

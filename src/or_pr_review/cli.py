@@ -198,19 +198,20 @@ def _resolve_issues(
     slugs: list[str],
     lanes: list[LaneResult],
     successful: list[LaneResult],
-) -> tuple[list[MergedIssue], str]:
+) -> tuple[list[MergedIssue], str, float | None]:
     if not successful:
-        return [], "skipped (no successful lanes)"
+        return [], "skipped (no successful lanes)", None
     if not _judge_needed(env, slugs):
         print("judge skipped: one review lane; posting that lane directly")
         return (
             issues_from_single_lane(successful[0]),
             "skipped (single review lane; one reviewer = no judge)",
+            None,
         )
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
     key = require_openrouter_key(env)
     print(f"judge running with `{judge_model}` (reasoning effort=minimal)")
-    issues, mode = run_llm_judge(
+    issues, mode, judge_cost = run_llm_judge(
         model=judge_model,
         lanes=[lane.to_dict() for lane in lanes],
         api_key=key,
@@ -220,8 +221,8 @@ def _resolve_issues(
     # the job log: readers must be able to tell a clean merge from a
     # repaired or fallback (chattier, exact-dedup union) post.
     if mode == "merged":
-        return issues, f"`{judge_model}`"
-    return issues, f"`{judge_model}` ({mode}: recall-safe coverage enforced)"
+        return issues, f"`{judge_model}`", judge_cost
+    return issues, f"`{judge_model}` ({mode}: recall-safe coverage enforced)", judge_cost
 
 
 def _role_all(env: dict[str, str]) -> int:
@@ -577,7 +578,7 @@ def _finish(
     reviewed_sha = _common_lane_sha(lanes) or collected.head_sha
     successful = [lane for lane in lanes if lane.ok]
     slugs = parse_models(env.get("MODELS"))
-    issues, judge_note = _resolve_issues(env, slugs, lanes, successful)
+    issues, judge_note, judge_cost = _resolve_issues(env, slugs, lanes, successful)
     # Judge output bypasses the per-lane anchor gate, so gate the merged
     # issues too when a checkout of the reviewed head is available (the
     # judge job checks out the same head ref). MergedIssue duck-types the
@@ -649,6 +650,7 @@ def _finish(
         verdict=verdict,
         run_url=env.get("RUN_URL") or "",
         judge_note=judge_note,
+        judge_cost=judge_cost,
         reviewed_sha=reviewed_sha,
         extra_notices=notices or None,
         hidden_marker=hidden_marker,

@@ -14,3 +14,4 @@ build/
 
 # Real-PR bench fixtures contain private repository code
 bench/fixtures-local/
+uv.lock

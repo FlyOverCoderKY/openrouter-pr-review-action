@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **Review cost on the posted review**: every OpenRouter request now asks for
+  usage accounting (`usage: {include: true}`), lanes accumulate the returned
+  credit cost (USD) across all their requests, and the judge call reports its
+  own. The review header gains a `**Cost:**` line (total, with a lanes + judge
+  breakdown when both are known) and each lane line appends its cost. Costs are
+  best-effort: when the API omits `usage.cost` the line is simply absent — no
+  estimate is invented. Builds on the lane artifact's `cost_usd` capture:
+  without the request flag OpenRouter does not return `usage.cost`, so this
+  turns that field from theoretical to populated.
+- **Readable findings** (feedback from the first live two-model reviews: a
+  wall of same-font text). Rendering: each finding is now a `####` heading with
+  a severity emoji (🔴 bug / 🟠 risk / 🔵 nit) and the title, followed by one
+  metadata line (`` `file:line` · `severity` · identified by … ``); inline
+  comments carry the same emoji. Prompt (both initial and verify modes): bodies
+  must be written for a skimming human — short paragraphs separated by blank
+  lines (failure scenario, then evidence, then what was checked), multi-instance
+  findings as markdown bullets, backticks around identifiers — with an explicit
+  instruction that this changes formatting only, never substance. Screened on
+  the offline bench before adoption (see bench/RESULTS.md).
+
 ## 1.2.4 — 2026-08-28
 
 - **Recall-safe judge** (fixes the recall bottleneck the diversity attribution experiment measured: the old merge/de-dupe contract let the judge silently delete half the pooled findings, dropping two-lane recall below a single lane). The judge is now an identity-tracked union-merge: every input finding carries a source id, every output issue must account for the ids it merged, and deterministic verification (a) restores any unaccounted finding verbatim, (b) splits over-broad merges back into their constituents (sources may merge only when they share a file and sit within a small line window — the same-defect-same-location contract, enforced in code after the judge gamed a count-only floor and then an accounting-only check), and (c) replaces wholly untrustworthy output (unknown or missing source ids) with a deterministic union that keeps the strongest severity and longest body per exact duplicate. The posted review's judge note says `repaired`/`union-fallback` when the machinery fired. Measured on the judged-pair bench (5 grok+glm pairings): recall 86%→95%, B1 1/5→4/5, mean findings 9.8→12.0 with genuine dedup (pooled 20.8); residual point lost to judge paraphrasing vs keyword scoring, not to dropped findings. Two-model lane rosters are deployable again.

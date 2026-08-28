@@ -13,6 +13,7 @@ Structural schema mismatches still fail the job (fail-closed).
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from or_pr_review.errors import ActionError, SchemaError
@@ -402,11 +403,12 @@ def run_llm_judge(
     api_key: str,
     timeout: int = 180,
     chat: ChatFn | None = None,
-) -> tuple[list[MergedIssue], str]:
-    """Returns (issues, mode). mode is 'merged' when the judge accounted for
-    every input finding, 'repaired(+N)' when N unaccounted findings were
+) -> tuple[list[MergedIssue], str, float | None]:
+    """Returns (issues, mode, cost). mode is 'merged' when the judge accounted
+    for every input finding, 'repaired(+N)' when N unaccounted findings were
     restored verbatim, or 'union-fallback' when the judge's accounting could
-    not be trusted and the deterministic union was used."""
+    not be trusted and the deterministic union was used. cost is the judge
+    request's OpenRouter credit cost (USD), or None when unreported."""
     allowed = [str(lane.get("model")) for lane in lanes if isinstance(lane.get("model"), str)]
     send = chat or (lambda payload: openrouter_chat(api_key, payload, timeout=timeout))
     payload: dict[str, Any] = {
@@ -414,6 +416,7 @@ def run_llm_judge(
         "messages": build_judge_messages(lanes),
         "response_format": {"type": "json_schema", "json_schema": judge_json_schema()},
         "reasoning": dict(JUDGE_REASONING),
+        "usage": {"include": True},
     }
     try:
         response = send(payload)
@@ -426,4 +429,20 @@ def run_llm_judge(
     if not content.strip():
         raise SchemaError("judge returned an empty assistant message")
     issues, sources, sources_invalid = _parse_with_sources(content, allowed_models=allowed)
-    return _verify_coverage(issues, sources, sources_invalid, lanes)
+    merged, mode = _verify_coverage(issues, sources, sources_invalid, lanes)
+    return merged, mode, _response_cost(response)
+
+
+def _response_cost(response: dict[str, Any]) -> float | None:
+    block = response.get("usage")
+    if not isinstance(block, dict):
+        return None
+    cost = block.get("cost")
+    if (
+        isinstance(cost, (int, float))
+        and not isinstance(cost, bool)
+        and math.isfinite(cost)
+        and cost >= 0
+    ):
+        return float(cost)
+    return None

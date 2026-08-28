@@ -36,6 +36,20 @@ invented defects in 10 clean runs. As built, the clean twin measures the
 chattiness floor rather than hallucination; harden the clean head or
 adjudicate its recurring observations to sharpen the question.
 
+**Cross-model validation (z-ai/glm-5.3-flash, 5 runs/arm)** — the shared
+prompt must not regress other lanes: GLM recall 98%→98% (bug 100%→100%, no
+stratum regressed), clean-twin volume 6.6→6.2 findings/run, noise 2%→4%
+(one finding in 25). Neutral-to-slightly-positive; the over-drop failure
+mode did not appear on a second model family.
+
+**Cost of the pass** (fixture-scale): grok +0.8 tool rounds (2.6→3.4) and
++22% wall time on planted (+5% on clean); GLM +0.2 rounds and +7-14% time.
+Far from the 50-turn budget here — but this fixture is tiny, and behavior
+against a dense real PR near the turn/observation budget is an open proof
+gap (a real-PR replay fixture is the planned check). If the budget does
+exhaust, tools are withdrawn and a schema finish still returns the findings
+gathered so far.
+
 ## 2026-08-27 — planted-mini, six models
 
 Fixture: `bench/fixtures/planted-mini` (11 labels: 2 bug / 4 risk / 5 nit),

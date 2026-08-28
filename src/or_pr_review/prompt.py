@@ -177,7 +177,11 @@ def _system_prompt(*, tone: str, mode: str) -> str:
             "(or fallback single-commit) diff. Do not assume you have seen the "
             "full pull request unless that diff is present. Report remaining bugs "
             "and risks in the new work; skip nits unless they are newly introduced "
-            "and clearly wrong. Still use tools for blast radius of the new work "
+            "and clearly wrong. Before returning a NEW bug or risk finding, try "
+            "to falsify it against current callers, guards, tests, and framework "
+            "guarantees; drop it only when direct counterevidence disproves it — "
+            "uncertainty is not rejection, state the proof gap in the body "
+            "instead. Still use tools for blast radius of the new work "
             "before you return an empty findings list."
         )
         coverage_block = (
@@ -253,6 +257,9 @@ repository policy. For absence claims ("there is no test", "this is never
 validated"), name the files or searches you checked. Drop a candidate only
 when direct counterevidence disproves it; uncertainty is not rejection —
 keep the finding and state the material proof gap explicitly in its body.
+LEAD each finding body with the concrete failure scenario itself; the
+falsification evidence and any proof gap come after it, because downstream
+consumers may see only the first part of the body.
 """
     return f"""You are a pull-request reviewer. Tone: {tone_word}.
 

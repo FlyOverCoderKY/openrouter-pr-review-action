@@ -157,6 +157,8 @@ def test_initial_prompt_demands_exhaustive_all_severity_sweep() -> None:
     assert "try to FALSIFY" in system
     assert "uncertainty is not rejection" in system
     assert "name the files or searches you checked" in system
+    # The ledger clips bodies, so the failure scenario must lead the body.
+    assert "LEAD each finding body with the concrete failure scenario" in system
 
 
 def test_verify_prompt_omits_the_initial_sweep_block() -> None:
@@ -164,7 +166,10 @@ def test_verify_prompt_omits_the_initial_sweep_block() -> None:
     assert "Sweep every file and every hunk" not in system
     assert "swept that file" not in system
     assert "prefer recall over precision" not in system
-    assert "try to FALSIFY" not in system
+    assert "try to FALSIFY" not in system  # the initial block stays initial-only
+    # But NEW verify findings get the same asymmetric falsification bar.
+    assert "try to falsify it against current callers" in system
+    assert "uncertainty is not rejection" in system
 
 
 def test_verify_prompt_still_requires_tools_before_empty_findings() -> None:

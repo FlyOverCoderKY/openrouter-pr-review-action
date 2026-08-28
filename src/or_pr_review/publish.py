@@ -143,8 +143,13 @@ def render_review_parts(
                 extra += f", {_fmt_cost(lane.cost_usd)}"
             lane_lines.append(f"- `{lane.model}`: ok ({extra})")
         else:
+            spent = (
+                f" ({_fmt_cost(lane.cost_usd)} spent)"
+                if lane.cost_usd is not None
+                else ""
+            )
             lane_lines.append(
-                f"- `{lane.model}`: failed-open — "
+                f"- `{lane.model}`: failed-open{spent} — "
                 f"{neutralize_mentions(lane.error or 'unknown error')}"
             )
 

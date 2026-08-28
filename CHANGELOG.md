@@ -10,9 +10,14 @@
   best-effort: when no request reports a cost the line is simply absent — no
   estimate is invented — and when a known spender (a lane, or the judge) is
   missing from an otherwise-known sum, the line says so instead of posing as
-  the full run cost. BYOK keys are handled: OpenRouter reports `cost: 0` for
-  bring-your-own-key models and puts the provider-billed spend in
-  `cost_details.upstream_inference_cost`, so both are summed. All figures in
+  the full run cost. Per-request spend follows the OpenRouter response shape
+  (verified against live payloads): non-BYOK responses mirror the same charge
+  into `cost` and `cost_details.upstream_inference_cost`, so only `cost`
+  counts; BYOK responses carry the provider-billed spend in
+  `upstream_inference_cost` (plus any positive `cost` as the BYOK fee), and a
+  BYOK response with no upstream figure is treated as unknown spend rather
+  than a $0 observation. Fail-open lane lines print what they spent before
+  failing. All figures in
   one cost note share one precision, so the breakdown visibly adds up to its
   total. Builds on the lane artifact's `cost_usd` capture: without the
   request flag OpenRouter does not return usage accounting, so this turns

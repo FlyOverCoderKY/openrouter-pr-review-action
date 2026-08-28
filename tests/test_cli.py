@@ -292,6 +292,11 @@ def test_two_lanes_require_judge_and_attribution(tmp_path: Path, monkeypatch: py
     assert "Issue 1 — Missing auth check" in posted[0]
     assert "identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6" in posted[0]
     assert "`google/gemini-3.1-flash-lite`" in posted[0]
+    # The production wiring must render the judge cost on the posted body
+    # (the lane artifacts in this test carry no cost, so the sum is
+    # labeled incomplete rather than posing as the run total).
+    assert "**Cost:** $0.0021" in posted[0]
+    assert "incomplete: no cost reported for" in posted[0]
 
 
 def test_two_lanes_judge_schema_mismatch_fail_closed(

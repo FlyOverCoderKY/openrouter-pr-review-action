@@ -13,11 +13,15 @@ Structural schema mismatches still fail the job (fail-closed).
 from __future__ import annotations
 
 import json
-import math
 from typing import Any
 
 from or_pr_review.errors import ActionError, SchemaError
-from or_pr_review.harness import ChatFn, openrouter_chat, response_message_text
+from or_pr_review.harness import (
+    ChatFn,
+    _response_spend,
+    openrouter_chat,
+    response_message_text,
+)
 from or_pr_review.merge import MergedIssue
 from or_pr_review.redaction import redact
 from or_pr_review.schema import (
@@ -437,17 +441,4 @@ def _response_cost(response: dict[str, Any]) -> float | None:
     block = response.get("usage")
     if not isinstance(block, dict):
         return None
-    details = block.get("cost_details")
-    upstream = (
-        details.get("upstream_inference_cost") if isinstance(details, dict) else None
-    )
-    total = None
-    for cost in (block.get("cost"), upstream):
-        if (
-            isinstance(cost, (int, float))
-            and not isinstance(cost, bool)
-            and math.isfinite(cost)
-            and cost >= 0
-        ):
-            total = (total or 0.0) + float(cost)
-    return total
+    return _response_spend(block)

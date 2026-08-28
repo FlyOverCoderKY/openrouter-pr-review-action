@@ -84,9 +84,12 @@ def test_run_llm_judge_sends_schema_and_minimal_reasoning() -> None:
                     }
                 }
             ],
+            # Non-BYOK shape: cost_details mirrors the same charge — it
+            # must NOT be double-counted.
             "usage": {
                 "cost": 0.0021,
-                "cost_details": {"upstream_inference_cost": 0.001},
+                "is_byok": False,
+                "cost_details": {"upstream_inference_cost": 0.0021},
             },
         }
 
@@ -110,7 +113,7 @@ def test_run_llm_judge_sends_schema_and_minimal_reasoning() -> None:
     )
     issues, mode, cost = issues
     assert mode == "merged"
-    assert cost == pytest.approx(0.0031)
+    assert cost == pytest.approx(0.0021)
     assert issues[0].title == "Race"
     assert seen["model"] == "google/gemini-3.1-flash-lite"
     assert seen["reasoning"] == {"effort": "minimal"}

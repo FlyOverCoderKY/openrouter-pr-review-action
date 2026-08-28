@@ -597,14 +597,23 @@ def _absorb_usage(
         value = block.get(key)
         if isinstance(value, int):
             usage[key] = usage.get(key, 0) + value
-    cost = block.get("cost")
-    if (
-        isinstance(cost, (int, float))
-        and not isinstance(cost, bool)
-        and math.isfinite(cost)
-        and cost >= 0
-    ):
-        usage["cost_usd"] = usage.get("cost_usd", 0) + cost
+    # OpenRouter credits, plus the provider-billed upstream cost for BYOK
+    # keys (where OpenRouter's own `cost` is 0 and the real spend lives in
+    # cost_details.upstream_inference_cost).
+    cost_details = block.get("cost_details")
+    upstream = (
+        cost_details.get("upstream_inference_cost")
+        if isinstance(cost_details, dict)
+        else None
+    )
+    for cost in (block.get("cost"), upstream):
+        if (
+            isinstance(cost, (int, float))
+            and not isinstance(cost, bool)
+            and math.isfinite(cost)
+            and cost >= 0
+        ):
+            usage["cost_usd"] = usage.get("cost_usd", 0) + cost
     details = block.get("prompt_tokens_details")
     if isinstance(details, dict):
         cached = details.get("cached_tokens")

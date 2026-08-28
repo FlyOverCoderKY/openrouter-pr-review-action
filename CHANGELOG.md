@@ -7,10 +7,17 @@
   credit cost (USD) across all their requests, and the judge call reports its
   own. The review header gains a `**Cost:**` line (total, with a lanes + judge
   breakdown when both are known) and each lane line appends its cost. Costs are
-  best-effort: when the API omits `usage.cost` the line is simply absent — no
-  estimate is invented. Builds on the lane artifact's `cost_usd` capture:
-  without the request flag OpenRouter does not return `usage.cost`, so this
-  turns that field from theoretical to populated.
+  best-effort: when no request reports a cost the line is simply absent — no
+  estimate is invented — and when a known spender (a lane, or the judge) is
+  missing from an otherwise-known sum, the line says so instead of posing as
+  the full run cost. BYOK keys are handled: OpenRouter reports `cost: 0` for
+  bring-your-own-key models and puts the provider-billed spend in
+  `cost_details.upstream_inference_cost`, so both are summed. All figures in
+  one cost note share one precision, so the breakdown visibly adds up to its
+  total. Builds on the lane artifact's `cost_usd` capture: without the
+  request flag OpenRouter does not return usage accounting, so this turns
+  that field from theoretical to populated (including on fail-open lanes,
+  whose spend is attached with the rest of their stats).
 - **Readable findings** (feedback from the first live two-model reviews: a
   wall of same-font text). Rendering: each finding is now a `####` heading with
   a severity emoji (🔴 bug / 🟠 risk / 🔵 nit) and the title, followed by one

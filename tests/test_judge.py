@@ -42,10 +42,8 @@ def test_parse_judge_issues_happy_path() -> None:
         allowed_models=["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"],
     )
     assert len(issues) == 1
-    assert issues[0].heading(1) == (
-        "Issue 1 - Missing auth check "
-        "(identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6)"
-    )
+    assert issues[0].title == "Missing auth check"
+    assert issues[0].models == ["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"]
 
 
 def test_parse_judge_issues_schema_mismatch_fail_closed() -> None:
@@ -86,7 +84,10 @@ def test_run_llm_judge_sends_schema_and_minimal_reasoning() -> None:
                     }
                 }
             ],
-            "usage": {"cost": 0.0021},
+            "usage": {
+                "cost": 0.0021,
+                "cost_details": {"upstream_inference_cost": 0.001},
+            },
         }
 
     issues = run_llm_judge(
@@ -109,7 +110,7 @@ def test_run_llm_judge_sends_schema_and_minimal_reasoning() -> None:
     )
     issues, mode, cost = issues
     assert mode == "merged"
-    assert cost == 0.0021
+    assert cost == pytest.approx(0.0031)
     assert issues[0].title == "Race"
     assert seen["model"] == "google/gemini-3.1-flash-lite"
     assert seen["reasoning"] == {"effort": "minimal"}

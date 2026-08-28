@@ -991,14 +991,21 @@ def test_lane_artifact_roundtrip_with_stats_fields() -> None:
     assert parsed.head_sha == "a" * 40
 
 
-def test_run_lane_accumulates_cost_and_requests_usage(tmp_path: Path) -> None:
+def test_run_lane_sums_byok_upstream_cost_and_requests_usage(tmp_path: Path) -> None:
     payloads: list[dict] = []
 
     def chat(payload: dict) -> dict:
         payloads.append(payload)
         return {
             "choices": [{"message": {"content": '{"findings": []}'}}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "cost": 0.011},
+            # BYOK shape: OpenRouter credits are 0 and the provider-billed
+            # spend arrives in cost_details.upstream_inference_cost.
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 5,
+                "cost": 0.002,
+                "cost_details": {"upstream_inference_cost": 0.009},
+            },
         }
 
     result = run_lane(
@@ -1010,7 +1017,7 @@ def test_run_lane_accumulates_cost_and_requests_usage(tmp_path: Path) -> None:
         chat=chat,
     )
     assert result.ok
-    assert result.cost_usd == pytest.approx(0.011)
+    assert result.cost_usd == pytest.approx(0.011)  # 0.002 credits + 0.009 upstream
     assert payloads[0]["usage"] == {"include": True}
     # Round-trips through the lane artifact.
     from or_pr_review.schema import parse_lane_artifact

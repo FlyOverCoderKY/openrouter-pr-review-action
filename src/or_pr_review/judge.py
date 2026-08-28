@@ -437,12 +437,17 @@ def _response_cost(response: dict[str, Any]) -> float | None:
     block = response.get("usage")
     if not isinstance(block, dict):
         return None
-    cost = block.get("cost")
-    if (
-        isinstance(cost, (int, float))
-        and not isinstance(cost, bool)
-        and math.isfinite(cost)
-        and cost >= 0
-    ):
-        return float(cost)
-    return None
+    details = block.get("cost_details")
+    upstream = (
+        details.get("upstream_inference_cost") if isinstance(details, dict) else None
+    )
+    total = None
+    for cost in (block.get("cost"), upstream):
+        if (
+            isinstance(cost, (int, float))
+            and not isinstance(cost, bool)
+            and math.isfinite(cost)
+            and cost >= 0
+        ):
+            total = (total or 0.0) + float(cost)
+    return total

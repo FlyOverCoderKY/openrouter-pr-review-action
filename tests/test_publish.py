@@ -173,7 +173,8 @@ def test_cost_renders_on_lane_lines_and_total() -> None:
     )
     assert ", $0.31)" in text
     assert ", $0.0123)" in text
-    assert "**Cost:** $0.32 (lanes $0.32 + judge $0.0007)" in text
+    # One precision per note, chosen so the breakdown visibly adds up.
+    assert "**Cost:** $0.3230 (lanes $0.3223 + judge $0.0007)" in text
 
 
 def test_cost_line_omitted_when_unreported() -> None:
@@ -204,3 +205,19 @@ def test_inline_comments_carry_severity_emoji() -> None:
     )
     assert len(comments) == 1
     assert "\U0001f534 **Race** (`bug`)" in comments[0]["body"]
+
+
+def test_incomplete_cost_totals_are_labeled() -> None:
+    lane_a = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None, cost_usd=0.31)
+    lane_b = LaneResult(SCHEMA_VERSION, True, "z-ai/glm-5.3-flash", [], None)
+    text = render_review(
+        collected=_collected(),
+        lanes=[lane_a, lane_b],
+        issues=[],
+        verdict="clean",
+        judge_note="`google/gemini-3.1-flash-lite`",
+        judge_cost=None,
+        judge_ran=True,
+    )
+    assert "**Cost:** $0.31" in text
+    assert "incomplete: no cost reported for `z-ai/glm-5.3-flash`, the judge" in text

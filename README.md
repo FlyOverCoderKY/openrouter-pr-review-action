@@ -16,10 +16,12 @@ First production use is a **single Grok 4.6 lane** beside the existing Grok acti
 - **Two or more lanes:** parallel review lanes (same prompt on every lane in v1), then an OpenRouter **judge** union-merges them into **one** GitHub review under a recall-safe contract: every input finding is identity-tracked, the judge must account for every id, only same-file/nearby-line duplicates may merge, and any unaccounted or over-broadly merged finding is deterministically restored verbatim (the review header notes `repaired`/`union-fallback` when that machinery fired). Attribution looks like:
 
   ```text
-  Issue 1 - Missing auth check (identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6)
+  #### 🔴 Issue 1 — Missing auth check
+
+  `src/api.py:42` · `bug` · identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6
   ```
 
-  then the issue body.
+  then the issue body (severity emoji: 🔴 bug / 🟠 risk / 🔵 nit).
 
 - Prefer a **setup → matrix lanes → judge** workflow so wall clock is roughly the slowest lane + judge, not the sum. GitHub **bills the minutes in parallel**. A single-job `role: all` run can still fan lanes in-process; that job is billed as one runner.
 - If a **lane** fails, that lane fail-opens and the judge (or the single-lane poster) continues on whatever structured results arrived. Operational or **schema** errors of the action itself fail the job.

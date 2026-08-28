@@ -43,4 +43,6 @@ def test_heading_preserves_issue_number() -> None:
         line=None,
         models=["x-ai/grok-4.6"],
     )
-    assert issue.heading(3) == "Issue 3 - Docs typo (identified by x-ai/grok-4.6)"
+    block = format_issue_block(3, issue)
+    assert block.startswith("#### \U0001f535 Issue 3 — Docs typo\n")
+    assert "`nit` · identified by x-ai/grok-4.6" in block

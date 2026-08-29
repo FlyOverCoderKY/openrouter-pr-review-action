@@ -27,9 +27,9 @@ inputs:
     description: >-
       OpenRouter slug for the merge/de-dupe judge (independent of models).
       Used only when two or more review lanes are configured. Default is
-      google/gemini-3.1-flash-lite. See README for cheaper/upgrade alternatives.
+      openai/gpt-5.6-luna. See README for the measured selection rationale.
     required: false
-    default: "google/gemini-3.1-flash-lite"
+    default: "openai/gpt-5.6-luna"
   judge_needed:
     description: >-
       true forces the judge; false skips it. Empty infers from models list

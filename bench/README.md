@@ -157,11 +157,12 @@ and repair mode: two models can both finish at 100% after recall-safe repair,
 while the one that reaches `merged` without splits/restores is the better
 clerical judge.
 
-The production default is currently `google/gemini-3.1-flash-lite`. Exact
-OpenRouter slugs verified on 2026-08-29 for the first fast-model screen are:
+The production default is `openai/gpt-5.6-luna`, adopted from the 2026-08-29
+five-run-per-fixture decision screen recorded in [RESULTS.md](RESULTS.md).
+Exact OpenRouter slugs verified for that screen and possible follow-ups are:
 
-- `openai/gpt-5.6-luna` — the requested Luna candidate and the first model to
-  compare with the current default;
+- `google/gemini-3.1-flash-lite` — the former default and benchmark baseline;
+- `openai/gpt-5.6-luna` — the adopted default;
 - `openai/gpt-5.4-mini` — a useful same-vendor control; and
 - `anthropic/claude-haiku-4.5` — a cross-vendor fast control.
 

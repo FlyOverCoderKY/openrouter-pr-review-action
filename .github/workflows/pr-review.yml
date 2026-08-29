@@ -10,7 +10,7 @@ on:
       judge_model:
         description: OpenRouter judge slug. Used only when two or more lanes are configured.
         type: string
-        default: google/gemini-3.1-flash-lite
+        default: openai/gpt-5.6-luna
       github_token:
         type: string
         default: ${{ github.token }}

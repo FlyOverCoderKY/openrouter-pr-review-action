@@ -9,8 +9,8 @@ from or_pr_review.errors import ActionError
 
 LANE_CAP = 4
 DEFAULT_MODEL = "x-ai/grok-4.6"
-# Verified live on OpenRouter 2026-08-24. Merge/de-dupe only; not a second reviewer.
-DEFAULT_JUDGE_MODEL = "google/gemini-3.1-flash-lite"
+# Verified live on OpenRouter 2026-08-29. Merge/de-dupe only; not a second reviewer.
+DEFAULT_JUDGE_MODEL = "openai/gpt-5.6-luna"
 
 # OpenRouter slugs look like provider/model or provider/model:variant.
 # Do not invent slugs; callers pass catalogue ids.

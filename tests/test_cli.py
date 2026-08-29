@@ -34,7 +34,7 @@ def test_setup_writes_matrix(tmp_path: Path) -> None:
     text = (tmp_path / "out.txt").read_text(encoding="utf-8")
     assert "lane_count=2" in text
     assert "judge_needed=true" in text
-    assert "judge_model=google/gemini-3.1-flash-lite" in text
+    assert "judge_model=openai/gpt-5.6-luna" in text
     assert "x-ai/grok-4.6" in text
     assert "anthropic/claude-sonnet-4.6" in text
 

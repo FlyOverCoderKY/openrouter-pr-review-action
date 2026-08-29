@@ -11,9 +11,9 @@ from or_pr_review.models import (
 )
 
 
-def test_default_judge_model_is_gemini_flash_lite() -> None:
-    assert parse_judge_model("") == "google/gemini-3.1-flash-lite"
-    assert DEFAULT_JUDGE_MODEL == "google/gemini-3.1-flash-lite"
+def test_default_judge_model_is_luna() -> None:
+    assert parse_judge_model("") == "openai/gpt-5.6-luna"
+    assert DEFAULT_JUDGE_MODEL == "openai/gpt-5.6-luna"
 
 
 def test_judge_needed_only_for_two_plus_lanes() -> None:

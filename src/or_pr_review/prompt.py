@@ -13,72 +13,18 @@ from or_pr_review.collect import CollectedReview
 from or_pr_review.errors import ActionError
 from or_pr_review.loop import LoopState
 
+# path_glob_regex stays importable here under its old private name for the
+# path_profiles machinery; the shared implementation lives in triage.
+from or_pr_review.triage import path_glob_regex as _path_glob_regex
+from or_pr_review.triage import paths_from_git_header
+
 # Reserved unused hook. v1 ignores any persona value and sends this same
 # prompt to every lane. A later persona input should plug in here without
 # rewriting setup/lane/judge. A future single-persona run should skip the
 # judge the same way (one reviewer = no judge). Do not implement personas.
 _PERSONA_UNUSED = True
 
-# git quotes paths containing non-ASCII or special characters (core.quotePath
-# default): `diff --git "a/pa\303\244th" "b/pa\303\244th"`. Each side may be
-# quoted independently.
-_DIFF_GIT_RE = re.compile(
-    r'^diff --git (?:"a/((?:[^"\\]|\\.)*)"|a/(.+)) (?:"b/((?:[^"\\]|\\.)*)"|b/(.+))$'
-)
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-
-
-def _unquote_git_path(raw: str) -> str:
-    """Decode git's C-style path quoting (octal byte escapes, \\t, \\\", …)."""
-    out = bytearray()
-    index = 0
-    length = len(raw)
-    escapes = {
-        "n": b"\n",
-        "t": b"\t",
-        "r": b"\r",
-        "a": b"\a",
-        "b": b"\b",
-        "f": b"\f",
-        "v": b"\v",
-        '"': b'"',
-        "\\": b"\\",
-    }
-    while index < length:
-        character = raw[index]
-        if character == "\\" and index + 1 < length:
-            nxt = raw[index + 1]
-            if nxt in "01234567":
-                digits = raw[index + 1 : index + 4]
-                octal = ""
-                for digit in digits:
-                    if digit in "01234567":
-                        octal += digit
-                    else:
-                        break
-                out.append(int(octal, 8) & 0xFF)
-                index += 1 + len(octal)
-                continue
-            if nxt in escapes:
-                out += escapes[nxt]
-                index += 2
-                continue
-        out += character.encode("utf-8")
-        index += 1
-    return out.decode("utf-8", errors="replace")
-
-
-def paths_from_git_header(line: str) -> tuple[str, str] | None:
-    """(old_path, new_path) from a `diff --git` header, unquoting as needed."""
-    match = _DIFF_GIT_RE.match(line)
-    if not match:
-        return None
-    quoted_old, plain_old, quoted_new, plain_new = match.groups()
-    old = _unquote_git_path(quoted_old) if quoted_old is not None else plain_old
-    new = _unquote_git_path(quoted_new) if quoted_new is not None else plain_new
-    if old is None or new is None:
-        return None
-    return old, new
 
 
 def build_messages(
@@ -148,31 +94,6 @@ def parse_path_profiles(raw: str | None) -> list[dict] | None:
                 f"path_profiles[{index}].instructions must be a non-empty string"
             )
     return parsed
-
-
-def _path_glob_regex(pattern: str) -> re.Pattern[str]:
-    """GitHub-Actions-style path glob: `*`/`?` never cross `/`, `**` does.
-
-    fnmatch would let `src/*.py` match `src/pkg/nested.py` (and is
-    case-insensitive on Windows/macOS, diverging from CI) — the wrong
-    semantics for path scoping.
-    """
-    parts: list[str] = []
-    index = 0
-    while index < len(pattern):
-        if pattern.startswith("**", index):
-            parts.append(".*")
-            index += 2
-        elif pattern[index] == "*":
-            parts.append("[^/]*")
-            index += 1
-        elif pattern[index] == "?":
-            parts.append("[^/]")
-            index += 1
-        else:
-            parts.append(re.escape(pattern[index]))
-            index += 1
-    return re.compile("^" + "".join(parts) + "$")
 
 
 def matched_profiles(
@@ -315,6 +236,10 @@ def _system_prompt(*, tone: str, mode: str) -> str:
             "severity and found exactly the findings you reported — not that you\n"
             "saw its name. A diff file you cannot account for means the review is\n"
             "not finished. Do not list files that are not in the embedded diff.\n"
+            "A file whose hunks were replaced by a `[diff stubbed by budget\n"
+            "triage: ...]` line is still an embedded-diff file: read it with the\n"
+            "tools, sweep it at every severity, and give it a coverage entry\n"
+            "like any other diff file.\n"
         )
         empty_case = (
             'If you find nothing after checking blast radius, return {"findings": []}\n'

@@ -29,6 +29,12 @@ on:
       path_profiles:
         type: string
         default: ""
+      generated_paths:
+        description: >-
+          Extra path globs (JSON array) treated as generated/vendored during
+          diff-budget triage. Trusted workflow configuration only.
+        type: string
+        default: ""
       status_comments:
         type: string
         default: "true"
@@ -93,6 +99,7 @@ jobs:
           max_tool_turns: ${{ inputs.max_tool_turns }}
           custom_instructions: ${{ inputs.custom_instructions }}
           path_profiles: ${{ inputs.path_profiles }}
+          generated_paths: ${{ inputs.generated_paths }}
 
   lane:
     needs: setup
@@ -132,6 +139,7 @@ jobs:
           roast_level: ${{ inputs.roast_level }}
           custom_instructions: ${{ inputs.custom_instructions }}
           path_profiles: ${{ inputs.path_profiles }}
+          generated_paths: ${{ inputs.generated_paths }}
           status_comments: ${{ inputs.status_comments }}
           max_diff_kb: ${{ inputs.max_diff_kb }}
           review_scope: ${{ inputs.review_scope }}
@@ -182,6 +190,7 @@ jobs:
           roast_level: ${{ inputs.roast_level }}
           custom_instructions: ${{ inputs.custom_instructions }}
           path_profiles: ${{ inputs.path_profiles }}
+          generated_paths: ${{ inputs.generated_paths }}
           status_comments: ${{ inputs.status_comments }}
           max_diff_kb: ${{ inputs.max_diff_kb }}
           review_scope: ${{ inputs.review_scope }}

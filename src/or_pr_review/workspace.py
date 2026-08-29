@@ -17,6 +17,13 @@ from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.redaction import looks_like_dotenv
 
 MAX_MATERIALIZED_FILE = 1_000_000
+# Files diff-budget triage stubbed out of the embed carry a contract that
+# they are tool-readable, so they may exceed the normal cap — up to a hard
+# ceiling that still bounds disk use (ranged reads bound the context cost).
+MAX_OVERSIZED_MATERIALIZED_FILE = 8_000_000
+# Per-file grep ceiling. Matches the oversized-materialization ceiling so a
+# stubbed snapshot (or a complete bench fixture tree) stays searchable.
+MAX_GREP_FILE = 8_000_000
 # Per-read byte cap. The chat loop resends every tool observation on every
 # later request, so large single reads multiply across the whole run; ranged
 # reads (start_line/max_lines) fetch the rest when needed.
@@ -41,8 +48,18 @@ _BLOCKED_NAMES = {
 _BLOCKED_SUFFIXES = (".pem", ".p12", ".pfx", ".key")
 
 
-def materialize_commit(repo: Path, sha: str, dest: Path) -> Path:
+def materialize_commit(
+    repo: Path,
+    sha: str,
+    dest: Path,
+    oversized_ok: frozenset[str] | set[str] = frozenset(),
+) -> Path:
     """Extract tracked files for `sha` into dest. Symlinks and huge files skipped.
+
+    `oversized_ok` names paths (as tracked, forward slashes) allowed past
+    MAX_MATERIALIZED_FILE up to MAX_OVERSIZED_MATERIALIZED_FILE — the files
+    diff-budget triage stubbed out of the embed, whose stub promises tool
+    readability.
 
     The snapshot is deliberately incomplete (oversized and non-regular members
     are omitted), so the COMPLETE tracked path list is written next to the
@@ -56,7 +73,7 @@ def materialize_commit(repo: Path, sha: str, dest: Path) -> Path:
             for member in tar.getmembers():
                 if not member.isdir():
                     tracked.append(member.name)
-                if not _safe_member(member):
+                if not _safe_member(member, oversized_ok):
                     continue
                 tar.extract(member, path=dest, filter="data")
     except (tarfile.TarError, OSError) as exc:
@@ -106,10 +123,17 @@ def _git_archive(repo: Path, sha: str) -> bytes:
     return proc.stdout
 
 
-def _safe_member(member: tarfile.TarInfo) -> bool:
+def _safe_member(
+    member: tarfile.TarInfo, oversized_ok: frozenset[str] | set[str] = frozenset()
+) -> bool:
     if not member.isfile():
         return False
-    if member.size > MAX_MATERIALIZED_FILE:
+    limit = (
+        MAX_OVERSIZED_MATERIALIZED_FILE
+        if member.name.replace("\\", "/") in oversized_ok
+        else MAX_MATERIALIZED_FILE
+    )
+    if member.size > limit:
         return False
     name = member.name.replace("\\", "/")
     parts = Path(name).parts
@@ -240,7 +264,7 @@ def tool_grep(root: Path, pattern: str, rel: str = ".") -> str:
         if is_blocked_path(path):
             continue
         try:
-            if path.stat().st_size > MAX_MATERIALIZED_FILE:
+            if path.stat().st_size > MAX_GREP_FILE:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:

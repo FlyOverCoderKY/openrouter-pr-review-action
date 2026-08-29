@@ -672,7 +672,7 @@ def test_prepare_workspace_fails_closed(tmp_path: Path, monkeypatch: pytest.Monk
     from or_pr_review import cli as cli_mod
     from or_pr_review.errors import ActionError
 
-    def boom(source: object, sha: object, dest: object) -> None:
+    def boom(source: object, sha: object, dest: object, **kwargs: object) -> None:
         raise ActionError("git archive failed")
 
     monkeypatch.setattr(cli_mod, "materialize_commit", boom)
@@ -1417,3 +1417,105 @@ def test_setup_rejects_bad_path_profiles(tmp_path: Path) -> None:
         PATH_PROFILES='[{"instructions": "no paths"}]',
     )
     assert main(["setup"], env) == 1
+
+
+def test_stubbed_files_with_tools_disabled_stay_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from or_pr_review import cli as cli_mod
+
+    posted: list[str] = []
+
+    class DummyGitHub:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+            posted.append(body)
+            return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
+
+    def collected_with_stubs(env: dict[str, str]):
+        base = _mk_collected()
+        return dc_replace(
+            base,
+            truncation=dc_replace(
+                base.truncation,
+                truncated=True,
+                stubbed_files=("big.json",),
+            ),
+        )
+
+    monkeypatch.setattr(cli_mod, "_collect", collected_with_stubs)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    lane_dir = tmp_path / "lanes"
+    lane_dir.mkdir()
+    (lane_dir / "lane-0.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "head_sha": "a" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    common = dict(
+        LANE_RESULTS_DIR=str(lane_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    # Tools disabled: the stub contract cannot be honored -> partial.
+    env = _base_env(tmp_path, MAX_TOOL_TURNS="0", **common)
+    assert main(["judge"], env) == 0
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=partial" in out
+    assert "could not be swept" in posted[0]
+
+    # Tools available: stub-only truncation keeps the real verdict.
+    (tmp_path / "out.txt").write_text("", encoding="utf-8")
+    env = _base_env(tmp_path, MAX_TOOL_TURNS="50", **common)
+    assert main(["judge"], env) == 0
+    out = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "verdict=clean" in out
+
+
+def test_gitattributes_text_reads_the_reviewed_commit(tmp_path: Path) -> None:
+    import subprocess
+
+    from or_pr_review import cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=T",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=repo, check=True, capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    (repo / ".gitattributes").write_text("*.json linguist-generated\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "c")
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    # Later working-tree edits must not leak: the read pins to the commit.
+    (repo / ".gitattributes").write_text("* linguist-generated\n", encoding="utf-8")
+
+    env = {"SOURCE_WORKSPACE": str(repo), "HEAD_SHA": sha}
+    assert cli_mod._gitattributes_text(env) == "*.json linguist-generated\n"
+    # A checkout without the reviewed commit (e.g. the judge job's action
+    # checkout) fails soft to heuristics-only packing.
+    env = {"SOURCE_WORKSPACE": str(repo), "HEAD_SHA": "b" * 40}
+    assert cli_mod._gitattributes_text(env) == ""
+    assert cli_mod._gitattributes_text({"SOURCE_WORKSPACE": str(repo)}) == ""

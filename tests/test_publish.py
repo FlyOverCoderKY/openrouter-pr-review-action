@@ -221,3 +221,58 @@ def test_incomplete_cost_totals_are_labeled() -> None:
     )
     assert "**Cost:** $0.31" in text
     assert "incomplete: no cost reported for `z-ai/glm-5.3-flash`, the judge" in text
+
+
+def _stub_collected() -> CollectedReview:
+    return CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha="a" * 40,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        truncation=Truncation(
+            "diff", True, 700_000, 500_000, 600, stubbed_files=("big.json",)
+        ),
+        mode="initial",
+    )
+
+
+def test_stub_only_truncation_renders_info_note_not_partial_banner() -> None:
+    lane = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None)
+    collected = _stub_collected()
+    assert not collected.truncation.forces_partial
+    text = render_review(collected=collected, lanes=[lane], issues=[], verdict="clean")
+    assert "Diff-budget triage" in text
+    assert "partial** review" not in text
+    assert "must not be treated as clean" not in text
+
+
+def test_dropped_files_truncation_renders_partial_banner() -> None:
+    lane = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None)
+    collected = CollectedReview(
+        pr_number=1,
+        title="t",
+        body="",
+        head_sha="a" * 40,
+        base_ref="main",
+        head_ref="feat",
+        plan=DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
+        truncation=Truncation(
+            "diff",
+            True,
+            700_000,
+            500_000,
+            600,
+            stubbed_files=("big.json",),
+            dropped_files=("tail.py",),
+        ),
+        mode="initial",
+    )
+    assert collected.truncation.forces_partial
+    text = render_review(
+        collected=collected, lanes=[lane], issues=[], verdict="partial"
+    )
+    assert "partial** review" in text
+    assert "must not be treated as clean" in text

@@ -72,6 +72,7 @@ from or_pr_review.schema import (
     failed_lane,
     parse_lane_artifact,
 )
+from or_pr_review.triage import parse_generated_globs
 from or_pr_review.workspace import materialize_commit
 
 _ACTIVE_ENV: dict[str, str] = {}
@@ -181,6 +182,7 @@ def _validate_inputs(env: dict[str, str]) -> list[str]:
     if len(custom.encode("utf-8")) > 16_000:
         raise ActionError("custom_instructions exceeds 16,000 UTF-8 bytes")
     parse_path_profiles(env.get("PATH_PROFILES"))
+    parse_generated_globs(env.get("GENERATED_PATHS"))
     return slugs
 
 
@@ -512,7 +514,45 @@ def _collect(env: dict[str, str]) -> CollectedReview:
         head_sha=env.get("HEAD_SHA"),
         max_diff_kb=max_diff_kb,
         source=github,
+        gitattributes_text=_gitattributes_text(env),
+        generated_globs=parse_generated_globs(env.get("GENERATED_PATHS")),
     )
+
+
+def _gitattributes_text(env: dict[str, str]) -> str:
+    """Best-effort .gitattributes AT THE REVIEWED COMMIT, for triage.
+
+    `git show <head>:.gitattributes` against the workflow checkout's object
+    store pins the read to the reviewed commit and fails soft (empty string,
+    heuristics-only packing) in any checkout that does not contain that
+    commit — e.g. the reusable workflow's judge job, which checks out only
+    this action's repository and must not parse a foreign .gitattributes.
+
+    Trust note: .gitattributes is repository content, so on a PR it is
+    contributor-controlled. Honoring linguist-generated is still strictly
+    safer than the pre-triage behavior it replaces: a demoted file keeps its
+    stub, its coverage obligation, and tool access, while under the raw byte
+    cut an attacker could push hand-written code beyond the cutoff entirely
+    (no stub, no coverage, permanent partial). Demotion can never remove a
+    file from review.
+    """
+    import subprocess
+
+    root = _source_root(env)
+    head = (env.get("HEAD_SHA") or env.get("EVENT_AFTER") or "").strip()
+    if root is None or not head:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "show", f"{head}:.gitattributes"],
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or b"").decode("utf-8", errors="replace")
 
 
 def _source_root(env: dict[str, str]) -> Path | None:
@@ -532,7 +572,14 @@ def _prepare_workspace(env: dict[str, str], collected: CollectedReview, work: Pa
     if dest.exists() and any(dest.iterdir()):
         return dest
     try:
-        return materialize_commit(source, collected.head_sha, dest)
+        # Stubbed files carry a tool-readability contract, so they may exceed
+        # the normal materialization cap (bounded by the oversized ceiling).
+        return materialize_commit(
+            source,
+            collected.head_sha,
+            dest,
+            oversized_ok=frozenset(collected.truncation.stubbed_files),
+        )
     except ActionError as exc:
         # Fail closed: the prompt mandates blast-radius tool use, so a
         # silently tool-less run could post an unmarked glance review.
@@ -614,9 +661,24 @@ def _finish(
                     lane.findings, lane.coverage, diff_path_set
                 ):
                     notices.append(f"`{lane.model}`: {note}")
+    # Diff-budget triage: stub-only truncation (every changed file embedded
+    # or stubbed) does not force partial — only dropped files or a raw byte
+    # cut do, so dense PRs keep verdicts, ledger publication, and loop
+    # continuity. The stub contract is that TOOLS sweep the stubbed files,
+    # so a tool-less run cannot honor it: stubs + max_tool_turns=0 stays a
+    # partial review.
+    truncation_partial = collected.truncation.forces_partial
+    if collected.truncation.stubbed_files and parse_max_tool_turns(env.get("MAX_TOOL_TURNS")) == 0:
+        truncation_partial = True
+        notices.append(
+            "Diff-budget triage stubbed "
+            f"{len(collected.truncation.stubbed_files)} file(s) but tools are "
+            "disabled (max_tool_turns: 0), so the stubbed files could not be "
+            "swept. This review is partial."
+        )
     verdict = decide_verdict(
         issues=issues,
-        truncated=collected.truncation.truncated,
+        truncated=truncation_partial,
         successful_lanes=len(successful),
         fallback=collected.plan.fallback_notice is not None,
         stale=stale_notice is not None,

@@ -68,9 +68,24 @@ inputs:
     required: false
     default: "true"
   max_diff_kb:
-    description: "Maximum diff size (KB) embedded in the prompt before truncation."
+    description: >-
+      Maximum diff size (KB) embedded in the prompt. Over-budget diffs go
+      through diff-budget triage: generated/vendored/lock-class files are
+      demoted to stubs (still tool-readable, still requiring coverage) so
+      hand-written hunks fit; only files dropped entirely force partial.
     required: false
     default: "300"
+  generated_paths:
+    description: >-
+      Extra path globs (JSON array of strings, e.g. ["src/data/**/*.json"])
+      treated as generated/vendored during diff-budget triage, in addition to
+      .gitattributes linguist-generated/linguist-vendored and the built-in
+      lockfile heuristics. Demotion only changes packing priority of an
+      over-budget diff — demoted files stay stubbed, tool-readable, and
+      coverage-accounted, never excluded. TRUSTED workflow configuration
+      only: never interpolate PR content or repository files into this input.
+    required: false
+    default: ""
   review_scope:
     description: >-
       Diff to embed: full-pr or latest-commit. latest-commit never silently
@@ -193,6 +208,7 @@ runs:
         ROAST_LEVEL: ${{ inputs.roast_level }}
         CUSTOM_INSTRUCTIONS: ${{ inputs.custom_instructions }}
         PATH_PROFILES: ${{ inputs.path_profiles }}
+        GENERATED_PATHS: ${{ inputs.generated_paths }}
         STATUS_COMMENTS: ${{ inputs.status_comments }}
         MAX_DIFF_KB: ${{ inputs.max_diff_kb }}
         REVIEW_SCOPE: ${{ inputs.review_scope }}

@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased
+
+- **Diff-budget triage** (fixes the dense-PR failure measured on
+  retiregolden.org#108: a 1178 KB diff raw-truncated to 600 KB left every
+  hand-written file invisible, forced a permanent `partial` verdict, never
+  published the loop ledger — so every later push skipped its follow-up
+  round — and nothing forced a sweep of the tail). An over-budget diff is now
+  packed per file instead of byte-cut: generated/vendored/lock-class files
+  (detected via `.gitattributes` `linguist-generated`/`linguist-vendored`,
+  built-in heuristics — lockfiles, vendored directories, minified assets,
+  large committed JSON snapshots — and a new caller-owned `generated_paths`
+  glob input following the `path_profiles` trust model: workflow
+  configuration only, never PR content) are demoted to stubs first, then the
+  largest hand-written files, so hand-written hunks get the budget. A stub
+  keeps the file's `diff --git` header, add/delete counts, and first hunk
+  header in the embedded diff plus an explicit note that the file is
+  tool-readable and STILL REQUIRES a coverage entry — changed-path listing,
+  coverage enforcement, and path-profile matching all keep seeing every
+  changed file, and the prompt's coverage contract now names stubbed files
+  explicitly. Verdict semantics: when every changed file is embedded or
+  stubbed, truncation no longer forces `partial` — the review keeps its real
+  verdict, publishes the ledger, and restores review-loop continuity on
+  dense PRs; `partial` remains for genuine overflow (files dropped entirely)
+  and for unparseable diffs, which still take the raw byte cut. Stubs expose
+  no anchorable hunk lines, so findings on them stay body-only. A/B-validated
+  on a dense-PR replay fixture built from retiregolden.org#108 (1178 KB diff
+  dominated by one linguist-generated 1122 KB JSON snapshot) with six labeled
+  plants in the hand-written files beyond the 600 KB cutoff: at 5 runs/arm
+  with grok-4.6, tail-plant recall 73%→97% — the two plants the baseline's
+  optional tool sweep never reached went 1/5→5/5 and 1/5→4/5 — with 100%
+  precision in both arms at 0.37× the cost per run (the truncated arm was
+  paying for 600 KB of generated JSON embed). Details in bench/RESULTS.md;
+  the bench applies the same packing (`--legacy-truncation` replays the old
+  raw cut for baselines).
+  Hardened by its own self-review (7 findings, round 1): stubbed files are
+  now materialized into the inert checkout past the normal 1 MB cap (up to
+  8 MB, and grep's per-file ceiling matches) so the stub's tool-readability
+  contract actually holds for the motivating 1.1 MB snapshot; stubs with
+  tools disabled (`max_tool_turns: 0`) force `partial`, since nothing can
+  sweep them; `.gitattributes` is read from the REVIEWED COMMIT via
+  `git show` (fail-soft — the judge job's action-repo checkout no longer
+  parses a foreign file) with the PR-content trust rationale documented;
+  `**/` in path globs now matches zero segments (`src/data/**/*.json`
+  covers `src/data/a.json` — also fixes `path_profiles`, which shares the
+  engine); a non-UTF-8 `.gitattributes` can no longer abort collection; the
+  triage notice names each stubbed file and no longer implies stubs carry a
+  reviewable hunk.
+- `bench/capture.py` decodes `gh` output as UTF-8 explicitly; on Windows the
+  ANSI codepage crashed captures of PRs with non-ASCII diffs.
+
 ## 1.2.5 — 2026-08-28
 
 - **Review cost on the posted review**: every OpenRouter request now asks for

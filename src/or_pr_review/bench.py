@@ -49,7 +49,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from or_pr_review.collect import CollectedReview, DiffPlan, truncate_diff
+from or_pr_review.collect import CollectedReview, DiffPlan, pack_diff, truncate_diff
 from or_pr_review.errors import ActionError
 from or_pr_review.harness import run_lane
 from or_pr_review.prompt import build_messages, changed_paths_from_diff, parse_path_profiles
@@ -303,8 +303,25 @@ def _parse_adjudication(item: object) -> Adjudication:
     )
 
 
-def collected_from_fixture(fixture: Fixture) -> CollectedReview:
-    truncation = truncate_diff(fixture.diff, fixture.max_diff_kb or 1024)
+def collected_from_fixture(
+    fixture: Fixture, *, legacy_truncation: bool = False
+) -> CollectedReview:
+    """Apply the production embed cap; `legacy_truncation` replays the
+    pre-triage raw byte cut for A/B baselines."""
+    max_diff_kb = fixture.max_diff_kb or 1024
+    if legacy_truncation:
+        truncation = truncate_diff(fixture.diff, max_diff_kb)
+    else:
+        gitattributes = fixture.checkout / ".gitattributes"
+        truncation = pack_diff(
+            fixture.diff,
+            max_diff_kb,
+            gitattributes_text=(
+                gitattributes.read_text(encoding="utf-8")
+                if gitattributes.is_file()
+                else ""
+            ),
+        )
     return CollectedReview(
         pr_number=fixture.pr_number,
         title=fixture.title,
@@ -362,7 +379,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         raise ActionError("OPENROUTER_API_KEY is not set; `bench run` spends real tokens")
-    collected = collected_from_fixture(fixture)
+    collected = collected_from_fixture(
+        fixture, legacy_truncation=args.legacy_truncation
+    )
+    if collected.truncation.truncated:
+        print(
+            f"embed cap applied: {collected.truncation.embedded_bytes / 1024:.1f} KB "
+            f"embedded of {collected.truncation.original_bytes / 1024:.1f} KB "
+            f"({len(collected.truncation.stubbed_files)} stubbed, "
+            f"{len(collected.truncation.dropped_files)} dropped"
+            f"{', legacy raw cut' if args.legacy_truncation else ''})"
+        )
     messages = build_messages(
         collected,
         custom_instructions=fixture.custom_instructions,
@@ -556,6 +583,12 @@ def main(argv: list[str] | None = None) -> int:
         help="reasoning effort; empty matches the action's default (no effort field)",
     )
     run_parser.add_argument("--timeout", type=int, default=180)
+    run_parser.add_argument(
+        "--legacy-truncation",
+        action="store_true",
+        help="replay the pre-triage raw byte cut instead of diff-budget "
+        "triage (the A/B baseline arm for over-budget fixtures)",
+    )
     run_parser.add_argument(
         "--provider",
         default="",

@@ -180,15 +180,21 @@ def render_review_parts(
     if round_lines:
         header.extend([*_cap_block(round_lines, ROUND_REPORT_BYTES), ""])
     if collected.truncation.truncated and collected.truncation.notice:
-        header.extend(
-            [
-                "> This is a **partial** review. The embedded diff was truncated. "
-                "It must not be treated as a clean review.",
-                "",
-                collected.truncation.notice,
-                "",
-            ]
-        )
+        if collected.truncation.forces_partial:
+            header.extend(
+                [
+                    "> This is a **partial** review. The embedded diff was truncated. "
+                    "It must not be treated as a clean review.",
+                    "",
+                    collected.truncation.notice,
+                    "",
+                ]
+            )
+        else:
+            # Diff-budget triage: every changed file was embedded or stubbed,
+            # so the coverage contract still spans the whole PR — inform,
+            # don't degrade the verdict.
+            header.extend([f"> {collected.truncation.notice}", ""])
     if collected.plan.fallback_notice:
         header.extend([collected.plan.fallback_notice, ""])
     for notice in extra_notices or []:

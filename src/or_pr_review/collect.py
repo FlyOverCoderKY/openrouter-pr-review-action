@@ -12,6 +12,12 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from or_pr_review.errors import ActionError, DivergedRangeError
+from or_pr_review.triage import (
+    AttrRule,
+    parse_gitattributes,
+    path_glob_regex,
+    plan_packing,
+)
 
 ScopeName = Literal["full-pr", "latest-commit"]
 ReviewMode = Literal["auto", "initial", "verify"]
@@ -67,11 +73,48 @@ class Truncation:
     original_bytes: int
     embedded_bytes: int
     max_diff_kb: int
+    # Diff-budget triage accounting: files demoted to a stub (header +
+    # counts, hunks tool-readable) vs files dropped from the embed entirely.
+    stubbed_files: tuple[str, ...] = ()
+    dropped_files: tuple[str, ...] = ()
+
+    @property
+    def forces_partial(self) -> bool:
+        """Truncation forces a partial verdict only when changed files were
+        dropped without even a stub — a raw byte cut, or genuine overflow.
+        When every changed file is embedded or stubbed, the coverage contract
+        still spans the whole PR, so the verdict (and the loop ledger) may
+        proceed normally."""
+        if not self.truncated:
+            return False
+        return bool(self.dropped_files) or not self.stubbed_files
 
     @property
     def notice(self) -> str | None:
         if not self.truncated:
             return None
+        if self.stubbed_files and not self.dropped_files:
+            return (
+                f"The diff is {self.original_bytes / 1024:.1f} KB against a "
+                f"{self.max_diff_kb} KB embed budget (max_diff_kb). Diff-budget "
+                f"triage embedded {self.embedded_bytes / 1024:.1f} KB: "
+                f"{len(self.stubbed_files)} file(s) are stubs (header, +/- "
+                "counts, and first hunk only). Every stubbed file is in the "
+                "checkout and readable with the tools; each one still requires "
+                "a full sweep and its own coverage entry. No changed file was "
+                "dropped, so with the stub accounting this review still covers "
+                "every changed file."
+            )
+        if self.dropped_files:
+            return (
+                f"Diff-budget triage could not fit all "
+                f"{len(self.stubbed_files) + len(self.dropped_files)} demoted "
+                f"file(s) into max_diff_kb={self.max_diff_kb}: "
+                f"{len(self.stubbed_files)} file(s) are stubs, and "
+                f"{len(self.dropped_files)} file(s) were dropped from the embed "
+                "entirely. This review is a partial verdict and must not be "
+                "treated as clean."
+            )
         return (
             f"Diff truncated from {self.original_bytes / 1024:.1f} KB to "
             f"{self.embedded_bytes / 1024:.1f} KB (max_diff_kb={self.max_diff_kb}). "
@@ -185,6 +228,47 @@ def plan_diff(
     )
 
 
+def pack_diff(
+    diff: str,
+    max_diff_kb: int,
+    *,
+    gitattributes_text: str = "",
+    generated_globs: list[str] | None = None,
+) -> Truncation:
+    """Embed the diff under the byte budget, preferring triage to truncation.
+
+    In-budget diffs embed verbatim (identical to truncate_diff). Over-budget
+    diffs are packed per file: generated/vendored/lock-class files (detected
+    via .gitattributes linguist attributes, built-in heuristics, and the
+    caller-owned generated_paths globs) demote to stubs first, then the
+    largest hand-written segments, so the coverage contract keeps covering
+    every changed file and only genuine overflow (dropped files) forces a
+    partial verdict. Unparseable diffs fall back to the raw byte cut.
+    """
+    if max_diff_kb <= 0:
+        raise ActionError("max_diff_kb must be a positive integer")
+    limit = max_diff_kb * 1024
+    data = diff.encode("utf-8")
+    if len(data) <= limit:
+        return truncate_diff(diff, max_diff_kb)
+    attr_rules: tuple[AttrRule, ...] = parse_gitattributes(gitattributes_text)
+    caller_regexes = tuple(path_glob_regex(glob) for glob in (generated_globs or []))
+    packed = plan_packing(
+        diff, limit, attr_rules=attr_rules, caller_regexes=caller_regexes
+    )
+    if packed is None:
+        return truncate_diff(diff, max_diff_kb)
+    return Truncation(
+        text=packed.text,
+        truncated=True,
+        original_bytes=len(data),
+        embedded_bytes=len(packed.text.encode("utf-8")),
+        max_diff_kb=max_diff_kb,
+        stubbed_files=tuple(path for path, _reason in packed.stubbed),
+        dropped_files=packed.dropped,
+    )
+
+
 def truncate_diff(diff: str, max_diff_kb: int) -> Truncation:
     if max_diff_kb <= 0:
         raise ActionError("max_diff_kb must be a positive integer")
@@ -268,6 +352,8 @@ def collect_review(
     head_sha: str | None,
     max_diff_kb: int,
     source: ReviewSource,
+    gitattributes_text: str = "",
+    generated_globs: list[str] | None = None,
 ) -> CollectedReview:
     if mode == "initial" and scope != "full-pr":
         raise ActionError("initial review_mode requires review_scope=full-pr")
@@ -312,7 +398,12 @@ def collect_review(
         base_ref=_as_str(pr.get("baseRefName")) or "",
         head_ref=_as_str(pr.get("headRefName")) or "",
         plan=plan,
-        truncation=truncate_diff(raw, max_diff_kb),
+        truncation=pack_diff(
+            raw,
+            max_diff_kb,
+            gitattributes_text=gitattributes_text,
+            generated_globs=generated_globs,
+        ),
         mode=mode,
         all_changed_paths=_all_changed_paths(raw),
     )

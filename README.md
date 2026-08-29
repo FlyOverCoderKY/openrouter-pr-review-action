@@ -189,7 +189,8 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `custom_instructions` | _empty_ | Extra prompt text, max 16,000 UTF-8 bytes. Never put secrets here. |
 | `path_profiles` | _empty_ | Caller-owned additive review profiles: JSON `[{name?, paths: [globs], instructions}]`, applied only when a changed path matches (`*`/`?` stay within a path segment, `**` crosses). Sharpen attention; never narrow the review. Trusted workflow config only — never interpolate PR content, never put secrets here. Max 16,000 UTF-8 bytes. |
 | `status_comments` | `true` | Live status comment on the PR. |
-| `max_diff_kb` | `300` | Embedded diff cap. Truncation ⇒ `partial`, never clean. |
+| `max_diff_kb` | `300` | Embedded diff cap. Over-budget diffs go through **diff-budget triage**: generated/vendored/lock-class files (`.gitattributes` `linguist-generated`/`linguist-vendored`, lockfile heuristics, large committed JSON snapshots, `generated_paths`) demote to stubs first, then the largest hand-written files, so hand-written hunks keep the budget. A stubbed file stays in the embedded diff (header + counts), stays tool-readable, and still requires a coverage entry — so a fully stubbed-or-embedded diff keeps its real verdict and review-loop continuity. Only files dropped entirely (or an unparseable diff's raw byte cut) ⇒ `partial`, never clean. |
+| `generated_paths` | _empty_ | Extra globs (JSON array of strings) classified as generated/vendored during diff-budget triage. Demotion only shifts packing priority — never excludes a file from review. Trusted workflow config only — never interpolate PR content. Max 8,000 UTF-8 bytes, 200 globs. |
 | `review_scope` | `full-pr` | `full-pr` \| `latest-commit`. Initial rounds require `full-pr`. |
 | `review_mode` | `auto` | `auto` (opened = initial, synchronize = verify) \| `initial` \| `verify`. |
 | `effort` | _empty_ | Optional OpenRouter reasoning effort for **review lanes**. |

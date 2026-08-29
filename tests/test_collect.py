@@ -163,3 +163,42 @@ def test_fetch_scoped_diff_distinguishes_diverged_from_transport() -> None:
     assert diverged_plan.fallback_notice == DIVERGED_NOTICE
     _diff, transport_plan = fetch_scoped_diff(1, plan, _Source(ActionError("timeout")))
     assert transport_plan.fallback_notice == COMPARE_FAILED_NOTICE
+
+
+def test_collect_review_packs_over_budget_diff_with_triage_inputs() -> None:
+    handwritten = (
+        "diff --git a/src/main.py b/src/main.py\n"
+        "--- a/src/main.py\n"
+        "+++ b/src/main.py\n"
+        "@@ -0,0 +1,2 @@\n"
+        "+alpha\n"
+        "+beta\n"
+    )
+    snapshot = (
+        "diff --git a/src/data/snap.dat b/src/data/snap.dat\n"
+        "--- a/src/data/snap.dat\n"
+        "+++ b/src/data/snap.dat\n"
+        "@@ -0,0 +1,40 @@\n" + "".join(f"+{'y' * 60}\n" for _ in range(40))
+    )
+
+    class _Source(FakeSource):
+        def pr_diff(self, number: int) -> str:
+            return handwritten + snapshot
+
+    collected = collect_review(
+        pr_number=1,
+        scope="full-pr",
+        mode="initial",
+        before_sha=None,
+        after_sha=None,
+        head_sha=None,
+        max_diff_kb=1,
+        source=_Source(),
+        gitattributes_text="src/data/** linguist-generated\n",
+    )
+    assert collected.truncation.truncated
+    assert collected.truncation.stubbed_files == ("src/data/snap.dat",)
+    assert not collected.truncation.forces_partial
+    assert handwritten in collected.diff
+    # Full-diff path accounting is unaffected by the packing.
+    assert collected.all_changed_paths == ("src/main.py", "src/data/snap.dat")

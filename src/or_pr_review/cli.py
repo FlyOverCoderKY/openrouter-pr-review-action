@@ -72,6 +72,7 @@ from or_pr_review.schema import (
     failed_lane,
     parse_lane_artifact,
 )
+from or_pr_review.triage import parse_generated_globs
 from or_pr_review.workspace import materialize_commit
 
 _ACTIVE_ENV: dict[str, str] = {}
@@ -181,6 +182,7 @@ def _validate_inputs(env: dict[str, str]) -> list[str]:
     if len(custom.encode("utf-8")) > 16_000:
         raise ActionError("custom_instructions exceeds 16,000 UTF-8 bytes")
     parse_path_profiles(env.get("PATH_PROFILES"))
+    parse_generated_globs(env.get("GENERATED_PATHS"))
     return slugs
 
 
@@ -512,7 +514,27 @@ def _collect(env: dict[str, str]) -> CollectedReview:
         head_sha=env.get("HEAD_SHA"),
         max_diff_kb=max_diff_kb,
         source=github,
+        gitattributes_text=_gitattributes_text(env),
+        generated_globs=parse_generated_globs(env.get("GENERATED_PATHS")),
     )
+
+
+def _gitattributes_text(env: dict[str, str]) -> str:
+    """Best-effort .gitattributes from the workflow's checkout, for triage.
+
+    The linguist rules only shift packing priority of an over-budget diff —
+    a missing or slightly stale file can never remove anything from review —
+    so reading the workflow checkout (which may trail the PR head by one
+    push) is acceptable.
+    """
+    root = _source_root(env)
+    if root is None:
+        return ""
+    path = root / ".gitattributes"
+    try:
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError:
+        return ""
 
 
 def _source_root(env: dict[str, str]) -> Path | None:
@@ -614,9 +636,13 @@ def _finish(
                     lane.findings, lane.coverage, diff_path_set
                 ):
                     notices.append(f"`{lane.model}`: {note}")
+    # Diff-budget triage: stub-only truncation (every changed file embedded
+    # or stubbed) does not force partial — only dropped files or a raw byte
+    # cut do, so dense PRs keep verdicts, ledger publication, and loop
+    # continuity.
     verdict = decide_verdict(
         issues=issues,
-        truncated=collected.truncation.truncated,
+        truncated=collected.truncation.forces_partial,
         successful_lanes=len(successful),
         fallback=collected.plan.fallback_notice is not None,
         stale=stale_notice is not None,

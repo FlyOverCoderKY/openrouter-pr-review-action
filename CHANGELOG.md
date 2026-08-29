@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- **Diff-budget triage** (fixes the dense-PR failure measured on
+  retiregolden.org#108: a 1178 KB diff raw-truncated to 600 KB left every
+  hand-written file invisible, forced a permanent `partial` verdict, never
+  published the loop ledger — so every later push skipped its follow-up
+  round — and nothing forced a sweep of the tail). An over-budget diff is now
+  packed per file instead of byte-cut: generated/vendored/lock-class files
+  (detected via `.gitattributes` `linguist-generated`/`linguist-vendored`,
+  built-in heuristics — lockfiles, vendored directories, minified assets,
+  large committed JSON snapshots — and a new caller-owned `generated_paths`
+  glob input following the `path_profiles` trust model: workflow
+  configuration only, never PR content) are demoted to stubs first, then the
+  largest hand-written files, so hand-written hunks get the budget. A stub
+  keeps the file's `diff --git` header, add/delete counts, and first hunk
+  header in the embedded diff plus an explicit note that the file is
+  tool-readable and STILL REQUIRES a coverage entry — changed-path listing,
+  coverage enforcement, and path-profile matching all keep seeing every
+  changed file, and the prompt's coverage contract now names stubbed files
+  explicitly. Verdict semantics: when every changed file is embedded or
+  stubbed, truncation no longer forces `partial` — the review keeps its real
+  verdict, publishes the ledger, and restores review-loop continuity on
+  dense PRs; `partial` remains for genuine overflow (files dropped entirely)
+  and for unparseable diffs, which still take the raw byte cut. Stubs expose
+  no anchorable hunk lines, so findings on them stay body-only. Validated on
+  a dense-PR replay fixture built from retiregolden.org#108 with labeled
+  plants in the files beyond the 600 KB cutoff (see bench/RESULTS.md);
+  the bench applies the same packing (`--legacy-truncation` replays the old
+  raw cut for baselines).
+- `bench/capture.py` decodes `gh` output as UTF-8 explicitly; on Windows the
+  ANSI codepage crashed captures of PRs with non-ASCII diffs.
+
 ## 1.2.5 — 2026-08-28
 
 - **Review cost on the posted review**: every OpenRouter request now asks for

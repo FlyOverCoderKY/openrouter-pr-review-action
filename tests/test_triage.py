@@ -305,3 +305,29 @@ def test_dropped_files_notice_is_partial() -> None:
         issues=[], truncated=truncation.forces_partial, successful_lanes=1
     )
     assert verdict == "partial"
+
+
+def test_split_diff_keeps_empty_context_line_between_segments() -> None:
+    first = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " x\n"
+        "+y\n"
+        "\n"  # genuine empty context line (trailing whitespace stripped)
+    )
+    second = _file_diff("b.py", 2)
+    parsed = split_diff(first + second)
+    assert parsed is not None
+    _, segments = parsed
+    assert segments[0].text == first
+    assert "".join(segment.text for segment in segments) == first + second
+
+
+def test_split_diff_round_trips_without_trailing_newline() -> None:
+    diff = _file_diff("a.py", 2).rstrip("\n")
+    parsed = split_diff(diff)
+    assert parsed is not None
+    _, segments = parsed
+    assert segments[0].text == diff + "\n"

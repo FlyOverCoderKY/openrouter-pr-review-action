@@ -350,11 +350,12 @@ def split_diff(diff: str) -> tuple[str, list[DiffSegment]] | None:
             current.lines.append(line)
     if not segments:
         return None
-    # Drop a trailing empty element produced by the final newline so segment
-    # text round-trips byte-identically.
-    for segment in segments:
-        if segment.lines and segment.lines[-1] == "":
-            segment.lines.pop()
+    # Drop the one trailing empty element str.split produced from the final
+    # newline. Only the LAST segment can carry it — an empty last line on any
+    # other segment is a genuine empty context line and must survive.
+    last = segments[-1]
+    if diff.endswith("\n") and last.lines and last.lines[-1] == "":
+        last.lines.pop()
     preamble_text = "\n".join(preamble)
     if preamble_text:
         preamble_text += "\n"

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.6 — 2026-08-28
 
 - **Diff-budget triage** (fixes the dense-PR failure measured on
   retiregolden.org#108: a 1178 KB diff raw-truncated to 600 KB left every

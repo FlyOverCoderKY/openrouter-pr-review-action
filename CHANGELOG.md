@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.7 — 2026-08-29
+
+- **Deadline-safe review publication**: lane work now has a protected
+  structured-finalization window, every request/retry and repository tool is
+  bounded by the remaining job budget, completed lane artifacts persist
+  immediately, and one surviving lane posts directly without a judge call.
+  Multi-lane judge transport or schema failures preserve validated findings
+  through the deterministic union. This prevents the PR358 failure mode where
+  GitHub killed a 25-minute run after one useful lane had completed but before
+  any review was posted.
+- **Convergent verification output**: resolution status and explanation must
+  agree. Contradictory structured output receives one schema-repair turn and
+  then fails visibly rather than leaving counts, ledger state, prose, and the
+  final verdict in conflict.
+- **Recall-safe judge hygiene**: exact and conservative evidence-equivalent
+  duplicates are absorbed, distinct same-location defects remain separate,
+  and review-environment/tool-access failures stay in diagnostics instead of
+  becoming code findings.
+- Added a deterministic local judge benchmark with labeled synthetic A/B and
+  A/B/C review sets, offline precision/recall/duplicate/verdict scoring, and a
+  double-gated live comparison runner. Paid runs require both
+  `--allow-spend` and `OPENROUTER_API_KEY`, preflight every output path, cap
+  run count, redact failures, and record repeatability metadata without raw
+  responses or secrets.
+
 ## 1.2.6 — 2026-08-28
 
 - **Diff-budget triage** (fixes the dense-PR failure measured on

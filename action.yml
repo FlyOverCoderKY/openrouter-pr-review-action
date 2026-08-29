@@ -228,7 +228,7 @@ runs:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         EVENT_ACTION: ${{ github.event.action }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      run: python3 -m or_pr_review
+      run: python3 -u -m or_pr_review
 
     - name: Cleanup temporary files
       if: ${{ always() }}

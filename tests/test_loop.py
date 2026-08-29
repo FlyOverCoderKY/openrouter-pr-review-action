@@ -206,6 +206,54 @@ def test_merge_resolutions_is_conservative() -> None:
     assert merge_resolutions([[Resolution(id="zz", status="fixed", note="")]], prior) == {}
 
 
+def test_pr354_wrong_enum_fix_remains_open_with_consistent_disposition() -> None:
+    """Regression: a genuinely wrong implementation enum remains open."""
+    state = LoopState(mode="verify", round_number=2, prior_findings=(_finding("r1-1"),))
+    resolution = Resolution(
+        id="r1-1",
+        status="fixed_incorrectly",
+        note="The implementation still uses the wrong enum value.",
+    )
+    outcome = apply_round(state, [], {"r1-1": resolution})
+    report = "\n".join(round_report(state, outcome))
+
+    assert outcome.open_issue_count == 1
+    assert outcome.open_bug_count == 1
+    assert outcome.ledger.findings[0].id == "r1-1"
+    assert "fixed incorrectly" in report
+    assert "wrong enum value" in report
+    assert "Open findings after this round: 1" in report
+
+
+def test_pr355_all_fixed_correctly_produces_clean_ledger_and_counts() -> None:
+    """Regression: authoritative fixed statuses converge the review to clean."""
+    state = LoopState(
+        mode="verify",
+        round_number=2,
+        prior_findings=(
+            _finding("r1-1"),
+            _finding("r1-2", severity="risk"),
+        ),
+    )
+    resolutions = {
+        finding.id: Resolution(
+            id=finding.id,
+            status="fixed",
+            note="Fixed correctly in the current head.",
+        )
+        for finding in state.prior_findings
+    }
+    outcome = apply_round(state, [], resolutions)
+    report = "\n".join(round_report(state, outcome))
+
+    assert outcome.ledger.findings == ()
+    assert outcome.open_issue_count == 0
+    assert outcome.open_bug_count == 0
+    assert report.count("fixed correctly") == 2
+    assert "fixed incorrectly" not in report
+    assert "Open findings after this round: 0" in report
+
+
 def test_encode_ledger_trims_to_fit_and_keeps_open_findings() -> None:
     open_findings = tuple(
         LedgerFinding(

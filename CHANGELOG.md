@@ -5,7 +5,11 @@
 - **Deadline-safe review publication**: lane work now has a protected
   structured-finalization window, every request/retry and repository tool is
   bounded by the remaining job budget, completed lane artifacts persist
-  immediately, and one surviving lane posts directly without a judge call.
+  immediately outside the disposable work tree and are uploaded for recovery,
+  the first protected finalize preserves a bounded repair turn, and one
+  surviving lane posts directly without a judge call. Single-job multi-lane
+  runs reserve a meaningful judge window instead of making the advertised
+  judge mathematically impossible after full-budget lanes.
   Multi-lane judge transport or schema failures preserve validated findings
   through the deterministic union. This prevents the PR358 failure mode where
   GitHub killed a 25-minute run after one useful lane had completed but before
@@ -16,8 +20,9 @@
   final verdict in conflict.
 - **Recall-safe judge hygiene**: exact and conservative evidence-equivalent
   duplicates are absorbed, distinct same-location defects remain separate,
-  and review-environment/tool-access failures stay in diagnostics instead of
-  becoming code findings.
+  and narrowly classified review-environment/tool-access failures stay out of
+  code findings while producing a visible partial verdict and diagnostic note
+  instead of an unmarked clean pass.
 - Added a deterministic local judge benchmark with labeled synthetic A/B and
   A/B/C review sets, offline precision/recall/duplicate/verdict scoring, and a
   double-gated live comparison runner. Paid runs require both

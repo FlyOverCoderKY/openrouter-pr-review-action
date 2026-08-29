@@ -600,7 +600,7 @@ def test_judge_skips_call_when_only_checkout_diagnostics_remain() -> None:
     )
 
     assert issues == []
-    assert mode == "merged"
+    assert mode == "skipped-diagnostics"
     assert cost is None
 
 

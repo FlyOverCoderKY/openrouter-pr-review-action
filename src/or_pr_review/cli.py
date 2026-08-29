@@ -33,7 +33,11 @@ from or_pr_review.harness import (
     run_lane,
     sanitize_anchors,
 )
-from or_pr_review.judge import deterministic_union, run_llm_judge
+from or_pr_review.judge import (
+    deterministic_union,
+    partition_reviewable_lanes,
+    run_llm_judge,
+)
 from or_pr_review.loop import (
     Ledger,
     LoopState,
@@ -87,6 +91,7 @@ _ACTIVE_ENV: dict[str, str] = {}
 JOB_BUDGET_SECONDS = 22 * 60
 POST_RESERVE_SECONDS = 3 * 60
 JUDGE_SCHEDULING_MARGIN_SECONDS = 5
+MIN_JUDGE_ATTEMPT_SECONDS = 30
 _JOB_DEADLINE_KEY = "_OR_PR_REVIEW_JOB_DEADLINE_MONOTONIC"
 
 
@@ -241,6 +246,15 @@ def _resolve_issues(
         )
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
     lane_payloads = [lane.to_dict() for lane in lanes]
+    reviewable_payloads, diagnostics = partition_reviewable_lanes(lane_payloads)
+    if diagnostics and not any(lane.get("findings") for lane in reviewable_payloads):
+        print("judge skipped: successful lanes contained only review-environment diagnostics")
+        return (
+            [],
+            "skipped (review environment unavailable)",
+            None,
+            False,
+        )
     judge_timeout = _judge_request_timeout(env)
     if judge_timeout is None:
         print(
@@ -284,8 +298,8 @@ def _resolve_issues(
         )
     except ActionError as exc:
         # Review lanes are the source of recall; a judge transport failure
-        # must not erase their completed work. Schema violations remain
-        # fail-closed above because they indicate an internal contract bug.
+        # must not erase their completed work. Judge schema failures use the
+        # same explicit deterministic-union degradation above.
         print(
             f"warning: judge transport failed ({redact(str(exc))}); using the "
             "deterministic recall-safe union",
@@ -333,11 +347,26 @@ def _role_all(env: dict[str, str]) -> int:
     remaining = _remaining_job_seconds(env)
     lane_timeout = DEFAULT_LANE_TIMEOUT_SECONDS
     if remaining is not None:
+        # role=all shares one job with the judge. Reserve enough time for a
+        # meaningful request on every HTTP attempt plus retry delay and post;
+        # otherwise lanes that consume their advertised budget make the judge
+        # mathematically impossible to start.
+        judge_reserve = 0
+        if needed:
+            judge_reserve = (
+                POST_RESERVE_SECONDS
+                + (MAX_HTTP_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
+                + JUDGE_SCHEDULING_MARGIN_SECONDS
+                + MAX_HTTP_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS
+            )
         lane_timeout = max(
             1,
-            min(DEFAULT_LANE_TIMEOUT_SECONDS, int(remaining - POST_RESERVE_SECONDS)),
+            min(
+                DEFAULT_LANE_TIMEOUT_SECONDS,
+                int(remaining - max(POST_RESERVE_SECONDS, judge_reserve)),
+            ),
         )
-    lane_dir = work / "lanes"
+    lane_dir = Path(env.get("ALL_LANE_RESULTS_DIR") or (work / "lanes"))
     lane_dir.mkdir(parents=True, exist_ok=True)
 
     def _one(model: str) -> LaneResult:
@@ -739,6 +768,9 @@ def _finish(
     successful = [lane for lane in lanes if lane.ok]
     slugs = parse_models(env.get("MODELS"))
     issues, judge_note, judge_cost, judge_ran = _resolve_issues(env, slugs, lanes, successful)
+    _reviewable_payloads, environment_diagnostics = partition_reviewable_lanes(
+        [lane.to_dict() for lane in successful]
+    )
     # Judge output bypasses the per-lane anchor gate, so gate the merged
     # issues too when a checkout of the reviewed head is available (the
     # judge job checks out the same head ref). MergedIssue duck-types the
@@ -765,6 +797,15 @@ def _finish(
     notices: list[str] = []
     if stale_notice:
         notices.append(stale_notice)
+    if environment_diagnostics:
+        affected = ", ".join(
+            f"`{model or 'unknown'}` ({title})" for model, title in environment_diagnostics
+        )
+        notices.append(
+            "One or more lanes reported that the supplied review environment "
+            f"could not be inspected: {affected}. This review is partial and "
+            "must not be treated as a clean pass."
+        )
     if loop.mode == "initial":
         diff_path_set = set(changed_paths_from_diff(collected.diff))
         for lane in lanes:
@@ -790,7 +831,7 @@ def _finish(
         )
     verdict = decide_verdict(
         issues=issues,
-        truncated=truncation_partial,
+        truncated=truncation_partial or bool(environment_diagnostics),
         successful_lanes=len(successful),
         fallback=collected.plan.fallback_notice is not None,
         stale=stale_notice is not None,
@@ -1006,7 +1047,7 @@ def _judge_request_timeout(env: dict[str, str]) -> int | None:
     judge_budget = remaining - POST_RESERVE_SECONDS
     retry_reserve = (MAX_HTTP_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
     usable = judge_budget - retry_reserve - JUDGE_SCHEDULING_MARGIN_SECONDS
-    if usable < MAX_HTTP_ATTEMPTS:
+    if usable < MAX_HTTP_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS:
         return None
     return min(configured, max(1, int(usable // MAX_HTTP_ATTEMPTS)))
 

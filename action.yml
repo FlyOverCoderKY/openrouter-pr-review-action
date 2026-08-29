@@ -11,8 +11,9 @@ branding:
 inputs:
   role:
     description: >-
-      all (default: collect, run lanes, judge, post) | setup (parse models
-      into a matrix) | lane (one model) | judge (merge artifacts and post).
+      all (default: collect, run lanes, judge when time and lane count permit,
+      then post) | setup (parse models into a matrix) | lane (one model) |
+      judge (merge artifacts and post).
     required: false
     default: "all"
   models:
@@ -189,7 +190,9 @@ runs:
       shell: bash
       run: |
         WORK="$(mktemp -d "${RUNNER_TEMP:-/tmp}/or-pr-review.XXXXXX")"
+        ALL_LANE_RESULTS_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/or-pr-review-lanes.XXXXXX")"
         echo "work=$WORK" >> "$GITHUB_OUTPUT"
+        echo "all_lane_results_dir=$ALL_LANE_RESULTS_DIR" >> "$GITHUB_OUTPUT"
 
     - name: Run OpenRouter PR review
       id: run
@@ -222,6 +225,7 @@ runs:
         BOT_LOGIN: ${{ inputs.bot_login }}
         PERSONA: ${{ inputs.persona }}
         WORK: ${{ steps.dirs.outputs.work }}
+        ALL_LANE_RESULTS_DIR: ${{ steps.dirs.outputs.all_lane_results_dir }}
         SOURCE_WORKSPACE: ${{ github.workspace }}
         EVENT_BEFORE: ${{ github.event.before }}
         EVENT_AFTER: ${{ github.event.after }}
@@ -230,14 +234,29 @@ runs:
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: python3 -u -m or_pr_review
 
+    - name: Preserve completed all-role lanes
+      if: ${{ always() && inputs.role == 'all' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: openrouter-review-lanes-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ steps.dirs.outputs.all_lane_results_dir }}/lane-*.json
+        if-no-files-found: ignore
+        retention-days: 3
+
     - name: Cleanup temporary files
       if: ${{ always() }}
       shell: bash
       env:
         WORK: ${{ steps.dirs.outputs.work }}
+        ALL_LANE_RESULTS_DIR: ${{ steps.dirs.outputs.all_lane_results_dir }}
       run: |
         if [ -n "$WORK" ] && [ -d "$WORK" ]; then
           case "$WORK" in
             "${RUNNER_TEMP:-/tmp}"/or-pr-review.*) rm -rf "$WORK" ;;
+          esac
+        fi
+        if [ -n "$ALL_LANE_RESULTS_DIR" ] && [ -d "$ALL_LANE_RESULTS_DIR" ]; then
+          case "$ALL_LANE_RESULTS_DIR" in
+            "${RUNNER_TEMP:-/tmp}"/or-pr-review-lanes.*) rm -rf "$ALL_LANE_RESULTS_DIR" ;;
           esac
         fi

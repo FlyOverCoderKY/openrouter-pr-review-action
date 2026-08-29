@@ -841,6 +841,45 @@ def test_lane_wall_clock_forces_structured_finish_before_job_timeout(
     assert now["value"] < 10
 
 
+def test_deadline_finalize_transport_failure_keeps_one_repair_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    now = {"value": 0.0}
+    payloads: list[dict] = []
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            now["value"] = 6.0
+            return _tool_reply()
+        if len(payloads) == 2:
+            now["value"] = 8.0
+            raise LaneError("OpenRouter HTTP 429: retry later")
+        assert "tools" not in payload
+        assert "response_format" in payload
+        assert "protected finalize request failed" in payload["messages"][-1]["content"]
+        now["value"] = 9.0
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        lane_timeout=10,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.requests == 3
+    assert now["value"] < 10
+
+
 def test_http_retries_cannot_cross_lane_request_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

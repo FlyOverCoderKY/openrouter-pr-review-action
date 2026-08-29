@@ -208,6 +208,61 @@ def test_one_lane_posts_without_judge(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "OPENROUTER_API_KEY=should-not-be-used-for-judge" not in posted[0]
 
 
+def test_diagnostic_only_lane_posts_visible_partial_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import LoopState
+    from or_pr_review.schema import Finding, LaneResult
+
+    collected = _mk_collected()
+    posted: list[str] = []
+
+    class DummyGitHub:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+            posted.append(body)
+            return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": collected.head_sha}
+
+    lane = LaneResult(
+        schema_version=SCHEMA_VERSION,
+        ok=True,
+        model="x-ai/grok-4.6",
+        findings=[
+            Finding(
+                title="File unavailable in the provided review checkout",
+                body="The review tooling could not read or inspect the supplied snapshot.",
+                severity="risk",
+                file="src/file.py",
+                line=None,
+                model_id="x-ai/grok-4.6",
+            )
+        ],
+        error=None,
+        head_sha=collected.head_sha,
+    )
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    env = _base_env(
+        tmp_path,
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert cli_mod._finish(
+        env,
+        [lane],
+        collected=collected,
+        loop=LoopState(mode="initial", round_number=1),
+    ) == 0
+    assert "**Verdict:** `partial`" in posted[0]
+    assert "review environment" in posted[0]
+    assert "must not be treated as a clean pass" in posted[0]
+
+
 def test_two_lanes_require_judge_and_attribution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -697,15 +752,18 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
 
     collected = _mk_collected()
     captured: dict[str, object] = {}
+    lane_timeouts: list[int] = []
     work = tmp_path / "work"
+    artifact_dir = tmp_path / "surviving-lanes"
 
     def fake_invoke(
         env: dict[str, str],
         model: str,
         messages: object,
         workspace: object,
-        **_kwargs: object,
+        **kwargs: object,
     ) -> LaneResult:
+        lane_timeouts.append(int(kwargs["lane_timeout"]))
         if model == "slow/model":
             return failed_lane(model, "lane wall-clock deadline exhausted")
         return LaneResult(
@@ -721,7 +779,7 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
         yield ordered[0]
         # _role_all must persist the completed result before asking for the
         # next future, because GitHub can cancel at this exact point.
-        assert (work / "lanes" / "lane-0.json").is_file()
+        assert (artifact_dir / "lane-0.json").is_file()
         captured["early_artifact"] = True
         yield ordered[1]
 
@@ -749,6 +807,7 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
         tmp_path,
         MODELS="fast/model,slow/model",
         WORK=str(work),
+        ALL_LANE_RESULTS_DIR=str(artifact_dir),
         PR_NUMBER="1",
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
@@ -760,7 +819,17 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
     assert lanes[0].ok
     assert not lanes[1].ok
     assert "wall-clock deadline" in (lanes[1].error or "")
-    assert (work / "lanes" / "lane-1.json").is_file()
+    assert (artifact_dir / "lane-1.json").is_file()
+    expected_reserve = (
+        cli_mod.POST_RESERVE_SECONDS
+        + (cli_mod.MAX_HTTP_ATTEMPTS - 1) * cli_mod.MAX_RETRY_AFTER_SECONDS
+        + cli_mod.JUDGE_SCHEDULING_MARGIN_SECONDS
+        + cli_mod.MAX_HTTP_ATTEMPTS * cli_mod.MIN_JUDGE_ATTEMPT_SECONDS
+    )
+    assert all(
+        timeout <= cli_mod.JOB_BUDGET_SECONDS - expected_reserve
+        for timeout in lane_timeouts
+    )
 
 
 def test_matrix_lane_deadline_includes_collection_and_workspace_prep(
@@ -877,12 +946,12 @@ def test_judge_timeout_is_clipped_to_fit_all_retries(
     from or_pr_review import cli as cli_mod
 
     monkeypatch.setattr(cli_mod.time, "monotonic", lambda: 100.0)
-    # 180s post + 90s worst Retry-After + 5s scheduling + 4*20s requests.
+    # 180s post + 90s worst Retry-After + 5s scheduling + 4*30s requests.
     env = {
         "OPENROUTER_TIMEOUT_SECONDS": "180",
-        cli_mod._JOB_DEADLINE_KEY: str(100 + 180 + 90 + 5 + 80),
+        cli_mod._JOB_DEADLINE_KEY: str(100 + 180 + 90 + 5 + 120),
     }
-    assert cli_mod._judge_request_timeout(env) == 20
+    assert cli_mod._judge_request_timeout(env) == 30
 
 
 def test_prepare_workspace_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

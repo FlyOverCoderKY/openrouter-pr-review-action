@@ -10,7 +10,10 @@ from or_pr_review.schema import Finding, LaneResult
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}
 _REVIEW_ENVIRONMENT_RE = re.compile(
-    r"\b(?:review|provided|current|this)\s+(?:checkout|workspace|environment|snapshot)\b"
+    r"\b(?:review|provided|temporary|inert)\s+"
+    r"(?:checkout|workspace|environment|snapshot)\b"
+    r"|\b(?:checkout|workspace|snapshot)\s+(?:provided|supplied)\s+for\s+"
+    r"(?:this\s+)?review\b"
     r"|\breview tooling\b|\btool access\b|\brepository snapshot\b",
     re.IGNORECASE,
 )
@@ -191,9 +194,10 @@ def is_environmental_diagnostic(*, title: str, body: str, line: int | None) -> b
     """Return whether text reports a reviewer/tool limitation, not a code bug.
 
     The classifier is intentionally narrow: the finding must be unanchored,
-    explicitly name the temporary review environment, and explicitly report
+    explicitly name the temporary or supplied review environment, and report
     an access/read failure. A real missing-file or runtime-access finding that
-    does not blame the review checkout remains publishable.
+    merely mentions the application's current environment or workspace remains
+    publishable.
     """
     if line is not None:
         return False

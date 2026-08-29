@@ -171,6 +171,36 @@ def test_missing_file_defect_is_not_mistaken_for_review_environment_failure() ->
     ]
 
 
+def test_application_environment_language_is_not_a_review_diagnostic() -> None:
+    lane = _ok(
+        "m1",
+        [
+            _finding(
+                "Secret not loaded in the current environment",
+                model="m1",
+                body=(
+                    "The application could not find the key when the current "
+                    "environment variable is unavailable in staging."
+                ),
+                file="src/config.py",
+                line=None,
+            ),
+            _finding(
+                "This workspace helper cannot find generated state",
+                model="m1",
+                body="The workspace helper returns unavailable for a valid project.",
+                file="src/workspace.py",
+                line=None,
+            ),
+        ],
+    )
+
+    assert [issue.title for issue in issues_from_single_lane(lane)] == [
+        "Secret not loaded in the current environment",
+        "This workspace helper cannot find generated state",
+    ]
+
+
 def test_deduplicate_issues_absorbs_conservative_near_match() -> None:
     issues = [
         MergedIssue(

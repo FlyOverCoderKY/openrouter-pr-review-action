@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from or_pr_review.errors import LaneError, SchemaError
@@ -289,6 +291,27 @@ def test_resolution_note_keeps_evidence_that_agrees_with_status() -> None:
         text, "m", expect_resolutions=True
     )
     assert resolutions[0].note == "Fixed correctly by using the required enum value."
+
+
+def test_resolution_note_does_not_infer_status_from_leading_evidence_verb() -> None:
+    from or_pr_review.schema import parse_lane_payload
+
+    notes = [
+        ("not_fixed", "Fixed the unit test names, but the production race remains."),
+        ("fixed_incorrectly", "Fixed. The enum is still wrong."),
+    ]
+    for status, note in notes:
+        text = json.dumps(
+            {
+                "findings": [],
+                "resolutions": [{"id": "r1-1", "status": status, "note": note}],
+            }
+        )
+        _findings, resolutions, _coverage = parse_lane_payload(
+            text, "m", expect_resolutions=True
+        )
+        assert resolutions[0].status == status
+        assert resolutions[0].note == note
 
 
 def test_resolution_schema_defines_status_as_authoritative() -> None:

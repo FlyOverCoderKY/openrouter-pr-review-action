@@ -366,10 +366,10 @@ def _parse_resolutions(raw: object, *, required: bool) -> list[Resolution]:
 
 
 _LEADING_DISPOSITION_RE = re.compile(
-    r"^(?:actually\s+)?(?:(?:(?:the\s+)?(?:finding|issue|bug|risk|problem|"
+    r"^(?:actually\s+)?(?:(?P<prefix>(?:(?:the\s+)?(?:finding|issue|bug|risk|problem|"
     r"fix|change|implementation)|it|this)\s+(?:is|was|remains)\s+|"
-    r"(?:status|verdict|resolution)\s*:\s*)?[\s`*_~-]*"
-    r"(fixed[\s_-]+incorrectly|fixed[\s_-]+correctly|not[\s_-]+fixed|"
+    r"(?:status|verdict|resolution)\s*:\s*))?[\s`*_~-]*"
+    r"(?P<disposition>fixed[\s_-]+incorrectly|fixed[\s_-]+correctly|not[\s_-]+fixed|"
     r"disputed|fixed)\b",
     re.IGNORECASE,
 )
@@ -398,8 +398,14 @@ def validate_resolution_note(status: str, note: str) -> str:
     match = _LEADING_DISPOSITION_RE.match(text)
     if match is None:
         return text
-    declared = match.group(1).lower().replace("_", " ").replace("-", " ")
+    declared = match.group("disposition").lower().replace("_", " ").replace("-", " ")
     declared = re.sub(r"\s+", " ", declared).strip()
+    # A leading verb such as "Fixed the unit tests, but the production race
+    # remains" is supporting evidence, not a second structured disposition.
+    # Bare ``fixed`` is authoritative only in an explicit subject/status form;
+    # the qualified canonical phrases remain unambiguous without a prefix.
+    if declared == "fixed" and match.group("prefix") is None:
+        return text
     if _DISPOSITION_ALIASES.get(declared) == status:
         return text
     raise LaneError(

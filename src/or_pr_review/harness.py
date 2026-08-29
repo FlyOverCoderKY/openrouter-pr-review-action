@@ -436,11 +436,17 @@ def _run_loop(
             # Tool exploration may use only the leading portion of the lane
             # budget.  Preserve the protected tail for a structured finish.
             if set_request_deadline is not None and deadline is not None:
-                request_limit = (
-                    deadline
-                    if not tools_active
-                    else deadline - finalize_reserve_seconds
-                )
+                if deadline_finalizing and not finalize_retried:
+                    # Do not let the first protected-tail finalize request
+                    # consume the entire lane. Preserve half of the remaining
+                    # tail for the documented schema/transport repair turn.
+                    request_limit = now + max(1.0, (deadline - now) / 2)
+                else:
+                    request_limit = (
+                        deadline
+                        if not tools_active
+                        else deadline - finalize_reserve_seconds
+                    )
                 set_request_deadline(request_limit)
             payload = {
                 **payload_base,
@@ -467,6 +473,8 @@ def _run_loop(
                 if use_schema and schema_rejected:
                     use_schema = False
                     last_error = exc
+                    if deadline_finalizing:
+                        finalize_retried = True
                     continue
                 deadline_pressure = (
                     deadline is not None
@@ -504,6 +512,25 @@ def _run_loop(
                                 "Do not call tools. Return your findings NOW as the "
                                 'JSON object {"findings": [...]} from the evidence '
                                 "you have already gathered."
+                            ),
+                        }
+                    )
+                    tools_active = False
+                    use_schema = True
+                    continue
+                if deadline_finalizing and not finalize_retried:
+                    # A transport/provider failure during the first protected
+                    # finalize still gets one bounded retry. The request above
+                    # reserved time specifically for this path.
+                    finalize_retried = True
+                    last_error = exc
+                    conversation.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "The protected finalize request failed. Do not call tools. "
+                                "Return the final structured JSON now from the evidence "
+                                f"already gathered. Problem: {exc}"
                             ),
                         }
                     )

@@ -7,7 +7,9 @@ name the source ids it merged, and verification repairs any input finding
 the judge failed to account for by appending it verbatim. A judge output
 whose accounting cannot be trusted (unknown ids, missing sources) is
 replaced wholesale by a deterministic union that cannot lose a finding.
-Structural schema mismatches still fail the job (fail-closed).
+Judge transport or structural schema failures are caught by the orchestrator
+and produce a visibly labeled deterministic union; invalid lane artifacts and
+other action-wide contract failures remain fail-closed.
 """
 
 from __future__ import annotations
@@ -491,11 +493,15 @@ def run_llm_judge(
     timeout: int = 180,
     chat: ChatFn | None = None,
 ) -> tuple[list[MergedIssue], str, float | None]:
-    """Returns (issues, mode, cost). mode is 'merged' when the judge accounted
-    for every input finding, 'repaired(+N)' when N unaccounted findings were
-    restored verbatim, or 'union-fallback' when the judge's accounting could
-    not be trusted and the deterministic union was used. cost is the judge
-    request's OpenRouter credit cost (USD), or None when unreported."""
+    """Returns (issues, mode, cost).
+
+    ``mode`` is ``merged`` when the judge accounted for every input finding,
+    ``repaired(+N)`` when N unaccounted findings were restored verbatim,
+    ``union-fallback`` when the judge's accounting could not be trusted, or
+    ``skipped-diagnostics`` when no code finding remained after temporary
+    review-environment failures were separated. ``cost`` is the judge request's
+    OpenRouter credit cost (USD), or None when unreported/not called.
+    """
     lanes, diagnostics = partition_reviewable_lanes(lanes)
     for lane_model, title in diagnostics:
         print(
@@ -503,7 +509,7 @@ def run_llm_judge(
             "(not published as a code finding)"
         )
     if diagnostics and not any(lane.get("findings") for lane in lanes):
-        return [], "merged", None
+        return [], "skipped-diagnostics", None
 
     allowed = [str(lane.get("model")) for lane in lanes if isinstance(lane.get("model"), str)]
     send = chat or (lambda payload: openrouter_chat(api_key, payload, timeout=timeout))

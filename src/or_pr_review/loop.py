@@ -61,6 +61,13 @@ _STATUS_ICONS = {
     "disputed": "🤝",
     "unaddressed": "⏳",
 }
+_STATUS_LABELS = {
+    "fixed": "fixed correctly",
+    "not_fixed": "not fixed",
+    "fixed_incorrectly": "fixed incorrectly",
+    "disputed": "disputed",
+    "unaddressed": "unaddressed",
+}
 _SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}
 # From this verify round on, carried nit findings are retired rather than
 # re-adjudicated: round 1 is the exhaustive all-severity sweep, later rounds
@@ -505,7 +512,10 @@ def _clip_reply(body: str) -> str:
 
 def _resolution_line(finding: LedgerFinding, status: str, note: str) -> str:
     icon = _STATUS_ICONS.get(status, "⏳")
-    label = status.replace("_", " ")
+    # This label, ledger state, counts, and final verdict all derive from the
+    # same structured status. The note is supporting evidence, never a second
+    # disposition channel.
+    label = _STATUS_LABELS.get(status, "unaddressed")
     text = f"- {icon} `{finding.id}` {label} — **{neutralize_mentions(finding.title)}**"
     if note:
         clipped = note[:400] + ("…" if len(note) > 400 else "")

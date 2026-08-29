@@ -91,7 +91,9 @@ def test_judge_schema_mismatch_fail_closed(tmp_path: Path) -> None:
     assert main(["judge"], env) == 1
 
 
-def test_judge_missing_lane_fail_opens_then_errors_if_none_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_judge_missing_lane_fail_opens_then_errors_if_none_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from or_pr_review import cli as cli_mod
     from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
 
@@ -206,7 +208,64 @@ def test_one_lane_posts_without_judge(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "OPENROUTER_API_KEY=should-not-be-used-for-judge" not in posted[0]
 
 
-def test_two_lanes_require_judge_and_attribution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_diagnostic_only_lane_posts_visible_partial_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import LoopState
+    from or_pr_review.schema import Finding, LaneResult
+
+    collected = _mk_collected()
+    posted: list[str] = []
+
+    class DummyGitHub:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+            posted.append(body)
+            return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": collected.head_sha}
+
+    lane = LaneResult(
+        schema_version=SCHEMA_VERSION,
+        ok=True,
+        model="x-ai/grok-4.6",
+        findings=[
+            Finding(
+                title="File unavailable in the provided review checkout",
+                body="The review tooling could not read or inspect the supplied snapshot.",
+                severity="risk",
+                file="src/file.py",
+                line=None,
+                model_id="x-ai/grok-4.6",
+            )
+        ],
+        error=None,
+        head_sha=collected.head_sha,
+    )
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+
+    env = _base_env(
+        tmp_path,
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert cli_mod._finish(
+        env,
+        [lane],
+        collected=collected,
+        loop=LoopState(mode="initial", round_number=1),
+    ) == 0
+    assert "**Verdict:** `partial`" in posted[0]
+    assert "review environment" in posted[0]
+    assert "must not be treated as a clean pass" in posted[0]
+
+
+def test_two_lanes_require_judge_and_attribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from or_pr_review import cli as cli_mod
     from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
     from or_pr_review.merge import MergedIssue
@@ -299,7 +358,7 @@ def test_two_lanes_require_judge_and_attribution(tmp_path: Path, monkeypatch: py
     assert "incomplete: no cost reported for" in posted[0]
 
 
-def test_two_lanes_judge_schema_mismatch_fail_closed(
+def test_two_lanes_judge_schema_mismatch_uses_validated_union(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from or_pr_review import cli as cli_mod
@@ -318,11 +377,23 @@ def test_two_lanes_judge_schema_mismatch_fail_closed(
         truncation=Truncation("diff", False, 4, 4, 300),
         mode="initial",
     )
+    posted: list[str] = []
+
+    class DummyGitHub:
+        def create_review(
+            self, number: int, body: str, commit_id: str
+        ) -> dict[str, object]:
+            posted.append(body)
+            return {"html_url": "https://example.test/review"}
+
+        def pr_view(self, number: int) -> dict[str, object]:
+            return {"headRefOid": "a" * 40}
 
     def _judge(**_kwargs: object) -> list[MergedIssue]:
         raise SchemaError("judge output is missing an issues array")
 
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
+    monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
     monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli_mod, "run_llm_judge", _judge)
 
@@ -335,7 +406,16 @@ def test_two_lanes_judge_schema_mismatch_fail_closed(
                     "schema_version": SCHEMA_VERSION,
                     "ok": True,
                     "model": model,
-                    "findings": [],
+                    "findings": [
+                        {
+                            "title": "Missing auth check",
+                            "body": "Unauthenticated POST",
+                            "severity": "bug",
+                            "file": "src/api.py",
+                            "line": 42,
+                            "model_id": model,
+                        }
+                    ],
                     "error": None,
                 }
             ),
@@ -350,7 +430,10 @@ def test_two_lanes_judge_schema_mismatch_fail_closed(
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
         OPENROUTER_API_KEY="sk-test",
     )
-    assert main(["judge"], env) == 1
+    assert main(["judge"], env) == 0
+    assert posted
+    assert "schema fallback: deterministic union" in posted[0]
+    assert "Missing auth check" in posted[0]
 
 
 def test_judge_merges_valid_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -380,16 +463,7 @@ def test_judge_merges_valid_artifacts(tmp_path: Path, monkeypatch: pytest.Monkey
             return {"headRefOid": "a" * 40}
 
     def _judge(**_kwargs: object) -> list[MergedIssue]:
-        return [
-            MergedIssue(
-                title="Missing auth check",
-                body="Unauthenticated POST",
-                severity="bug",
-                file="src/api.py",
-                line=42,
-                models=["x-ai/grok-4.6"],
-            )
-        ], "merged", 0.0021
+        raise AssertionError("one successful lane must bypass the judge")
 
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
@@ -666,6 +740,218 @@ def _mk_collected(head: str = "a" * 40, fallback_notice: str | None = None):
         truncation=Truncation("diff", False, 4, 4, 300),
         mode="initial",
     )
+
+
+def test_all_persists_completed_lane_before_bounded_sibling_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR358 regression: one straggler must not erase a completed sibling."""
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import LoopState
+    from or_pr_review.schema import LaneResult, failed_lane
+
+    collected = _mk_collected()
+    captured: dict[str, object] = {}
+    lane_timeouts: list[int] = []
+    work = tmp_path / "work"
+    artifact_dir = tmp_path / "surviving-lanes"
+
+    def fake_invoke(
+        env: dict[str, str],
+        model: str,
+        messages: object,
+        workspace: object,
+        **kwargs: object,
+    ) -> LaneResult:
+        lane_timeouts.append(int(kwargs["lane_timeout"]))
+        if model == "slow/model":
+            return failed_lane(model, "lane wall-clock deadline exhausted")
+        return LaneResult(
+            schema_version=SCHEMA_VERSION,
+            ok=True,
+            model=model,
+            findings=[],
+            error=None,
+        )
+
+    def fake_as_completed(futures: object):
+        ordered = list(futures)
+        yield ordered[0]
+        # _role_all must persist the completed result before asking for the
+        # next future, because GitHub can cancel at this exact point.
+        assert (artifact_dir / "lane-0.json").is_file()
+        captured["early_artifact"] = True
+        yield ordered[1]
+
+    def fake_finish(
+        env: dict[str, str],
+        lanes: list[LaneResult],
+        **_kwargs: object,
+    ) -> int:
+        captured["lanes"] = lanes
+        return 0
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_collect_with_loop",
+        lambda env: (collected, LoopState(mode="initial", round_number=1), ""),
+    )
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_mod, "_prepare_workspace", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(cli_mod, "_messages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(cli_mod, "_invoke_lane", fake_invoke)
+    monkeypatch.setattr(cli_mod, "as_completed", fake_as_completed)
+    monkeypatch.setattr(cli_mod, "_finish", fake_finish)
+
+    env = _base_env(
+        tmp_path,
+        MODELS="fast/model,slow/model",
+        WORK=str(work),
+        ALL_LANE_RESULTS_DIR=str(artifact_dir),
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+        GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+    )
+    assert main(["all"], env) == 0
+    assert captured["early_artifact"] is True
+    lanes = captured["lanes"]
+    assert isinstance(lanes, list)
+    assert lanes[0].ok
+    assert not lanes[1].ok
+    assert "wall-clock deadline" in (lanes[1].error or "")
+    assert (artifact_dir / "lane-1.json").is_file()
+    expected_reserve = (
+        cli_mod.POST_RESERVE_SECONDS
+        + (cli_mod.MAX_HTTP_ATTEMPTS - 1) * cli_mod.MAX_RETRY_AFTER_SECONDS
+        + cli_mod.JUDGE_SCHEDULING_MARGIN_SECONDS
+        + cli_mod.MAX_HTTP_ATTEMPTS * cli_mod.MIN_JUDGE_ATTEMPT_SECONDS
+    )
+    assert all(
+        timeout <= cli_mod.JOB_BUDGET_SECONDS - expected_reserve
+        for timeout in lane_timeouts
+    )
+
+
+def test_matrix_lane_deadline_includes_collection_and_workspace_prep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR358 regression for reusable-workflow role=lane jobs."""
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.loop import LoopState
+    from or_pr_review.schema import LaneResult
+
+    collected = _mk_collected()
+    now = {"value": 0.0}
+    captured: dict[str, object] = {}
+    lane_dir = tmp_path / "matrix-lanes"
+
+    monkeypatch.setattr(cli_mod, "JOB_BUDGET_SECONDS", 20)
+    monkeypatch.setattr(cli_mod.time, "monotonic", lambda: now["value"])
+
+    def fake_collect(env: dict[str, str]):
+        now["value"] = 8.0
+        return collected, LoopState(mode="initial", round_number=1), ""
+
+    def fake_workspace(*_args: object, **_kwargs: object) -> Path:
+        now["value"] = 12.0
+        return tmp_path
+
+    def fake_invoke(
+        env: dict[str, str],
+        model: str,
+        messages: object,
+        workspace: object,
+        **kwargs: object,
+    ) -> LaneResult:
+        captured.update(kwargs)
+        return LaneResult(
+            schema_version=SCHEMA_VERSION,
+            ok=True,
+            model=model,
+            findings=[],
+            error=None,
+        )
+
+    monkeypatch.setattr(cli_mod, "_collect_with_loop", fake_collect)
+    monkeypatch.setattr(cli_mod, "_prepare_workspace", fake_workspace)
+    monkeypatch.setattr(cli_mod, "_messages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_mod, "_invoke_lane", fake_invoke)
+
+    env = _base_env(
+        tmp_path,
+        MODELS="fast/model,slow/model",
+        LANE_INDEX="1",
+        LANE_MODEL="slow/model",
+        LANE_RESULTS_DIR=str(lane_dir),
+        JUDGE_NEEDED="true",
+        PR_NUMBER="1",
+        GITHUB_TOKEN="ghs_dummy",
+    )
+    assert main(["lane"], env) == 0
+    assert captured["lane_timeout"] == 8
+    assert (lane_dir / "lane-1.json").is_file()
+
+
+def test_judge_deadline_falls_back_instead_of_starting_long_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.schema import Finding, LaneResult
+
+    lanes = [
+        LaneResult(
+            schema_version=SCHEMA_VERSION,
+            ok=True,
+            model=model,
+            findings=[
+                Finding(
+                    title="Race",
+                    body="check then act",
+                    severity="bug",
+                    file="a.py",
+                    line=1,
+                    model_id=model,
+                )
+            ],
+            error=None,
+        )
+        for model in ("fast/model", "slow/model")
+    ]
+    monkeypatch.setattr(
+        cli_mod,
+        "run_llm_judge",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("judge must not start near the job deadline")
+        ),
+    )
+    env = {
+        "MODELS": "fast/model,slow/model",
+        cli_mod._JOB_DEADLINE_KEY: str(
+            cli_mod.time.monotonic() + cli_mod.POST_RESERVE_SECONDS + 60
+        ),
+    }
+    issues, note, cost, ran = cli_mod._resolve_issues(
+        env, ["fast/model", "slow/model"], lanes, lanes
+    )
+    assert issues
+    assert "deadline fallback" in note
+    assert cost is None
+    assert ran is False
+
+
+def test_judge_timeout_is_clipped_to_fit_all_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.time, "monotonic", lambda: 100.0)
+    # 180s post + 90s worst Retry-After + 5s scheduling + 4*30s requests.
+    env = {
+        "OPENROUTER_TIMEOUT_SECONDS": "180",
+        cli_mod._JOB_DEADLINE_KEY: str(100 + 180 + 90 + 5 + 120),
+    }
+    assert cli_mod._judge_request_timeout(env) == 30
 
 
 def test_prepare_workspace_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

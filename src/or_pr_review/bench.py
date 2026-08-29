@@ -43,21 +43,39 @@ fixtures captured from private repositories must live OUTSIDE the repo
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from or_pr_review import __version__
 from or_pr_review.collect import CollectedReview, DiffPlan, pack_diff, truncate_diff
 from or_pr_review.errors import ActionError
-from or_pr_review.harness import run_lane
+from or_pr_review.harness import openrouter_chat, run_lane
+from or_pr_review.judge import (
+    JUDGE_REASONING,
+    build_judge_messages,
+    judge_json_schema,
+    run_llm_judge,
+)
+from or_pr_review.models import DEFAULT_JUDGE_MODEL, parse_slug
 from or_pr_review.prompt import build_messages, changed_paths_from_diff, parse_path_profiles
+from or_pr_review.redaction import redact
 from or_pr_review.schema import MAX_COVERAGE_ENTRIES, SEVERITIES
-
 
 LABEL_CONTEXTS = ("diff", "file", "repo")
 ADJUDICATION_VERDICTS = ("false_positive", "true_positive_unlabeled")
+JUDGE_FIXTURE_SCHEMA_VERSION = 1
+JUDGE_RUN_SCHEMA_VERSION = 1
+JUDGE_VERDICTS = ("clean", "issues")
+JUDGE_LINE_TOLERANCE = 5
+JUDGE_MAX_RUNS = 20
 
 
 @dataclass(frozen=True)
@@ -129,18 +147,20 @@ class RunScore:
         context: str | None = None,
     ) -> tuple[int, int]:
         pool = [
-            l
-            for l in labels
-            if (severity is None or l.severity == severity)
-            and (context is None or l.context == context)
+            label
+            for label in labels
+            if (severity is None or label.severity == severity)
+            and (context is None or label.context == context)
         ]
-        hit = sum(1 for l in pool if self.matched.get(l.id))
+        hit = sum(1 for label in pool if self.matched.get(label.id))
         return hit, len(pool)
 
     def severity_agreement(self, labels: tuple[Label, ...]) -> tuple[int, int]:
         """Of the labels matched, how many were hit at the label's own severity."""
-        hit_labels = [l for l in labels if self.matched.get(l.id)]
-        agree = sum(1 for l in hit_labels if l.severity in self.matched[l.id])
+        hit_labels = [label for label in labels if self.matched.get(label.id)]
+        agree = sum(
+            1 for label in hit_labels if label.severity in self.matched[label.id]
+        )
         return agree, len(hit_labels)
 
     def precision(self) -> tuple[int, int]:
@@ -159,6 +179,63 @@ class RunScore:
         adjudicated precision column stays perfect, and on a clean twin it IS
         the score."""
         return len(self.adjudicated_fp) + len(self.unadjudicated), self.finding_count
+
+
+@dataclass(frozen=True)
+class JudgeExpectation:
+    """One unique issue the merge judge should emit for a synthetic set."""
+
+    id: str
+    title: str
+    file: str | None
+    line: int | None
+    keywords: tuple[str, ...]
+    recall_critical: bool = False
+
+
+@dataclass(frozen=True)
+class JudgeFixture:
+    """Synthetic A/B or A/B/C lane set with deterministic ground truth."""
+
+    name: str
+    description: str
+    expected_verdict: str
+    lanes: tuple[dict[str, Any], ...]
+    expected_issues: tuple[JudgeExpectation, ...]
+    source: Path
+    sha256: str
+
+
+@dataclass(frozen=True)
+class JudgeScore:
+    """Offline score for one saved judge result."""
+
+    expected_count: int
+    output_count: int
+    true_positive_count: int
+    duplicate_count: int
+    missed_ids: tuple[str, ...]
+    unmatched_titles: tuple[str, ...]
+    critical_hit: int
+    critical_total: int
+    expected_verdict: str
+    actual_verdict: str
+
+    @property
+    def precision(self) -> float:
+        return self.true_positive_count / self.output_count if self.output_count else 1.0
+
+    @property
+    def recall(self) -> float:
+        return self.true_positive_count / self.expected_count if self.expected_count else 1.0
+
+    @property
+    def duplicate_rate(self) -> float:
+        return self.duplicate_count / self.output_count if self.output_count else 0.0
+
+    @property
+    def verdict_correct(self) -> bool:
+        return self.expected_verdict == self.actual_verdict
 
 
 def _confined(fixture_dir: Path, relative: str, kind: str) -> Path:
@@ -565,6 +642,499 @@ def _cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def load_judge_fixture(path: Path) -> JudgeFixture:
+    """Load and validate one committed synthetic judge fixture."""
+    if not path.is_file():
+        raise ActionError(f"judge fixture {path} does not exist")
+    raw_bytes = path.read_bytes()
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ActionError(f"judge fixture {path} is not valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ActionError("judge fixture must be a JSON object")
+    if payload.get("schema_version") != JUDGE_FIXTURE_SCHEMA_VERSION:
+        raise ActionError(
+            f"judge fixture schema_version must be {JUDGE_FIXTURE_SCHEMA_VERSION}"
+        )
+    name = payload.get("name")
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+        raise ActionError("judge fixture name must be a lowercase kebab-case string")
+    description = payload.get("description")
+    if not isinstance(description, str) or not description.strip():
+        raise ActionError(f"judge fixture {name!r} needs a description")
+    verdict = payload.get("expected_verdict")
+    if verdict not in JUDGE_VERDICTS:
+        raise ActionError(
+            f"judge fixture {name!r} expected_verdict must be one of {JUDGE_VERDICTS}"
+        )
+
+    raw_lanes = payload.get("lanes")
+    if not isinstance(raw_lanes, list) or len(raw_lanes) not in (2, 3):
+        raise ActionError(f"judge fixture {name!r} must contain exactly 2 or 3 lanes")
+    lanes: list[dict[str, Any]] = []
+    lane_models: set[str] = set()
+    for lane_index, lane in enumerate(raw_lanes):
+        if not isinstance(lane, dict):
+            raise ActionError(f"judge fixture {name!r} lane {lane_index} must be an object")
+        model = lane.get("model")
+        if not isinstance(model, str):
+            raise ActionError(f"judge fixture {name!r} lane {lane_index} needs a model")
+        model = parse_slug(model, what=f"judge fixture lane {lane_index} model")
+        if model in lane_models:
+            raise ActionError(f"judge fixture {name!r} repeats lane model {model!r}")
+        lane_models.add(model)
+        findings = lane.get("findings")
+        if not isinstance(findings, list):
+            raise ActionError(
+                f"judge fixture {name!r} lane {lane_index} findings must be an array"
+            )
+        for finding_index, finding in enumerate(findings):
+            _validate_synthetic_finding(name, lane_index, finding_index, finding)
+        lanes.append({"model": model, "findings": findings})
+
+    raw_expected = payload.get("expected_issues")
+    if not isinstance(raw_expected, list):
+        raise ActionError(f"judge fixture {name!r} expected_issues must be an array")
+    expected = tuple(_parse_judge_expectation(name, item) for item in raw_expected)
+    ids = [item.id for item in expected]
+    if len(ids) != len(set(ids)):
+        raise ActionError(f"judge fixture {name!r} repeats an expected issue id")
+    if verdict == "clean" and expected:
+        raise ActionError(f"clean judge fixture {name!r} cannot have expected issues")
+    if verdict == "issues" and not expected:
+        raise ActionError(f"issues judge fixture {name!r} needs expected issues")
+    return JudgeFixture(
+        name=name,
+        description=description.strip(),
+        expected_verdict=verdict,
+        lanes=tuple(lanes),
+        expected_issues=expected,
+        source=path.resolve(),
+        sha256=hashlib.sha256(raw_bytes).hexdigest(),
+    )
+
+
+def _validate_synthetic_finding(
+    fixture_name: str, lane_index: int, finding_index: int, finding: object
+) -> None:
+    prefix = f"judge fixture {fixture_name!r} lane {lane_index} finding {finding_index}"
+    if not isinstance(finding, dict):
+        raise ActionError(f"{prefix} must be an object")
+    for field_name in ("title", "body"):
+        if not isinstance(finding.get(field_name), str) or not finding[field_name].strip():
+            raise ActionError(f"{prefix} needs non-empty {field_name}")
+    if finding.get("severity") not in SEVERITIES:
+        raise ActionError(f"{prefix} severity must be one of {SEVERITIES}")
+    file_value = finding.get("file")
+    if file_value is not None and not isinstance(file_value, str):
+        raise ActionError(f"{prefix} file must be a string or null")
+    line = finding.get("line")
+    if line is not None and (
+        isinstance(line, bool) or not isinstance(line, int) or line <= 0
+    ):
+        raise ActionError(f"{prefix} line must be a positive integer or null")
+
+
+def _parse_judge_expectation(fixture_name: str, item: object) -> JudgeExpectation:
+    if not isinstance(item, dict):
+        raise ActionError(f"judge fixture {fixture_name!r} expected issue must be an object")
+    issue_id = item.get("id")
+    if not isinstance(issue_id, str) or not re.fullmatch(r"[A-Z][A-Z0-9-]*", issue_id):
+        raise ActionError(
+            f"judge fixture {fixture_name!r} expected issue id must be uppercase and stable"
+        )
+    title = item.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise ActionError(f"expected issue {issue_id!r} needs a title")
+    file_value = item.get("file")
+    if file_value is not None and not isinstance(file_value, str):
+        raise ActionError(f"expected issue {issue_id!r} file must be a string or null")
+    line = item.get("line")
+    if line is not None and (
+        isinstance(line, bool) or not isinstance(line, int) or line <= 0
+    ):
+        raise ActionError(f"expected issue {issue_id!r} line must be a positive integer or null")
+    raw_keywords = item.get("keywords")
+    if not isinstance(raw_keywords, list) or not raw_keywords:
+        raise ActionError(f"expected issue {issue_id!r} keywords must be a non-empty array")
+    keywords: list[str] = []
+    for keyword in raw_keywords:
+        if not isinstance(keyword, str) or not keyword.strip():
+            raise ActionError(f"expected issue {issue_id!r} has an empty keyword")
+        try:
+            re.compile(keyword)
+        except re.error as exc:
+            raise ActionError(
+                f"expected issue {issue_id!r} keyword {keyword!r} is invalid: {exc}"
+            ) from exc
+        keywords.append(keyword)
+    recall_critical = item.get("recall_critical", False)
+    if not isinstance(recall_critical, bool):
+        raise ActionError(f"expected issue {issue_id!r} recall_critical must be boolean")
+    return JudgeExpectation(
+        id=issue_id,
+        title=title.strip(),
+        file=file_value,
+        line=line,
+        keywords=tuple(keywords),
+        recall_critical=recall_critical,
+    )
+
+
+def _judge_issue_matches(issue: dict[str, Any], expected: JudgeExpectation) -> bool:
+    if expected.file is not None:
+        issue_file = issue.get("file")
+        if not isinstance(issue_file, str) or not (
+            issue_file == expected.file or issue_file.endswith("/" + expected.file)
+        ):
+            return False
+    if expected.line is not None:
+        issue_line = issue.get("line")
+        if (
+            isinstance(issue_line, bool)
+            or not isinstance(issue_line, int)
+            or abs(issue_line - expected.line) > JUDGE_LINE_TOLERANCE
+        ):
+            return False
+    haystack = f"{issue.get('title', '')}\n{issue.get('body', '')}"
+    return any(re.search(pattern, haystack, re.IGNORECASE) for pattern in expected.keywords)
+
+
+def score_judge_output(
+    issues: list[dict[str, Any]], fixture: JudgeFixture
+) -> JudgeScore:
+    """Score issues with a maximum one-to-one output-to-ground-truth match.
+
+    One broad output cannot earn recall for several expected issues. Extra
+    outputs that match an already-covered issue are counted as duplicates;
+    other extras reduce precision as unsupported/noisy findings.
+    """
+    candidates = [
+        [
+            expected_index
+            for expected_index, expected in enumerate(fixture.expected_issues)
+            if _judge_issue_matches(issue, expected)
+        ]
+        for issue in issues
+    ]
+    expected_to_output: dict[int, int] = {}
+
+    def assign(output_index: int, seen: set[int]) -> bool:
+        for expected_index in candidates[output_index]:
+            if expected_index in seen:
+                continue
+            seen.add(expected_index)
+            previous = expected_to_output.get(expected_index)
+            if previous is None or assign(previous, seen):
+                expected_to_output[expected_index] = output_index
+                return True
+        return False
+
+    # Least-ambiguous outputs first makes the deterministic matching easier
+    # to understand while the augmenting path still finds max cardinality.
+    for output_index in sorted(range(len(issues)), key=lambda i: (len(candidates[i]), i)):
+        assign(output_index, set())
+    matched_outputs = set(expected_to_output.values())
+    matched_expected = set(expected_to_output)
+    duplicate_count = sum(
+        1
+        for index, matches in enumerate(candidates)
+        if index not in matched_outputs and any(match in matched_expected for match in matches)
+    )
+    missed_ids = tuple(
+        expected.id
+        for index, expected in enumerate(fixture.expected_issues)
+        if index not in matched_expected
+    )
+    unmatched_titles = tuple(
+        str(issue.get("title") or "(untitled)")
+        for index, issue in enumerate(issues)
+        if index not in matched_outputs and not candidates[index]
+    )
+    critical = [
+        index
+        for index, expected in enumerate(fixture.expected_issues)
+        if expected.recall_critical
+    ]
+    actual_verdict = "issues" if issues else "clean"
+    return JudgeScore(
+        expected_count=len(fixture.expected_issues),
+        output_count=len(issues),
+        true_positive_count=len(matched_expected),
+        duplicate_count=duplicate_count,
+        missed_ids=missed_ids,
+        unmatched_titles=unmatched_titles,
+        critical_hit=sum(1 for index in critical if index in matched_expected),
+        critical_total=len(critical),
+        expected_verdict=fixture.expected_verdict,
+        actual_verdict=actual_verdict,
+    )
+
+
+def _parse_judge_models(raw: str) -> list[str]:
+    models = [part.strip() for part in raw.split(",") if part.strip()]
+    if not models:
+        raise ActionError("--models must contain at least one OpenRouter slug")
+    parsed = [parse_slug(model, what="judge benchmark model") for model in models]
+    if len(parsed) != len(set(parsed)):
+        raise ActionError("--models contains duplicate slugs")
+    if len(parsed) > 8:
+        raise ActionError("--models is capped at 8 candidates per experiment")
+    return parsed
+
+
+def _json_sha256(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _merged_issue_dict(issue: object) -> dict[str, Any]:
+    return {
+        "title": str(getattr(issue, "title", "")),
+        "body": str(getattr(issue, "body", "")),
+        "severity": str(getattr(issue, "severity", "")),
+        "file": getattr(issue, "file", None),
+        "line": getattr(issue, "line", None),
+        "models": list(getattr(issue, "models", [])),
+    }
+
+
+def _capturing_judge_chat(
+    api_key: str, timeout: int, response_meta: dict[str, Any]
+):
+    """Create a live chat callback that retains only safe repeatability metadata."""
+
+    def send(payload: dict[str, Any]) -> dict[str, Any]:
+        response = openrouter_chat(api_key, payload, timeout=timeout)
+        response_meta["response_id"] = response.get("id")
+        response_meta["provider"] = response.get("provider")
+        response_meta["served_model"] = response.get("model")
+        usage = response.get("usage")
+        if isinstance(usage, dict):
+            response_meta["usage"] = {
+                key: usage[key]
+                for key in (
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                    "cached_tokens",
+                )
+                if isinstance(usage.get(key), (int, float))
+                and not isinstance(usage.get(key), bool)
+            }
+        return response
+
+    return send
+
+
+def _judge_run_plan(
+    out_dir: Path, fixture_name: str, models: list[str], runs: int
+) -> list[tuple[str, int, Path]]:
+    """Resolve the full paid-call matrix and reject path collisions up front."""
+    plan: list[tuple[str, int, Path]] = []
+    owners: dict[Path, tuple[str, int]] = {}
+    for model in models:
+        safe_model = re.sub(r"[^A-Za-z0-9._-]+", "-", model)
+        for run_index in range(runs):
+            out_path = out_dir / f"judge-{fixture_name}-{safe_model}-run-{run_index}.json"
+            previous = owners.get(out_path)
+            if previous is not None:
+                previous_model, previous_run = previous
+                raise ActionError(
+                    "judge output filename collision: "
+                    f"{model!r} run {run_index} and {previous_model!r} run "
+                    f"{previous_run} both map to {out_path.name!r}"
+                )
+            owners[out_path] = (model, run_index)
+            if out_path.exists():
+                raise ActionError(
+                    f"{out_path} already exists; use a fresh output directory "
+                    "so experiments cannot mix"
+                )
+            plan.append((model, run_index, out_path))
+    return plan
+
+
+def _cmd_judge_run(args: argparse.Namespace) -> int:
+    """Explicitly opted-in live comparison; this is the only paid judge command."""
+    if not args.allow_spend:
+        raise ActionError(
+            "judge-run is live and spends OpenRouter credits; re-run with --allow-spend"
+        )
+    if args.runs < 1:
+        raise ActionError("--runs must be at least 1")
+    if args.runs > JUDGE_MAX_RUNS:
+        raise ActionError(f"--runs cannot exceed the safety cap of {JUDGE_MAX_RUNS}")
+    fixture = load_judge_fixture(Path(args.fixture))
+    models = _parse_judge_models(args.models)
+    out_dir = Path(args.out)
+    plan = _judge_run_plan(out_dir, fixture.name, models, args.runs)
+    prompt_contract = {
+        "messages": build_judge_messages(list(fixture.lanes)),
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": judge_json_schema(),
+        },
+        "reasoning": dict(JUDGE_REASONING),
+    }
+    prompt_sha256 = _json_sha256(prompt_contract)
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise ActionError("OPENROUTER_API_KEY is not set; no requests were made")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    failures = 0
+    for model, run_index, out_path in plan:
+        started_at = datetime.now(UTC).isoformat()
+        started = time.monotonic()
+        response_meta: dict[str, Any] = {}
+        capturing_chat = _capturing_judge_chat(api_key, args.timeout, response_meta)
+
+        print(
+            f"judge live run {run_index + 1}/{args.runs}: "
+            f"fixture={fixture.name}, model={model}"
+        )
+        try:
+            issues, mode, cost = run_llm_judge(
+                model=model,
+                lanes=list(fixture.lanes),
+                api_key=api_key,
+                timeout=args.timeout,
+                chat=capturing_chat,
+            )
+            record: dict[str, Any] = {
+                "schema_version": JUDGE_RUN_SCHEMA_VERSION,
+                "kind": "judge-benchmark-run",
+                "ok": True,
+                "fixture": fixture.name,
+                "fixture_sha256": fixture.sha256,
+                "prompt_sha256": prompt_sha256,
+                "model": model,
+                "run": run_index,
+                "started_at": started_at,
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                "harness_version": __version__,
+                "production_default_judge": DEFAULT_JUDGE_MODEL,
+                "mode": mode,
+                "cost_usd": cost,
+                "routing": "openrouter-default",
+                **response_meta,
+                "issues": [_merged_issue_dict(issue) for issue in issues],
+            }
+            print(
+                f"  -> {out_path} ({len(issues)} issue(s), mode={mode}, "
+                f"cost={'unreported' if cost is None else f'${cost:.6f}'})"
+            )
+        except ActionError as exc:
+            failures += 1
+            safe_error = redact(str(exc), extra=[api_key])
+            record = {
+                "schema_version": JUDGE_RUN_SCHEMA_VERSION,
+                "kind": "judge-benchmark-run",
+                "ok": False,
+                "fixture": fixture.name,
+                "fixture_sha256": fixture.sha256,
+                "prompt_sha256": prompt_sha256,
+                "model": model,
+                "run": run_index,
+                "started_at": started_at,
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                "harness_version": __version__,
+                "production_default_judge": DEFAULT_JUDGE_MODEL,
+                "error": safe_error,
+                "issues": [],
+            }
+            print(f"  -> {out_path} (FAILED: {safe_error})")
+        out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return 1 if failures else 0
+
+
+def _judge_result_files(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        return sorted(path.glob("judge-*.json"))
+    return []
+
+
+def _cmd_judge_score(args: argparse.Namespace) -> int:
+    fixture = load_judge_fixture(Path(args.fixture))
+    result_files = _judge_result_files(Path(args.results))
+    if not result_files:
+        raise ActionError(f"no judge result JSON files found at {args.results}")
+    rows: list[tuple[str, dict[str, Any], JudgeScore]] = []
+    failed = 0
+    for result_file in result_files:
+        try:
+            payload = json.loads(result_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ActionError(f"{result_file} is not valid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ActionError(f"{result_file} must contain a JSON object")
+        if payload.get("ok") is False:
+            print(f"{result_file.name}: failed run excluded ({payload.get('error')})")
+            failed += 1
+            continue
+        recorded_fixture_sha = payload.get("fixture_sha256")
+        if recorded_fixture_sha is not None and recorded_fixture_sha != fixture.sha256:
+            raise ActionError(
+                f"{result_file.name} was produced from a different fixture revision"
+            )
+        issues = payload.get("issues")
+        if not isinstance(issues, list) or not all(isinstance(issue, dict) for issue in issues):
+            raise ActionError(f"{result_file.name} issues must be an array of objects")
+        rows.append((result_file.name, payload, score_judge_output(issues, fixture)))
+    print(
+        f"\njudge fixture `{fixture.name}`: {len(fixture.expected_issues)} expected unique "
+        f"issue(s), verdict={fixture.expected_verdict}; {len(rows)} scored, {failed} failed\n"
+    )
+    if not rows:
+        return 1
+    print("run | model | recall | precision | duplicates | critical | verdict | mode | ms | cost")
+    for name, payload, score in rows:
+        critical = (
+            _fraction(score.critical_hit, score.critical_total)
+            if score.critical_total
+            else "-"
+        )
+        verdict = (
+            f"yes ({score.actual_verdict})"
+            if score.verdict_correct
+            else f"NO ({score.actual_verdict}, want {score.expected_verdict})"
+        )
+        cost = payload.get("cost_usd")
+        print(
+            " | ".join(
+                [
+                    name,
+                    str(payload.get("model") or "saved-output"),
+                    _fraction(score.true_positive_count, score.expected_count),
+                    _fraction(score.true_positive_count, score.output_count),
+                    f"{score.duplicate_count}/{score.output_count}",
+                    critical,
+                    verdict,
+                    str(payload.get("mode") or "unknown"),
+                    str(payload.get("elapsed_ms") or "-"),
+                    "-" if cost is None else f"${float(cost):.6f}",
+                ]
+            )
+        )
+        if score.missed_ids:
+            print(f"  missed: {', '.join(score.missed_ids)}")
+        if score.unmatched_titles:
+            print(f"  unsupported/noise: {', '.join(score.unmatched_titles)}")
+    print("\naggregate")
+    print(
+        f"  mean recall: {sum(s.recall for _, _, s in rows) / len(rows):.1%}; "
+        f"mean precision: {sum(s.precision for _, _, s in rows) / len(rows):.1%}; "
+        f"mean duplicate rate: "
+        f"{sum(s.duplicate_rate for _, _, s in rows) / len(rows):.1%}; "
+        f"verdict accuracy: "
+        f"{sum(s.verdict_correct for _, _, s in rows)}/{len(rows)}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="or-pr-review-bench", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -601,6 +1171,36 @@ def main(argv: list[str] | None = None) -> int:
     score_parser.add_argument("fixture")
     score_parser.add_argument("out")
     score_parser.set_defaults(func=_cmd_score)
+
+    judge_run_parser = sub.add_parser(
+        "judge-run",
+        help="compare merge-judge models on a synthetic set (LIVE; spends tokens)",
+    )
+    judge_run_parser.add_argument("fixture")
+    judge_run_parser.add_argument(
+        "--models",
+        default=DEFAULT_JUDGE_MODEL,
+        help="comma-separated exact OpenRouter slugs",
+    )
+    judge_run_parser.add_argument(
+        "--runs", type=int, default=3, help="judge calls are nondeterministic; compare 3+"
+    )
+    judge_run_parser.add_argument("--out", required=True)
+    judge_run_parser.add_argument("--timeout", type=int, default=180)
+    judge_run_parser.add_argument(
+        "--allow-spend",
+        action="store_true",
+        help="required acknowledgement that this command makes paid OpenRouter calls",
+    )
+    judge_run_parser.set_defaults(func=_cmd_judge_run)
+
+    judge_score_parser = sub.add_parser(
+        "judge-score",
+        help="score saved judge output against synthetic ground truth (offline)",
+    )
+    judge_score_parser.add_argument("fixture")
+    judge_score_parser.add_argument("results", help="one result JSON or a run directory")
+    judge_score_parser.set_defaults(func=_cmd_judge_score)
 
     args = parser.parse_args(argv)
     try:

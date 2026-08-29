@@ -5,6 +5,8 @@ from __future__ import annotations
 import http.client
 import json
 import math
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -25,12 +27,17 @@ from or_pr_review.schema import (
     parse_model_findings,
     validate_coverage,
 )
-from or_pr_review.workspace import READ_ONLY_TOOLS, dispatch_tool
+from or_pr_review.workspace import READ_ONLY_TOOLS
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 HTTP_REFERER = "https://github.com/FlyOverCoderKY/openrouter-pr-review-action"
 APP_TITLE = "OpenRouter PR Review Action"
 DEFAULT_TIMEOUT = 180
+# Keep a lane inside the caller's 25-minute job ceiling.  The protected tail
+# is deliberately long enough for one normal default-timeout request, while
+# the remaining seven minutes cover artifact upload, judging, and publishing.
+DEFAULT_LANE_TIMEOUT_SECONDS = 18 * 60
+FINAL_RESPONSE_RESERVE_SECONDS = DEFAULT_TIMEOUT
 # Transient-error policy: each request retries a few times with backoff, and
 # a mid-loop failure that survives the retries triggers one salvage attempt
 # in _run_loop instead of discarding the gathered evidence.
@@ -63,9 +70,17 @@ FINALIZE_RETRY_NOTICE = (
     "Your last message was not the required JSON object. Return ONLY the JSON "
     'object {"findings": [...]} now, with no commentary and no tool calls.'
 )
+DEADLINE_FINALIZE_NOTICE = (
+    "The review lane is approaching its wall-clock deadline. Stop using tools "
+    "and return the best complete JSON result now from the embedded diff and "
+    "all evidence gathered so far."
+)
 # Bound on stub-repair rounds if a model keeps emitting tool calls after the
 # tool budget was withdrawn.
 MAX_REPAIR_ROUNDS = 3
+# Repository tools run out-of-process so a pathological regex or filesystem
+# stall cannot pin a review thread past its lane deadline.
+MAX_TOOL_CALL_SECONDS = 30
 
 
 ChatFn = Callable[[dict[str, Any]], dict[str, Any]]
@@ -108,11 +123,13 @@ def openrouter_chat(
     timeout: int,
     sleep: SleepFn = time.sleep,
     stats: dict[str, int] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     attempt = 0
     while True:
         attempt += 1
+        request_timeout = _bounded_request_timeout(timeout, deadline)
         request = urllib.request.Request(
             OPENROUTER_URL,
             data=body,
@@ -125,26 +142,34 @@ def openrouter_chat(
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(request, timeout=request_timeout) as response:
                 raw = response.read().decode("utf-8")
             break
         except urllib.error.HTTPError as exc:
             err_body = exc.read().decode("utf-8", errors="replace")[:800]
             if exc.code in RETRYABLE_STATUS and attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
-                sleep(_retry_delay(attempt, exc.headers.get("Retry-After")))
+                _sleep_before_retry(
+                    _retry_delay(attempt, exc.headers.get("Retry-After")),
+                    sleep=sleep,
+                    deadline=deadline,
+                )
                 continue
             raise LaneError(f"OpenRouter HTTP {exc.code}: {redact(err_body)}") from exc
         except TimeoutError as exc:
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
-                sleep(_retry_delay(attempt, None))
+                _sleep_before_retry(
+                    _retry_delay(attempt, None), sleep=sleep, deadline=deadline
+                )
                 continue
             raise LaneError("OpenRouter request timed out") from exc
         except urllib.error.URLError as exc:
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
-                sleep(_retry_delay(attempt, None))
+                _sleep_before_retry(
+                    _retry_delay(attempt, None), sleep=sleep, deadline=deadline
+                )
                 continue
             raise LaneError(f"OpenRouter request failed: {redact(str(exc.reason))}") from exc
         except (http.client.HTTPException, OSError) as exc:
@@ -154,7 +179,9 @@ def openrouter_chat(
             # transient as a 502. Common on flaky routes (free tiers).
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
-                sleep(_retry_delay(attempt, None))
+                _sleep_before_retry(
+                    _retry_delay(attempt, None), sleep=sleep, deadline=deadline
+                )
                 continue
             raise LaneError(
                 f"OpenRouter connection failed mid-response: {redact(str(exc))}"
@@ -171,6 +198,27 @@ def openrouter_chat(
 def _count_retry(stats: dict[str, int] | None) -> None:
     if stats is not None:
         stats["retries"] = stats.get("retries", 0) + 1
+
+
+def _bounded_request_timeout(timeout: int, deadline: float | None) -> float:
+    """Clamp one HTTP request to the remaining lane-stage wall clock."""
+    if deadline is None:
+        return float(timeout)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise LaneError("OpenRouter lane request budget exhausted")
+    return min(float(timeout), remaining)
+
+
+def _sleep_before_retry(
+    delay: float, *, sleep: SleepFn, deadline: float | None
+) -> None:
+    """Back off only when doing so cannot cross the current request budget."""
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= delay:
+            raise LaneError("OpenRouter lane request budget exhausted before retry")
+    sleep(delay)
 
 
 def _retry_delay(attempt: int, retry_after: str | None) -> float:
@@ -200,11 +248,20 @@ def run_lane(
     expect_resolutions: bool = False,
     expected_paths: set[str] | None = None,
     expected_resolution_ids: set[str] | None = None,
+    lane_timeout: int = DEFAULT_LANE_TIMEOUT_SECONDS,
 ) -> LaneResult:
     started = time.monotonic()
+    deadline = started + lane_timeout
     stats: dict[str, int] = {}
+    request_deadline = {"value": deadline}
     send = chat or (
-        lambda payload: openrouter_chat(api_key, payload, timeout=timeout, stats=stats)
+        lambda payload: openrouter_chat(
+            api_key,
+            payload,
+            timeout=timeout,
+            stats=stats,
+            deadline=request_deadline["value"],
+        )
     )
     conversation = list(messages)
     tools = list(READ_ONLY_TOOLS) if workspace is not None and max_tool_turns > 0 else None
@@ -251,6 +308,15 @@ def run_lane(
                 include_resolutions=expect_resolutions,
             ),
             validate_final=_validate,
+            deadline=deadline,
+            finalize_reserve_seconds=min(
+                FINAL_RESPONSE_RESERVE_SECONDS, max(1, lane_timeout // 2)
+            ),
+            set_request_deadline=(
+                None
+                if chat is not None
+                else lambda value: request_deadline.__setitem__("value", value)
+            ),
         )
         findings, resolutions, coverage = _validate(content)
         gate_root = workspace if workspace is not None else anchor_root
@@ -311,6 +377,9 @@ def _run_loop(
     provider_order: list[str] | None = None,
     response_schema: dict[str, Any] | None = None,
     validate_final: Callable[[str], object] | None = None,
+    deadline: float | None = None,
+    finalize_reserve_seconds: int = FINAL_RESPONSE_RESERVE_SECONDS,
+    set_request_deadline: Callable[[float], None] | None = None,
 ) -> str:
     payload_base: dict[str, Any] = {
         "model": model,
@@ -342,8 +411,43 @@ def _run_loop(
     force_tool = False
     finalize_retried = False
     salvage_attempted = False
+    deadline_finalizing = False
     try:
         while True:
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                raise LaneError("OpenRouter lane wall-clock deadline exhausted")
+            if (
+                deadline is not None
+                and tools_active
+                and not deadline_finalizing
+                and now >= deadline - finalize_reserve_seconds
+            ):
+                deadline_finalizing = True
+                salvage_attempted = True
+                if stats is not None:
+                    stats["salvaged"] = 1
+                conversation.append(
+                    {"role": "user", "content": DEADLINE_FINALIZE_NOTICE}
+                )
+                tools_active = False
+                use_schema = True
+
+            # Tool exploration may use only the leading portion of the lane
+            # budget.  Preserve the protected tail for a structured finish.
+            if set_request_deadline is not None and deadline is not None:
+                if deadline_finalizing and not finalize_retried:
+                    # Do not let the first protected-tail finalize request
+                    # consume the entire lane. Preserve half of the remaining
+                    # tail for the documented schema/transport repair turn.
+                    request_limit = now + max(1.0, (deadline - now) / 2)
+                else:
+                    request_limit = (
+                        deadline
+                        if not tools_active
+                        else deadline - finalize_reserve_seconds
+                    )
+                set_request_deadline(request_limit)
             payload = {
                 **payload_base,
                 "messages": conversation,
@@ -369,6 +473,27 @@ def _run_loop(
                 if use_schema and schema_rejected:
                     use_schema = False
                     last_error = exc
+                    if deadline_finalizing:
+                        finalize_retried = True
+                    continue
+                deadline_pressure = (
+                    deadline is not None
+                    and tools_active
+                    and time.monotonic() >= deadline - finalize_reserve_seconds
+                )
+                if deadline_pressure and not salvage_attempted:
+                    # The exploration-stage request budget expired.  This is
+                    # expected deadline control, not a failed lane: finalize
+                    # from the embedded diff even if no tool round completed.
+                    deadline_finalizing = True
+                    salvage_attempted = True
+                    if stats is not None:
+                        stats["salvaged"] = 1
+                    conversation.append(
+                        {"role": "user", "content": DEADLINE_FINALIZE_NOTICE}
+                    )
+                    tools_active = False
+                    use_schema = True
                     continue
                 if turns > 0 and not salvage_attempted:
                     # Salvage: a mid-loop failure that survived the HTTP
@@ -387,6 +512,25 @@ def _run_loop(
                                 "Do not call tools. Return your findings NOW as the "
                                 'JSON object {"findings": [...]} from the evidence '
                                 "you have already gathered."
+                            ),
+                        }
+                    )
+                    tools_active = False
+                    use_schema = True
+                    continue
+                if deadline_finalizing and not finalize_retried:
+                    # A transport/provider failure during the first protected
+                    # finalize still gets one bounded retry. The request above
+                    # reserved time specifically for this path.
+                    finalize_retried = True
+                    last_error = exc
+                    conversation.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "The protected finalize request failed. Do not call tools. "
+                                "Return the final structured JSON now from the evidence "
+                                f"already gathered. Problem: {exc}"
                             ),
                         }
                     )
@@ -414,7 +558,14 @@ def _run_loop(
                     continue
                 turns += 1
                 for call in tool_calls:
-                    observation = _run_one_tool(workspace, call)
+                    tool_deadline = (
+                        deadline - finalize_reserve_seconds
+                        if deadline is not None
+                        else None
+                    )
+                    observation = _run_one_tool(
+                        workspace, call, deadline=tool_deadline
+                    )
                     conversation.append(observation)
                     text = observation.get("content")
                     if isinstance(text, str):
@@ -559,7 +710,9 @@ def _stub_tool_result(call: object) -> dict[str, Any]:
     }
 
 
-def _run_one_tool(workspace: Path, call: object) -> dict[str, Any]:
+def _run_one_tool(
+    workspace: Path, call: object, *, deadline: float | None = None
+) -> dict[str, Any]:
     if not isinstance(call, dict):
         return {"role": "tool", "tool_call_id": "unknown", "content": "error: malformed tool call"}
     call_id = str(call.get("id") or "unknown")
@@ -576,7 +729,38 @@ def _run_one_tool(workspace: Path, call: object) -> dict[str, Any]:
             "tool_call_id": call_id,
             "content": f"error: invalid tool arguments: {exc}",
         }
-    result = dispatch_tool(workspace, name, arguments)
+    remaining = MAX_TOOL_CALL_SECONDS
+    if deadline is not None:
+        remaining = min(remaining, deadline - time.monotonic())
+    if remaining <= 0:
+        result = "error: lane tool budget exhausted before this call"
+        return {"role": "tool", "tool_call_id": call_id, "content": result}
+    try:
+        process = subprocess.run(
+            [sys.executable, "-m", "or_pr_review.tool_worker", str(workspace), name],
+            input=json.dumps(arguments),
+            capture_output=True,
+            text=True,
+            timeout=remaining,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if isinstance(exc, subprocess.TimeoutExpired):
+            result = f"error: repository tool exceeded its {remaining:.1f}s deadline"
+        else:
+            result = f"error: repository tool process failed: {redact(str(exc))}"
+        return {"role": "tool", "tool_call_id": call_id, "content": result}
+    if process.returncode != 0:
+        detail = redact((process.stderr or "").strip()[:400])
+        result = f"error: repository tool process exited {process.returncode}: {detail}"
+        return {"role": "tool", "tool_call_id": call_id, "content": result}
+    try:
+        payload = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        result = f"error: repository tool returned invalid JSON: {exc}"
+        return {"role": "tool", "tool_call_id": call_id, "content": result}
+    value = payload.get("result") if isinstance(payload, dict) else None
+    result = value if isinstance(value, str) else "error: repository tool returned no result"
     return {"role": "tool", "tool_call_id": call_id, "content": result}
 
 

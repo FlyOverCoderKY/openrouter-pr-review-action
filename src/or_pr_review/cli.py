@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import sys
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
@@ -24,12 +25,19 @@ from or_pr_review.collect import (
 from or_pr_review.errors import ActionError, LaneError, SchemaError
 from or_pr_review.github_ops import GitHub, upsert_status_comment
 from or_pr_review.harness import (
+    DEFAULT_LANE_TIMEOUT_SECONDS,
+    MAX_HTTP_ATTEMPTS,
+    MAX_RETRY_AFTER_SECONDS,
     parse_max_tool_turns,
     require_openrouter_key,
     run_lane,
     sanitize_anchors,
 )
-from or_pr_review.judge import run_llm_judge
+from or_pr_review.judge import (
+    deterministic_union,
+    partition_reviewable_lanes,
+    run_llm_judge,
+)
 from or_pr_review.loop import (
     Ledger,
     LoopState,
@@ -77,13 +85,24 @@ from or_pr_review.workspace import materialize_commit
 
 _ACTIVE_ENV: dict[str, str] = {}
 
+# The organization workflow gives this action 25 minutes. Stop OpenRouter
+# work at 22 minutes so review publication and composite cleanup cannot lose a
+# completed lane at the hard GitHub cancellation boundary (the PR358 failure).
+JOB_BUDGET_SECONDS = 22 * 60
+POST_RESERVE_SECONDS = 3 * 60
+JUDGE_SCHEDULING_MARGIN_SECONDS = 5
+MIN_JUDGE_ATTEMPT_SECONDS = 30
+_JOB_DEADLINE_KEY = "_OR_PR_REVIEW_JOB_DEADLINE_MONOTONIC"
+
 
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> int:
     global _ACTIVE_ENV
     args = list(sys.argv[1:] if argv is None else argv)
-    environ = env if env is not None else dict(os.environ)
-    _ACTIVE_ENV = environ
+    environ = dict(env) if env is not None else dict(os.environ)
     role = (args[0] if args else environ.get("ROLE") or "all").strip().lower()
+    if role in {"all", "lane", "judge"}:
+        environ[_JOB_DEADLINE_KEY] = str(time.monotonic() + JOB_BUDGET_SECONDS)
+    _ACTIVE_ENV = environ
     try:
         if role == "setup":
             return _role_setup(environ)
@@ -203,23 +222,95 @@ def _resolve_issues(
 ) -> tuple[list[MergedIssue], str, float | None, bool]:
     if not successful:
         return [], "skipped (no successful lanes)", None, False
-    if not _judge_needed(env, slugs):
-        print("judge skipped: one review lane; posting that lane directly")
+    if len(successful) == 1:
+        print("judge skipped: one successful lane; posting that lane directly")
+        reason = (
+            "skipped (single review lane; one reviewer = no judge)"
+            if len(lanes) == 1
+            else "skipped (one successful review lane; no merge needed)"
+        )
         return (
             issues_from_single_lane(successful[0]),
-            "skipped (single review lane; one reviewer = no judge)",
+            reason,
+            None,
+            False,
+        )
+    if not _judge_needed(env, slugs):
+        # Defensive only: model validation currently makes multiple lanes
+        # imply a judge unless the caller explicitly overrides judge_needed.
+        return (
+            deterministic_union([lane.to_dict() for lane in successful]),
+            "skipped by configuration (deterministic union)",
             None,
             False,
         )
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
+    lane_payloads = [lane.to_dict() for lane in lanes]
+    reviewable_payloads, diagnostics = partition_reviewable_lanes(lane_payloads)
+    if diagnostics and not any(lane.get("findings") for lane in reviewable_payloads):
+        print("judge skipped: successful lanes contained only review-environment diagnostics")
+        return (
+            [],
+            "skipped (review environment unavailable)",
+            None,
+            False,
+        )
+    judge_timeout = _judge_request_timeout(env)
+    if judge_timeout is None:
+        print(
+            "judge skipped near the job deadline; using the deterministic "
+            "recall-safe union",
+            flush=True,
+        )
+        return (
+            deterministic_union(lane_payloads),
+            f"`{judge_model}` (deadline fallback: deterministic union)",
+            None,
+            False,
+        )
     key = require_openrouter_key(env)
-    print(f"judge running with `{judge_model}` (reasoning effort=minimal)")
-    issues, mode, judge_cost = run_llm_judge(
-        model=judge_model,
-        lanes=[lane.to_dict() for lane in lanes],
-        api_key=key,
-        timeout=_int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180),
+    print(
+        f"judge running with `{judge_model}` (reasoning effort=minimal, "
+        f"request timeout={judge_timeout}s)",
+        flush=True,
     )
+    try:
+        issues, mode, judge_cost = run_llm_judge(
+            model=judge_model,
+            lanes=lane_payloads,
+            api_key=key,
+            timeout=judge_timeout,
+        )
+    except SchemaError as exc:
+        # The lane artifacts already passed our schema and anchor gates. A
+        # malformed judge answer cannot erase that validated recall; make the
+        # degraded merge explicit on the review instead.
+        print(
+            f"warning: judge schema failed ({redact(str(exc))}); using the "
+            "deterministic recall-safe union",
+            flush=True,
+        )
+        return (
+            deterministic_union(lane_payloads),
+            f"`{judge_model}` (schema fallback: deterministic union)",
+            None,
+            False,
+        )
+    except ActionError as exc:
+        # Review lanes are the source of recall; a judge transport failure
+        # must not erase their completed work. Judge schema failures use the
+        # same explicit deterministic-union degradation above.
+        print(
+            f"warning: judge transport failed ({redact(str(exc))}); using the "
+            "deterministic recall-safe union",
+            flush=True,
+        )
+        return (
+            deterministic_union(lane_payloads),
+            f"`{judge_model}` (transport fallback: deterministic union)",
+            None,
+            False,
+        )
     # Recall-safety outcomes are visible on the posted review, not only in
     # the job log: readers must be able to tell a clean merge from a
     # repaired or fallback (chattier, exact-dedup union) post.
@@ -242,13 +333,41 @@ def _role_all(env: dict[str, str]) -> int:
         collected.pr_number,
         f"Reviewing with OpenRouter ({len(slugs)} lane(s): {', '.join(f'`{s}`' for s in slugs)}).",
     )
-    work = Path(env.get("WORK") or "").resolve() if env.get("WORK") else Path(env.get("RUNNER_TEMP") or "/tmp")
+    work = (
+        Path(env.get("WORK") or "").resolve()
+        if env.get("WORK")
+        else Path(env.get("RUNNER_TEMP") or "/tmp")
+    )
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected, state, agent_replies)
     expect_coverage, expected_paths = _coverage_expectations(state, collected)
     expected_ids = (
         {finding.id for finding in state.open_prior} if state.mode == "verify" else None
     )
+    remaining = _remaining_job_seconds(env)
+    lane_timeout = DEFAULT_LANE_TIMEOUT_SECONDS
+    if remaining is not None:
+        # role=all shares one job with the judge. Reserve enough time for a
+        # meaningful request on every HTTP attempt plus retry delay and post;
+        # otherwise lanes that consume their advertised budget make the judge
+        # mathematically impossible to start.
+        judge_reserve = 0
+        if needed:
+            judge_reserve = (
+                POST_RESERVE_SECONDS
+                + (MAX_HTTP_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
+                + JUDGE_SCHEDULING_MARGIN_SECONDS
+                + MAX_HTTP_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS
+            )
+        lane_timeout = max(
+            1,
+            min(
+                DEFAULT_LANE_TIMEOUT_SECONDS,
+                int(remaining - max(POST_RESERVE_SECONDS, judge_reserve)),
+            ),
+        )
+    lane_dir = Path(env.get("ALL_LANE_RESULTS_DIR") or (work / "lanes"))
+    lane_dir.mkdir(parents=True, exist_ok=True)
 
     def _one(model: str) -> LaneResult:
         return _invoke_lane(
@@ -260,12 +379,20 @@ def _role_all(env: dict[str, str]) -> int:
             expect_resolutions=state.mode == "verify",
             expected_paths=expected_paths,
             expected_resolution_ids=expected_ids,
+            lane_timeout=lane_timeout,
         )
 
     lanes: list[LaneResult] = []
     if len(slugs) == 1:
-        lanes.append(_one(slugs[0]))
+        lane = _one(slugs[0])
+        lane.head_sha = collected.head_sha
+        _persist_lane_artifact(lane_dir, 0, lane)
+        lanes.append(lane)
     else:
+        # Thread workers are safe to join because run_lane bounds every HTTP
+        # request and executes each repository tool in a killable subprocess.
+        # Do not use shutdown(wait=False): running Python threads cannot be
+        # cancelled, and pretending otherwise recreates the PR358 failure.
         with ThreadPoolExecutor(max_workers=min(len(slugs), LANE_CAP)) as pool:
             futures = {pool.submit(_one, model): i for i, model in enumerate(slugs)}
             by_index: dict[int, LaneResult] = {}
@@ -276,18 +403,14 @@ def _role_all(env: dict[str, str]) -> int:
                     by_index[i] = future.result()
                 except Exception as exc:  # noqa: BLE001
                     by_index[i] = failed_lane(model, redact(str(exc)))
-            lanes = [by_index[i] for i in range(len(slugs))]
-
-    for lane in lanes:
-        lane.head_sha = collected.head_sha
-
-    lane_dir = work / "lanes"
-    lane_dir.mkdir(parents=True, exist_ok=True)
-    for index, lane in enumerate(lanes):
-        (lane_dir / f"lane-{index}.json").write_text(
-            json.dumps(lane.to_dict(), indent=2) + "\n",
-            encoding="utf-8",
-        )
+                by_index[i].head_sha = collected.head_sha
+                _persist_lane_artifact(lane_dir, i, by_index[i])
+                print(
+                    f"lane {i} `{model}` persisted "
+                    f"({'ok' if by_index[i].ok else 'failed-open'})",
+                    flush=True,
+                )
+        lanes = [by_index[i] for i in range(len(slugs))]
     return _finish(env, lanes, collected=collected, loop=state)
 
 
@@ -300,6 +423,18 @@ def _run_one_lane(
     messages = _messages(env, collected, state, agent_replies)
     _maybe_status(env, collected.pr_number, f"Lane `{model}` is reviewing via OpenRouter.")
     expect_coverage, expected_paths = _coverage_expectations(state, collected)
+    remaining = _remaining_job_seconds(env)
+    lane_timeout = DEFAULT_LANE_TIMEOUT_SECONDS
+    if remaining is not None:
+        reserve = (
+            0
+            if _judge_needed(env, parse_models(env.get("MODELS")))
+            else POST_RESERVE_SECONDS
+        )
+        lane_timeout = max(
+            1,
+            min(DEFAULT_LANE_TIMEOUT_SECONDS, int(remaining - reserve)),
+        )
     result = _invoke_lane(
         env,
         model,
@@ -313,6 +448,7 @@ def _run_one_lane(
             if state.mode == "verify"
             else None
         ),
+        lane_timeout=lane_timeout,
     )
     result.head_sha = collected.head_sha
     return result, collected, state
@@ -328,9 +464,13 @@ def _invoke_lane(
     expect_resolutions: bool = False,
     expected_paths: set[str] | None = None,
     expected_resolution_ids: set[str] | None = None,
+    lane_timeout: int | None = None,
 ) -> LaneResult:
     try:
         key = require_openrouter_key(env)
+        lane_kwargs: dict[str, Any] = {}
+        if lane_timeout is not None:
+            lane_kwargs["lane_timeout"] = lane_timeout
         return run_lane(
             model=model,
             messages=messages,
@@ -346,6 +486,7 @@ def _invoke_lane(
             expect_resolutions=expect_resolutions,
             expected_paths=expected_paths,
             expected_resolution_ids=expected_resolution_ids,
+            **lane_kwargs,
         )
     except ActionError:
         raise
@@ -627,6 +768,9 @@ def _finish(
     successful = [lane for lane in lanes if lane.ok]
     slugs = parse_models(env.get("MODELS"))
     issues, judge_note, judge_cost, judge_ran = _resolve_issues(env, slugs, lanes, successful)
+    _reviewable_payloads, environment_diagnostics = partition_reviewable_lanes(
+        [lane.to_dict() for lane in successful]
+    )
     # Judge output bypasses the per-lane anchor gate, so gate the merged
     # issues too when a checkout of the reviewed head is available (the
     # judge job checks out the same head ref). MergedIssue duck-types the
@@ -653,6 +797,15 @@ def _finish(
     notices: list[str] = []
     if stale_notice:
         notices.append(stale_notice)
+    if environment_diagnostics:
+        affected = ", ".join(
+            f"`{model or 'unknown'}` ({title})" for model, title in environment_diagnostics
+        )
+        notices.append(
+            "One or more lanes reported that the supplied review environment "
+            f"could not be inspected: {affected}. This review is partial and "
+            "must not be treated as a clean pass."
+        )
     if loop.mode == "initial":
         diff_path_set = set(changed_paths_from_diff(collected.diff))
         for lane in lanes:
@@ -678,7 +831,7 @@ def _finish(
         )
     verdict = decide_verdict(
         issues=issues,
-        truncated=truncation_partial,
+        truncated=truncation_partial or bool(environment_diagnostics),
         successful_lanes=len(successful),
         fallback=collected.plan.fallback_notice is not None,
         stale=stale_notice is not None,
@@ -744,7 +897,11 @@ def _finish(
         _maybe_status(
             env,
             collected.pr_number,
-            render_incomplete(stage="post-review", reason=redact(str(exc)), run_url=env.get("RUN_URL") or ""),
+            render_incomplete(
+                stage="post-review",
+                reason=redact(str(exc)),
+                run_url=env.get("RUN_URL") or "",
+            ),
         )
         raise ActionError(f"failed to post the GitHub review: {exc}") from exc
 
@@ -835,7 +992,9 @@ def _load_lane_dir(directory: Path, expected: list[str]) -> list[LaneResult]:
             if len(expected) == 1 and files:
                 path = files[0]
             else:
-                lanes.append(failed_lane(model, "lane artifact missing (job failed or was cancelled)"))
+                lanes.append(
+                    failed_lane(model, "lane artifact missing (job failed or was cancelled)")
+                )
                 continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -858,6 +1017,39 @@ def _write_lane_file(env: dict[str, str], index: int, result: LaneResult) -> Pat
     path = directory / f"lane-{index}.json"
     path.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def _persist_lane_artifact(directory: Path, index: int, result: LaneResult) -> Path:
+    """Persist an all-role lane immediately, before waiting for siblings."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"lane-{index}.json"
+    path.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _remaining_job_seconds(env: dict[str, str]) -> float | None:
+    raw = (env.get(_JOB_DEADLINE_KEY) or "").strip()
+    if not raw:
+        return None
+    try:
+        deadline = float(raw)
+    except ValueError:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _judge_request_timeout(env: dict[str, str]) -> int | None:
+    """Fit every possible judge retry inside the remaining job budget."""
+    configured = _int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180)
+    remaining = _remaining_job_seconds(env)
+    if remaining is None:
+        return configured
+    judge_budget = remaining - POST_RESERVE_SECONDS
+    retry_reserve = (MAX_HTTP_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
+    usable = judge_budget - retry_reserve - JUDGE_SCHEDULING_MARGIN_SECONDS
+    if usable < MAX_HTTP_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS:
+        return None
+    return min(configured, max(1, int(usable // MAX_HTTP_ATTEMPTS)))
 
 
 def _github(env: dict[str, str]) -> GitHub:

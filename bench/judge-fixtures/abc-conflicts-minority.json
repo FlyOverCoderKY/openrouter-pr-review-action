@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "name": "abc-conflicts-minority",
+  "description": "Three lanes contain a true duplicate, complementary findings, two superficially conflicting retry defects at one location, two distinct defects with the exact same generic title and anchor, an unsupported tool failure, and a recall-critical issue reported only by the minority lane.",
+  "expected_verdict": "issues",
+  "lanes": [
+    {
+      "model": "synthetic/reviewer-a",
+      "findings": [
+        {
+          "title": "Cache key omits tenant identity",
+          "body": "The response cache uses only account_id, so equal account ids in different tenants can read each other's cached response.",
+          "severity": "bug",
+          "file": "src/cache.py",
+          "line": 61
+        },
+        {
+          "title": "Permanent 404 responses are retried",
+          "body": "The fallback branch retries permanent 404 responses, wasting the full retry budget on an error that cannot recover.",
+          "severity": "risk",
+          "file": "src/client.py",
+          "line": 72
+        },
+        {
+          "title": "Documented timeout no longer matches the default",
+          "body": "The guide promises a 30 second timeout, but DEFAULT_TIMEOUT is now 10 seconds.",
+          "severity": "nit",
+          "file": "docs/config.md",
+          "line": 20
+        },
+        {
+          "title": "Missing validation",
+          "body": "update_profile accepts age=-1 because the lower-bound check was removed, allowing an impossible negative age into contribution calculations.",
+          "severity": "risk",
+          "file": "src/api.py",
+          "line": 42
+        }
+      ]
+    },
+    {
+      "model": "synthetic/reviewer-b",
+      "findings": [
+        {
+          "title": "Cross-tenant cache collision",
+          "body": "Because tenant_id is absent from the cache key, account 7 in tenant B can receive tenant A's response for account 7.",
+          "severity": "bug",
+          "file": "src/cache.py",
+          "line": 62
+        },
+        {
+          "title": "Transient 503 responses are not retried",
+          "body": "The same fallback branch returns immediately for 503, so a recoverable service outage bypasses the retry policy.",
+          "severity": "risk",
+          "file": "src/client.py",
+          "line": 72
+        },
+        {
+          "title": "Export error leaks its temporary file",
+          "body": "When serialization raises, the exception path returns without unlinking the temporary export file.",
+          "severity": "risk",
+          "file": "src/export.py",
+          "line": 104
+        },
+        {
+          "title": "Missing validation",
+          "body": "update_profile accepts an account_id owned by another user without running the authorization check, enabling unauthorized account updates.",
+          "severity": "bug",
+          "file": "src/api.py",
+          "line": 42
+        }
+      ]
+    },
+    {
+      "model": "synthetic/reviewer-c",
+      "findings": [
+        {
+          "title": "Authorization happens after the cache lookup",
+          "body": "cache_get() runs before authorize(), so a cache hit returns another user's object without ever executing the authorization check.",
+          "severity": "bug",
+          "file": "src/cache.py",
+          "line": 48
+        },
+        {
+          "title": "Schema could not be verified",
+          "body": "schema.sql was unavailable in the provided review workspace and tool access failed, so this review could not inspect it.",
+          "severity": "risk",
+          "file": "db/schema.sql",
+          "line": null
+        }
+      ]
+    }
+  ],
+  "expected_issues": [
+    {
+      "id": "TENANT-CACHE-KEY",
+      "title": "Cache key omits tenant identity",
+      "file": "src/cache.py",
+      "line": 61,
+      "keywords": ["tenant.{0,60}cache (?:key|collision)", "cache key.{0,60}tenant"]
+    },
+    {
+      "id": "RETRY-PERMANENT",
+      "title": "Permanent 404 responses are retried",
+      "file": "src/client.py",
+      "line": 72,
+      "keywords": ["(?:404|permanent).{0,60}retr"]
+    },
+    {
+      "id": "RETRY-TRANSIENT",
+      "title": "Transient 503 responses are not retried",
+      "file": "src/client.py",
+      "line": 72,
+      "keywords": ["(?:503|transient).{0,60}(?:not retr|bypass|returns? immediately)"]
+    },
+    {
+      "id": "TIMEOUT-DOC",
+      "title": "Documented timeout no longer matches the default",
+      "file": "docs/config.md",
+      "line": 20,
+      "keywords": ["(?:timeout|30 second).{0,60}(?:default|10 second|no longer|mismatch)"]
+    },
+    {
+      "id": "TEMP-FILE-LEAK",
+      "title": "Export error leaks its temporary file",
+      "file": "src/export.py",
+      "line": 104,
+      "keywords": ["(?:temporary|temp).{0,40}file.{0,40}(?:leak|unlink|cleanup)", "temporary export file", "without unlink"]
+    },
+    {
+      "id": "NEGATIVE-AGE-API",
+      "title": "Missing validation for negative age",
+      "file": "src/api.py",
+      "line": 42,
+      "keywords": ["(?:age=-1|negative age|lower-bound).{0,80}(?:accept|validation|check|contribution)"]
+    },
+    {
+      "id": "UNAUTHORIZED-ACCOUNT-API",
+      "title": "Missing authorization for account_id",
+      "file": "src/api.py",
+      "line": 42,
+      "keywords": ["(?:account_id|account).{0,80}(?:another user|authoriz|unauthorized|owned)"]
+    },
+    {
+      "id": "AUTH-AFTER-CACHE",
+      "title": "Authorization happens after the cache lookup",
+      "file": "src/cache.py",
+      "line": 48,
+      "keywords": ["(?:authoriz|permission).{0,80}(?:after|cache hit|cache lookup)", "cache.{0,80}before authorize"],
+      "recall_critical": true
+    }
+  ]
+}

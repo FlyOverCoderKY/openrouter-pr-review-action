@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "name": "ab-duplicates-complements",
+  "description": "Two lanes report one shared defect, one complementary defect, and one review-checkout access failure that must remain operational telemetry.",
+  "expected_verdict": "issues",
+  "lanes": [
+    {
+      "model": "synthetic/reviewer-a",
+      "findings": [
+        {
+          "title": "Permanent failures retry forever",
+          "body": "dispatch() puts every 4xx response back on the queue without incrementing the terminal-attempt counter, so a permanent 401 loops indefinitely.",
+          "severity": "bug",
+          "file": "src/jobs.py",
+          "line": 42
+        },
+        {
+          "title": "Negative ages pass validation",
+          "body": "parse_age() accepts -1 because it checks only the upper bound; downstream contribution math then uses an impossible age.",
+          "severity": "risk",
+          "file": "src/input.py",
+          "line": 18
+        }
+      ]
+    },
+    {
+      "model": "synthetic/reviewer-b",
+      "findings": [
+        {
+          "title": "401 jobs are requeued without a terminal attempt",
+          "body": "The permanent-error branch requeues unauthorized jobs forever because no terminal attempt is recorded.",
+          "severity": "risk",
+          "file": "src/jobs.py",
+          "line": 44
+        },
+        {
+          "title": "Registry file could not be inspected",
+          "body": "The registry file was not present/readable in the review checkout, so review tooling could not verify the mapping.",
+          "severity": "risk",
+          "file": "config/registry.json",
+          "line": null
+        }
+      ]
+    }
+  ],
+  "expected_issues": [
+    {
+      "id": "RETRY-LOOP",
+      "title": "Permanent failures retry forever",
+      "file": "src/jobs.py",
+      "line": 42,
+      "keywords": ["(?:401|4xx|permanent).{0,80}(?:requeue|retry|loop|terminal)"]
+    },
+    {
+      "id": "NEGATIVE-AGE",
+      "title": "Negative ages pass validation",
+      "file": "src/input.py",
+      "line": 18,
+      "keywords": ["negative age", "accepts? -1"]
+    }
+  ]
+}

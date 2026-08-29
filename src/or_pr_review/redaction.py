@@ -46,7 +46,11 @@ def redact(text: str, extra: list[str] | None = None) -> str:
 
 def looks_like_dotenv(text: str) -> bool:
     """Heuristic: a block of KEY=value lines that should not be logged."""
-    lines = [line for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    lines = [
+        line
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
     if len(lines) < 2:
         return False
     hits = sum(1 for line in lines if _ENV_LINE_RE.match(line))

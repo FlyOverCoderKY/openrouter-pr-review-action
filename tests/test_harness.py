@@ -12,6 +12,7 @@ from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.harness import (
     BLAST_RADIUS_NUDGE,
     BUDGET_EXHAUSTED_NOTICE,
+    DEADLINE_FINALIZE_NOTICE,
     DEFAULT_MAX_TOOL_TURNS,
     MAX_TOOL_TURNS,
     _assistant_record,
@@ -161,7 +162,7 @@ def test_anchor_gate_counts_lines_like_the_read_tools(tmp_path: Path) -> None:
 
     # Three tool-visible lines, but only one \n byte: U+2028 and a bare \r
     # also split under str.splitlines, which is how read_file/grep number.
-    (tmp_path / "odd.py").write_bytes("a b\rc\n".encode("utf-8"))
+    (tmp_path / "odd.py").write_bytes("a b\rc\n".encode())
     finding = Finding(
         title="cites the tool-visible last line", body="b", severity="risk",
         file="odd.py", line=3, model_id="m",
@@ -584,6 +585,91 @@ def test_malformed_finish_fails_open_after_single_retry() -> None:
     assert calls["n"] == 2
 
 
+def test_contradictory_resolution_gets_one_retry_then_converges() -> None:
+    from or_pr_review.loop import LedgerFinding, LoopState, apply_round
+
+    payloads: list[dict] = []
+    contradictory = (
+        '{"findings": [], "resolutions": ['
+        '{"id": "r1-1", "status": "fixed_incorrectly", '
+        '"note": "Actually fixed correctly in the current head."}]}'
+    )
+    consistent = (
+        '{"findings": [], "resolutions": ['
+        '{"id": "r1-1", "status": "fixed", '
+        '"note": "Fixed correctly in the current head."}]}'
+    )
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        content = contradictory if len(payloads) == 1 else consistent
+        return {"choices": [{"message": {"content": content}}]}
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "verify"}],
+        api_key="sk-test",
+        workspace=None,
+        max_tool_turns=0,
+        expect_resolutions=True,
+        expected_resolution_ids={"r1-1"},
+        chat=chat,
+    )
+
+    assert result.ok
+    assert len(payloads) == 2
+    assert "response_format" in payloads[1]
+    assert "note contradicts" in payloads[1]["messages"][-1]["content"]
+    assert result.resolutions[0].status == "fixed"
+
+    prior = LedgerFinding(
+        id="r1-1",
+        severity="bug",
+        file="src/app.py",
+        line=3,
+        title="Wrong enum",
+        evidence="The implementation selects the wrong enum.",
+        status="open",
+    )
+    outcome = apply_round(
+        LoopState(mode="verify", round_number=2, prior_findings=(prior,)),
+        [],
+        {resolution.id: resolution for resolution in result.resolutions},
+    )
+    assert outcome.ledger.findings == ()
+    assert outcome.open_issue_count == 0
+    assert outcome.open_bug_count == 0
+
+
+def test_repeated_resolution_contradiction_fails_visibly_after_retry() -> None:
+    calls = {"n": 0}
+    contradictory = (
+        '{"findings": [], "resolutions": ['
+        '{"id": "r1-1", "status": "fixed_incorrectly", '
+        '"note": "Actually fixed correctly in the current head."}]}'
+    )
+
+    def chat(_payload: dict) -> dict:
+        calls["n"] += 1
+        return {"choices": [{"message": {"content": contradictory}}]}
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "verify"}],
+        api_key="sk-test",
+        workspace=None,
+        max_tool_turns=0,
+        expect_resolutions=True,
+        expected_resolution_ids={"r1-1"},
+        chat=chat,
+    )
+
+    assert not result.ok
+    assert calls["n"] == 2
+    assert result.resolutions == []
+    assert "note contradicts" in (result.error or "")
+
+
 def _http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
     headers = email.message.Message()
     if retry_after:
@@ -710,6 +796,142 @@ def test_lane_salvages_after_midloop_failure(tmp_path: Path) -> None:
     assert result.salvaged is True
     assert result.requests == 3
     assert result.tool_rounds == 1
+
+
+def test_lane_wall_clock_forces_structured_finish_before_job_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR358 regression: a tool loop must not run until GitHub cancels the job."""
+    from or_pr_review import harness
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    now = {"value": 0.0}
+    payloads: list[dict] = []
+
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            # The first provider turn consumes the exploration budget.  A
+            # pre-fix lane would simply continue requesting tools.
+            now["value"] = 6.0
+            return _tool_reply()
+        assert "tools" not in payload
+        assert "response_format" in payload
+        assert payload["messages"][-1] == {
+            "role": "user",
+            "content": DEADLINE_FINALIZE_NOTICE,
+        }
+        now["value"] = 7.0
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        lane_timeout=10,
+    )
+    assert result.ok
+    assert result.salvaged is True
+    assert result.requests == 2
+    assert result.tool_rounds == 1
+    assert now["value"] < 10
+
+
+def test_deadline_finalize_transport_failure_keeps_one_repair_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    now = {"value": 0.0}
+    payloads: list[dict] = []
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            now["value"] = 6.0
+            return _tool_reply()
+        if len(payloads) == 2:
+            now["value"] = 8.0
+            raise LaneError("OpenRouter HTTP 429: retry later")
+        assert "tools" not in payload
+        assert "response_format" in payload
+        assert "protected finalize request failed" in payload["messages"][-1]["content"]
+        now["value"] = 9.0
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        lane_timeout=10,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.requests == 3
+    assert now["value"] < 10
+
+
+def test_http_retries_cannot_cross_lane_request_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import harness
+
+    now = {"value": 10.0}
+    observed_timeouts: list[float] = []
+
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        observed_timeouts.append(timeout)
+        now["value"] += timeout
+        raise TimeoutError("provider stalled")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    with pytest.raises(LaneError, match="request budget exhausted"):
+        harness.openrouter_chat(
+            "sk-test",
+            {"model": "m"},
+            timeout=180,
+            sleep=sleeps.append,
+            deadline=15.0,
+        )
+    assert observed_timeouts == [5.0]
+    assert sleeps == []
+
+
+def test_repository_tool_timeout_is_killed_and_returned_as_observation(
+    tmp_path: Path,
+) -> None:
+    from or_pr_review import harness
+
+    (tmp_path / "pathological.txt").write_text(
+        "a" * 30_000 + "!\n", encoding="utf-8"
+    )
+    call = {
+        "id": "tool-1",
+        "function": {
+            "name": "grep",
+            "arguments": '{"pattern": "(a+)+$", "path": "pathological.txt"}',
+        },
+    }
+    started = harness.time.monotonic()
+    observation = harness._run_one_tool(
+        tmp_path, call, deadline=started + 0.25
+    )
+    assert observation["tool_call_id"] == "tool-1"
+    assert "exceeded its" in observation["content"]
+    assert "deadline" in observation["content"]
+    assert harness.time.monotonic() - started < 5
 
 
 def test_salvage_shrinks_old_observations_on_context_overflow(tmp_path: Path) -> None:

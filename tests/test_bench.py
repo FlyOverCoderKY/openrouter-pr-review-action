@@ -7,17 +7,21 @@ import pytest
 
 from or_pr_review.bench import (
     Adjudication,
+    JudgeFixture,
     Label,
     collected_from_fixture,
     load_fixture,
+    load_judge_fixture,
     main,
     match_finding,
+    score_judge_output,
     score_run,
 )
 from or_pr_review.errors import ActionError
 from or_pr_review.prompt import build_messages, changed_paths_from_diff
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "bench" / "fixtures" / "planted-mini"
+JUDGE_FIXTURE_DIR = Path(__file__).resolve().parent.parent / "bench" / "judge-fixtures"
 
 
 def test_planted_fixture_loads_and_builds_messages() -> None:
@@ -42,23 +46,36 @@ def test_planted_fixture_loads_and_builds_messages() -> None:
     # Semantic containment: the file/repo labels must be UNMATCHABLE from the
     # diff alone — including via hunk headers — and must not cross-credit
     # correct diff-stratum findings (the exact vectors the self-review found).
-    diff_finding = {"file": "calc.py", "title": "quotes the diff", "body": fixture.diff, "severity": "risk"}
+    diff_finding = {
+        "file": "calc.py",
+        "title": "quotes the diff",
+        "body": fixture.diff,
+        "severity": "risk",
+    }
     for lid in ("F1", "R6"):
-        label = next(l for l in fixture.labels if l.id == lid)
+        label = next(item for item in fixture.labels if item.id == lid)
         assert not match_finding(diff_finding, label), lid
         assert not match_finding({**diff_finding, "file": None}, label), lid
-    f1 = next(l for l in fixture.labels if l.id == "F1")
+    f1 = next(item for item in fixture.labels if item.id == "F1")
     b2_confounder = {
-        "file": "calc.py", "severity": "bug",
+        "file": "calc.py",
+        "severity": "bug",
         "title": "apply_cap raises KeyError for unsupported years",
-        "body": "Year validation is missing or out of sync: caps has only 2026 and 2027 and other years crash despite the docstring.",
+        "body": (
+            "Year validation is missing or out of sync: caps has only 2026 and "
+            "2027 and other years crash despite the docstring."
+        ),
     }
     assert not match_finding(b2_confounder, f1)
-    r6 = next(l for l in fixture.labels if l.id == "R6")
+    r6 = next(item for item in fixture.labels if item.id == "R6")
     default_confounder = {
-        "file": "calc.py", "severity": "nit",
+        "file": "calc.py",
+        "severity": "nit",
         "title": "apply_cap default year stays 2026",
-        "body": "Callers relying on the default get 2026 caps. Falsification: checked report.py, rules.py, tests.",
+        "body": (
+            "Callers relying on the default get 2026 caps. Falsification: checked "
+            "report.py, rules.py, tests."
+        ),
     }
     assert not match_finding(default_confounder, r6)
     # Bare-symbol mentions with unrelated semantics must not credit either
@@ -76,15 +93,25 @@ def test_planted_fixture_loads_and_builds_messages() -> None:
         f1,
     )
     assert match_finding(
-        {"file": "calc.py", "severity": "risk",
-         "title": "Year gate out of date",
-         "body": "SUPPORTED_YEARS still lists only 2026, so validate_year rejects 2027 even though apply_cap now supports it."},
+        {
+            "file": "calc.py",
+            "severity": "risk",
+            "title": "Year gate out of date",
+            "body": (
+                "SUPPORTED_YEARS still lists only 2026, so validate_year rejects "
+                "2027 even though apply_cap now supports it."
+            ),
+        },
         f1,
     )
     genuine_r6 = {
-        "file": "report.py", "severity": "risk",
+        "file": "report.py",
+        "severity": "risk",
         "title": "annual_report caps with the default year",
-        "body": "annual_report ignores its year argument when capping: apply_cap uses the default 2026 even for year=2027.",
+        "body": (
+            "annual_report ignores its year argument when capping: apply_cap uses "
+            "the default 2026 even for year=2027."
+        ),
     }
     assert match_finding(genuine_r6, r6)
     # The fixture must not coach its own plants: no fourth-wall language.
@@ -224,7 +251,8 @@ def test_clean_twin_fixture_loads_with_zero_labels() -> None:
     # The clean twin fixes the plants: sourced 2027 dollar, year guard,
     # kept validation, docs row present, consistent id spelling.
     assert "8_550" in fixture.diff
-    assert (fixture.checkout / "docs" / "rules.md").read_text(encoding="utf-8").count("hsa-cap-") >= 2
+    rules = (fixture.checkout / "docs" / "rules.md").read_text(encoding="utf-8")
+    assert rules.count("hsa-cap-") >= 2
     assert "modelled" not in fixture.diff
     # Scoring a clean fixture: every finding is a noise candidate.
     score = score_run(
@@ -407,7 +435,12 @@ def test_cmd_score_reports_means_and_skips_failed_runs(
         "ok": True,
         "findings": [
             {"file": "a.py", "title": "KeyError", "body": "", "severity": "bug"},
-            {"file": "docs/map.md", "title": "inventory row absent", "body": "", "severity": "risk"},
+            {
+                "file": "docs/map.md",
+                "title": "inventory row absent",
+                "body": "",
+                "severity": "risk",
+            },
             {"file": "b.py", "title": "Missing docstring", "body": "", "severity": "nit"},
             {"file": "c.py", "title": "mystery", "body": "", "severity": "nit"},
         ],
@@ -445,3 +478,421 @@ def test_cmd_score_clean_fixture_reports_noise(
     printed = capsys.readouterr().out
     assert "clean fixture (no labels): the noise column is the score" in printed
     assert "| 1/1 | 1" in printed  # noise 1/1, findings 1
+
+
+def _expected_judge_output(fixture: JudgeFixture) -> list[dict]:
+    return [
+        {
+            "title": expected.title,
+            "body": expected.keywords[0],
+            "severity": "risk",
+            "file": expected.file,
+            "line": expected.line,
+            "models": ["synthetic/reviewer-a"],
+        }
+        for expected in fixture.expected_issues
+    ]
+
+
+def test_committed_judge_fixtures_cover_ab_abc_and_hygiene_cases() -> None:
+    fixtures = {
+        path.stem: load_judge_fixture(path)
+        for path in sorted(JUDGE_FIXTURE_DIR.glob("*.json"))
+    }
+    assert set(fixtures) == {
+        "ab-clean-diagnostics",
+        "ab-duplicates-complements",
+        "abc-conflicts-minority",
+    }
+    assert len(fixtures["ab-duplicates-complements"].lanes) == 2
+    abc = fixtures["abc-conflicts-minority"]
+    assert len(abc.lanes) == 3
+    assert sum(issue.recall_critical for issue in abc.expected_issues) == 1
+    exact_anchor = [
+        finding
+        for lane in abc.lanes
+        for finding in lane["findings"]
+        if finding["title"] == "Missing validation"
+        and finding["file"] == "src/api.py"
+        and finding["line"] == 42
+    ]
+    assert len(exact_anchor) == 2
+    assert "negative age" in exact_anchor[0]["body"]
+    assert "unauthorized account" in exact_anchor[1]["body"]
+    clean = fixtures["ab-clean-diagnostics"]
+    assert clean.expected_verdict == "clean"
+    assert clean.expected_issues == ()
+
+
+def test_judge_fixtures_exercise_production_hygiene_offline() -> None:
+    from or_pr_review.bench import _merged_issue_dict
+    from or_pr_review.judge import deterministic_union, partition_reviewable_lanes
+
+    clean = load_judge_fixture(JUDGE_FIXTURE_DIR / "ab-clean-diagnostics.json")
+    clean_lanes, clean_diagnostics = partition_reviewable_lanes(list(clean.lanes))
+    assert len(clean_diagnostics) == 2
+    assert deterministic_union(clean_lanes) == []
+    assert score_judge_output([], clean).verdict_correct
+
+    abc = load_judge_fixture(JUDGE_FIXTURE_DIR / "abc-conflicts-minority.json")
+    abc_lanes, abc_diagnostics = partition_reviewable_lanes(list(abc.lanes))
+    assert len(abc_diagnostics) == 1
+    baseline = [_merged_issue_dict(issue) for issue in deterministic_union(abc_lanes)]
+    score = score_judge_output(baseline, abc)
+    assert score.recall == 1.0  # fallback preserves the minority issue
+    assert score.critical_hit == score.critical_total == 1
+    assert score.duplicate_count >= 1  # semantic merging is where the LLM adds value
+    assert sum(
+        issue["title"] == "Missing validation"
+        and issue["file"] == "src/api.py"
+        and issue["line"] == 42
+        for issue in baseline
+    ) == 2
+
+
+def test_judge_scorer_reports_recall_precision_duplicates_and_verdict() -> None:
+    fixture = load_judge_fixture(JUDGE_FIXTURE_DIR / "ab-duplicates-complements.json")
+    issues = _expected_judge_output(fixture)
+    # A second rendering of the retry issue is a duplicate. The unrelated
+    # tool limitation is unsupported/noise rather than another code issue.
+    issues.extend(
+        [
+            {
+                "title": "401 retry loop remains",
+                "body": "A permanent 401 is requeued forever.",
+                "severity": "bug",
+                "file": "src/jobs.py",
+                "line": 44,
+                "models": ["synthetic/reviewer-b"],
+            },
+            {
+                "title": "Registry could not be inspected",
+                "body": "Review tooling failed.",
+                "severity": "risk",
+                "file": "config/registry.json",
+                "line": None,
+                "models": ["synthetic/reviewer-b"],
+            },
+        ]
+    )
+    score = score_judge_output(issues, fixture)
+    assert score.recall == 1.0
+    assert score.precision == 0.5
+    assert score.duplicate_count == 1
+    assert score.duplicate_rate == 0.25
+    assert score.unmatched_titles == ("Registry could not be inspected",)
+    assert score.verdict_correct
+
+
+def test_judge_scorer_uses_one_to_one_matching_and_tracks_critical_recall() -> None:
+    fixture = load_judge_fixture(JUDGE_FIXTURE_DIR / "abc-conflicts-minority.json")
+    issues = _expected_judge_output(fixture)
+    critical = next(issue for issue in fixture.expected_issues if issue.recall_critical)
+    issues = [issue for issue in issues if issue["title"] != critical.title]
+    score = score_judge_output(issues, fixture)
+    assert score.recall == 7 / 8
+    assert score.critical_hit == 0
+    assert score.critical_total == 1
+    assert score.missed_ids == ("AUTH-AFTER-CACHE",)
+
+    # One broad row mentioning both retry symptoms can cover only one of the
+    # two distinct expected defects at the same location.
+    retries_only = [
+        {
+            "title": "Retry policy mishandles 404 and 503",
+            "body": "Permanent 404 is retried while transient 503 is not retried.",
+            "severity": "risk",
+            "file": "src/client.py",
+            "line": 72,
+            "models": ["synthetic/reviewer-a"],
+        }
+    ]
+    broad_score = score_judge_output(retries_only, fixture)
+    assert broad_score.true_positive_count == 1
+
+    # Exact title/file/line equality is not enough to merge: these are two
+    # distinct behaviors and one combined output must lose recall.
+    same_anchor_ids = {"NEGATIVE-AGE-API", "UNAUTHORIZED-ACCOUNT-API"}
+    other_issues = [
+        issue
+        for issue, expected in zip(
+            _expected_judge_output(fixture), fixture.expected_issues, strict=True
+        )
+        if expected.id not in same_anchor_ids
+    ]
+    overmerged = {
+        "title": "Missing validation",
+        "body": (
+            "Negative age=-1 is accepted, and an account_id owned by another user "
+            "is accepted without authorization."
+        ),
+        "severity": "bug",
+        "file": "src/api.py",
+        "line": 42,
+        "models": ["synthetic/reviewer-a", "synthetic/reviewer-b"],
+    }
+    overmerge_score = score_judge_output([*other_issues, overmerged], fixture)
+    assert overmerge_score.recall == 7 / 8
+    assert len(overmerge_score.missed_ids) == 1
+    assert overmerge_score.missed_ids[0] in same_anchor_ids
+
+
+def test_judge_clean_fixture_scores_false_issue_and_verdict() -> None:
+    fixture = load_judge_fixture(JUDGE_FIXTURE_DIR / "ab-clean-diagnostics.json")
+    clean = score_judge_output([], fixture)
+    assert clean.precision == clean.recall == 1.0
+    assert clean.verdict_correct
+    noisy = score_judge_output(
+        [{"title": "tool failed", "body": "", "file": None, "line": None}], fixture
+    )
+    assert noisy.precision == 0.0
+    assert noisy.recall == 1.0  # zero labels; noise is measured by precision/verdict
+    assert not noisy.verdict_correct
+
+
+def test_judge_run_is_double_gated_before_any_live_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    called = False
+
+    def fake_judge(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("must not call")
+
+    monkeypatch.setattr(bench_mod, "run_llm_judge", fake_judge)
+    fixture = JUDGE_FIXTURE_DIR / "ab-duplicates-complements.json"
+    out = tmp_path / "out"
+    assert main(["judge-run", str(fixture), "--out", str(out)]) == 1
+    assert not called
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert (
+        main(
+            [
+                "judge-run",
+                str(fixture),
+                "--out",
+                str(out),
+                "--allow-spend",
+            ]
+        )
+        == 1
+    )
+    assert not called
+
+
+def test_judge_run_records_repeatability_metadata_without_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import bench as bench_mod
+    from or_pr_review.merge import MergedIssue
+
+    calls = []
+
+    def fake_judge(**kwargs):
+        calls.append(kwargs)
+        return (
+            [
+                MergedIssue(
+                    title="Permanent failures retry forever",
+                    body="A permanent 401 requeues forever.",
+                    severity="bug",
+                    file="src/jobs.py",
+                    line=42,
+                    models=["synthetic/reviewer-a", "synthetic/reviewer-b"],
+                )
+            ],
+            "merged",
+            0.000123,
+        )
+
+    monkeypatch.setattr(bench_mod, "run_llm_judge", fake_judge)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-secret-must-not-be-recorded")
+    fixture = JUDGE_FIXTURE_DIR / "ab-duplicates-complements.json"
+    out = tmp_path / "out"
+    assert (
+        main(
+            [
+                "judge-run",
+                str(fixture),
+                "--models",
+                "google/gemini-3.1-flash-lite,openai/gpt-5.6-luna",
+                "--runs",
+                "1",
+                "--out",
+                str(out),
+                "--allow-spend",
+            ]
+        )
+        == 0
+    )
+    assert [call["model"] for call in calls] == [
+        "google/gemini-3.1-flash-lite",
+        "openai/gpt-5.6-luna",
+    ]
+    results = sorted(out.glob("judge-*.json"))
+    assert len(results) == 2
+    for result in results:
+        text = result.read_text(encoding="utf-8")
+        assert "sk-secret" not in text
+        payload = json.loads(text)
+        assert payload["fixture_sha256"]
+        assert payload["prompt_sha256"]
+        assert payload["harness_version"]
+        assert payload["production_default_judge"] == "google/gemini-3.1-flash-lite"
+        assert payload["cost_usd"] == 0.000123
+
+
+def test_judge_run_preflights_all_output_paths_before_first_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    calls = []
+    monkeypatch.setattr(bench_mod, "run_llm_judge", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    fixture = JUDGE_FIXTURE_DIR / "ab-duplicates-complements.json"
+
+    # The second model's output already exists. A sequential preflight would
+    # spend on Gemini before noticing it; the complete matrix must abort first.
+    out = tmp_path / "existing-later"
+    out.mkdir()
+    (out / "judge-ab-duplicates-complements-openai-gpt-5.6-luna-run-0.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    assert (
+        main(
+            [
+                "judge-run",
+                str(fixture),
+                "--models",
+                "google/gemini-3.1-flash-lite,openai/gpt-5.6-luna",
+                "--runs",
+                "1",
+                "--out",
+                str(out),
+                "--allow-spend",
+            ]
+        )
+        == 1
+    )
+    assert calls == []
+
+    # Distinct valid slugs can sanitize to the same filename. Reject the
+    # collision before creating the output directory or making a call.
+    collision_out = tmp_path / "sanitized-collision"
+    assert (
+        main(
+            [
+                "judge-run",
+                str(fixture),
+                "--models",
+                "vendor/a:b,vendor-a/b",
+                "--runs",
+                "1",
+                "--out",
+                str(collision_out),
+                "--allow-spend",
+            ]
+        )
+        == 1
+    )
+    assert not collision_out.exists()
+    assert calls == []
+
+
+def test_judge_run_caps_runs_before_directory_creation_or_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    calls = []
+    monkeypatch.setattr(bench_mod, "run_llm_judge", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    out = tmp_path / "too-many-runs"
+    assert (
+        main(
+            [
+                "judge-run",
+                str(JUDGE_FIXTURE_DIR / "ab-duplicates-complements.json"),
+                "--runs",
+                "21",
+                "--out",
+                str(out),
+                "--allow-spend",
+            ]
+        )
+        == 1
+    )
+    assert calls == []
+    assert not out.exists()
+
+
+def test_judge_run_redacts_failed_call_in_console_and_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    secret = "sk-or-v1-do-not-leak"
+
+    def fail_judge(**kwargs):
+        raise ActionError(f"upstream rejected api_key={secret}")
+
+    monkeypatch.setattr(bench_mod, "run_llm_judge", fail_judge)
+    monkeypatch.setenv("OPENROUTER_API_KEY", secret)
+    out = tmp_path / "failed"
+    assert (
+        main(
+            [
+                "judge-run",
+                str(JUDGE_FIXTURE_DIR / "ab-duplicates-complements.json"),
+                "--runs",
+                "1",
+                "--out",
+                str(out),
+                "--allow-spend",
+            ]
+        )
+        == 1
+    )
+    printed = capsys.readouterr()
+    assert secret not in printed.out
+    assert secret not in printed.err
+    result = next(out.glob("judge-*.json"))
+    text = result.read_text(encoding="utf-8")
+    assert secret not in text
+    assert "[redacted]" in text
+
+
+def test_judge_score_command_is_offline_and_rejects_fixture_drift(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fixture_path = JUDGE_FIXTURE_DIR / "abc-conflicts-minority.json"
+    fixture = load_judge_fixture(fixture_path)
+    result = tmp_path / "judge-saved.json"
+    result.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "fixture_sha256": fixture.sha256,
+                "model": "saved/test-model",
+                "mode": "merged",
+                "elapsed_ms": 12,
+                "issues": _expected_judge_output(fixture),
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["judge-score", str(fixture_path), str(result)]) == 0
+    printed = capsys.readouterr().out
+    assert "8/8 | 8/8 | 0/8 | 1/1 | yes (issues)" in printed
+    assert "mean recall: 100.0%" in printed
+
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    payload["fixture_sha256"] = "0" * 64
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    assert main(["judge-score", str(fixture_path), str(result)]) == 1

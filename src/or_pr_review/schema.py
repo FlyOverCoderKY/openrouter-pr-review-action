@@ -82,8 +82,23 @@ def findings_json_schema(
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "status": {"type": "string", "enum": list(RESOLUTION_STATUSES)},
-                    "note": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": list(RESOLUTION_STATUSES),
+                        "description": (
+                            "Authoritative disposition. fixed means fully fixed; not_fixed "
+                            "means the original issue remains; fixed_incorrectly means an "
+                            "attempted fix is wrong or incomplete; disputed means the original "
+                            "finding is invalid or intentionally accepted."
+                        ),
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": (
+                            "Evidence for the selected status. It must agree with status and "
+                            "must not state a different disposition."
+                        ),
+                    },
                 },
                 "required": ["id", "status", "note"],
                 "additionalProperties": False,
@@ -340,9 +355,63 @@ def _parse_resolutions(raw: object, *, required: bool) -> list[Resolution]:
         note = item.get("note")
         if note is not None and not isinstance(note, str):
             raise LaneError(f"resolutions[{index}].note must be a string or null")
-        note_text = (note or "").strip()[:MAX_RESOLUTION_NOTE]
+        try:
+            note_text = validate_resolution_note(status, (note or "").strip())
+        except LaneError as exc:
+            raise LaneError(
+                f"resolutions[{index}] for {ident.strip()!r} is inconsistent: {exc}"
+            ) from exc
         resolutions.append(Resolution(id=ident.strip(), status=status, note=note_text))
     return resolutions
+
+
+_LEADING_DISPOSITION_RE = re.compile(
+    r"^(?:actually\s+)?(?:(?P<prefix>(?:(?:the\s+)?(?:finding|issue|bug|risk|problem|"
+    r"fix|change|implementation)|it|this)\s+(?:is|was|remains)\s+|"
+    r"(?:status|verdict|resolution)\s*:\s*))?[\s`*_~-]*"
+    r"(?P<disposition>fixed[\s_-]+incorrectly|fixed[\s_-]+correctly|not[\s_-]+fixed|"
+    r"disputed|fixed)\b",
+    re.IGNORECASE,
+)
+_DISPOSITION_ALIASES = {
+    "fixed": "fixed",
+    "fixed correctly": "fixed",
+    "not fixed": "not_fixed",
+    "fixed incorrectly": "fixed_incorrectly",
+    "disputed": "disputed",
+}
+
+
+def validate_resolution_note(status: str, note: str) -> str:
+    """Reject an explicit prose disposition that disagrees with ``status``.
+
+    Models occasionally emit an authoritative enum and then start the note
+    with a different verdict (for example, ``fixed_incorrectly`` plus
+    "Actually fixed correctly"). Silently choosing either half can keep a
+    fixed finding open or close a genuinely open one. Only an explicit leading
+    disposition is inspected; a conflict fails validation so the harness can
+    request one schema-enforced correction without inferring either verdict.
+    """
+    text = note.strip()[:MAX_RESOLUTION_NOTE]
+    if not text:
+        return ""
+    match = _LEADING_DISPOSITION_RE.match(text)
+    if match is None:
+        return text
+    declared = match.group("disposition").lower().replace("_", " ").replace("-", " ")
+    declared = re.sub(r"\s+", " ", declared).strip()
+    # A leading verb such as "Fixed the unit tests, but the production race
+    # remains" is supporting evidence, not a second structured disposition.
+    # Bare ``fixed`` is authoritative only in an explicit subject/status form;
+    # the qualified canonical phrases remain unambiguous without a prefix.
+    if declared == "fixed" and match.group("prefix") is None:
+        return text
+    if _DISPOSITION_ALIASES.get(declared) == status:
+        return text
+    raise LaneError(
+        "resolution note contradicts its authoritative structured status: "
+        f"status is {status!r}, but the note declares {declared!r}"
+    )
 
 
 def validate_coverage(

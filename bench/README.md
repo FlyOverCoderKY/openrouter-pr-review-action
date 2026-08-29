@@ -102,3 +102,71 @@ would, and refuses `--out` under committed `bench/fixtures/` unless
 Then curate `labels.json` from the PR's adjudicated findings (every
 reviewer's validated true positives — including findings the lane under test
 originally missed).
+
+## Merge-judge A/B and A/B/C benchmark
+
+`bench/judge-fixtures/` is a separate, fully synthetic test suite for the
+multi-lane merge judge. It does not contain repository code or held-out task
+data. The committed sets exercise:
+
+- duplicate reports plus complementary valid findings;
+- distinct, superficially conflicting defects at the same location;
+- unsupported review-tool/checkout failures that must remain diagnostics;
+- a recall-critical finding reported only by the minority C lane; and
+- a clean verdict when every lane item is an environmental diagnostic.
+
+Scoring is deterministic and offline. A result JSON needs only an `issues`
+array; live-run metadata is optional:
+
+```bash
+python -m or_pr_review.bench judge-score \
+  bench/judge-fixtures/abc-conflicts-minority.json saved-result.json
+```
+
+The score reports issue-level precision and recall using one-to-one matching,
+duplicate rate, minority/critical recall, and verdict correctness. One broad
+merged row cannot earn recall for several expected issues. Results produced
+from a different fixture revision are rejected by SHA-256 instead of being
+silently mixed.
+
+### Opt-in live model comparison
+
+`judge-run` is the only paid judge-benchmark command. It makes no request
+unless **both** `--allow-spend` is present and `OPENROUTER_API_KEY` is set.
+Use a new output directory per experiment; existing result filenames are
+never overwritten. The complete model/run output matrix is collision-checked
+before the first request, and `--runs` has a hard safety cap of 20.
+
+```bash
+export OPENROUTER_API_KEY=...
+python -m or_pr_review.bench judge-run \
+  bench/judge-fixtures/abc-conflicts-minority.json \
+  --models google/gemini-3.1-flash-lite,openai/gpt-5.6-luna \
+  --runs 5 --out /tmp/judge-abc-20260829 --allow-spend
+python -m or_pr_review.bench judge-score \
+  bench/judge-fixtures/abc-conflicts-minority.json \
+  /tmp/judge-abc-20260829
+```
+
+Run every candidate against all three fixtures, at least 3 runs for a quick
+screen and 5 before changing production. The saved record includes model,
+fixture and prompt hashes, harness version, UTC start, latency, judge repair
+mode, OpenRouter response/provider identifiers, token counts, and reported
+cost; it never stores the API key or raw response. Compare final metrics
+and repair mode: two models can both finish at 100% after recall-safe repair,
+while the one that reaches `merged` without splits/restores is the better
+clerical judge.
+
+The production default is currently `google/gemini-3.1-flash-lite`. Exact
+OpenRouter slugs verified on 2026-08-29 for the first fast-model screen are:
+
+- `openai/gpt-5.6-luna` — the requested Luna candidate and the first model to
+  compare with the current default;
+- `openai/gpt-5.4-mini` — a useful same-vendor control; and
+- `anthropic/claude-haiku-4.5` — a cross-vendor fast control.
+
+OpenRouter's catalogue changes, so re-check availability and structured-output
+support before spending on a later experiment. The synthetic acceptance bar
+is intentionally strict: 100% recall (including critical recall), 100%
+precision, 0% duplicates, and 100% verdict accuracy. Cost and latency break
+ties; they do not excuse a recall miss.

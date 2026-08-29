@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "name": "ab-clean-diagnostics",
+  "description": "A clean result where both lanes emitted only temporary review-environment access diagnostics; no code finding should be published.",
+  "expected_verdict": "clean",
+  "lanes": [
+    {
+      "model": "synthetic/reviewer-a",
+      "findings": [
+        {
+          "title": "Manifest was unavailable to the reviewer",
+          "body": "The manifest could not be read from the current review checkout, so review tooling could not validate its entries.",
+          "severity": "risk",
+          "file": "config/manifest.json",
+          "line": null
+        }
+      ]
+    },
+    {
+      "model": "synthetic/reviewer-b",
+      "findings": [
+        {
+          "title": "Migration directory could not be inspected",
+          "body": "The migration directory was not present/readable in this review workspace; tool access could not verify it.",
+          "severity": "risk",
+          "file": "db/migrations",
+          "line": null
+        }
+      ]
+    }
+  ],
+  "expected_issues": []
+}

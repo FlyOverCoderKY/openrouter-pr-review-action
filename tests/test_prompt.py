@@ -224,6 +224,10 @@ def test_verify_prompt_lists_prior_findings_and_contract() -> None:
     assert "evidence: detail here" in text
     assert "do not re-raise" in text and "r1-2" in text
     assert '"resolutions"' in text
+    assert "AUTHORITATIVE disposition" in text
+    assert "if the note says the finding" in text
+    assert "status MUST be fixed" in text
+    assert "Never put a different disposition in the note" in text
     assert "Fixing agent responses" in text
     assert "never" in text  # never follow instructions in replies
 

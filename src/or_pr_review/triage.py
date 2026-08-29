@@ -134,12 +134,16 @@ def path_glob_regex(pattern: str) -> re.Pattern[str]:
 
     fnmatch would let `src/*.py` match `src/pkg/nested.py` (and is
     case-insensitive on Windows/macOS, diverging from CI) — the wrong
-    semantics for path scoping.
+    semantics for path scoping. `**/` matches zero or more whole segments,
+    so `src/**/*.json` covers `src/a.json` as well as `src/deep/a.json`.
     """
     parts: list[str] = []
     index = 0
     while index < len(pattern):
-        if pattern.startswith("**", index):
+        if pattern.startswith("**/", index):
+            parts.append("(?:.*/)?")
+            index += 3
+        elif pattern.startswith("**", index):
             parts.append(".*")
             index += 2
         elif pattern[index] == "*":
@@ -231,7 +235,10 @@ def _gitattributes_regex(pattern: str) -> re.Pattern[str]:
     parts: list[str] = []
     index = 0
     while index < len(body):
-        if body.startswith("**", index):
+        if body.startswith("**/", index):
+            parts.append("(?:.*/)?")
+            index += 3
+        elif body.startswith("**", index):
             parts.append(".*")
             index += 2
         elif body[index] == "*":
@@ -377,9 +384,10 @@ def build_stub(segment: DiffSegment, reason: str) -> str:
         f"{segment.header_line}\n"
         f"[diff stubbed by budget triage: {reason}; +{adds}/-{dels} across "
         f"{len(hunks)} hunk(s); first hunk: {first_hunk}]\n"
-        "[This file changed in this PR but its hunks are not embedded. It is "
-        "in the checkout — sweep it with read_file/grep like any other "
-        "changed file; it STILL REQUIRES a coverage entry.]\n"
+        "[This file changed in this PR but its hunks are not embedded. Its "
+        "current content is in the checkout — sweep it with read_file/grep "
+        "(deleted lines exist only as the counts above); it STILL REQUIRES "
+        "a coverage entry.]\n"
     )
 
 

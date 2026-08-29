@@ -340,3 +340,21 @@ def test_omitted_marker_falls_back_to_count_for_long_paths() -> None:
     assert truncation.dropped_files
     assert "omitted entirely]" in truncation.text
     assert len(truncation.text.encode("utf-8")) <= 1024
+
+
+def test_double_star_slash_matches_zero_segments() -> None:
+    # The documented generated_paths example shape: src/data/**/*.json must
+    # match direct children as well as nested paths.
+    regex = path_glob_regex("src/data/**/*.json")
+    assert regex.match("src/data/snapshot.json")
+    assert regex.match("src/data/ground-truth/foo.json")
+    assert not regex.match("src/data/foo.jsonl")
+    leading = path_glob_regex("**/*.lock")
+    assert leading.match("root.lock")
+    assert leading.match("a/b/deep.lock")
+
+
+def test_gitattributes_double_star_slash_matches_zero_segments() -> None:
+    rules = parse_gitattributes("src/**/generated/*.json linguist-generated\n")
+    assert classify_generated("src/generated/a.json", attr_rules=rules)
+    assert classify_generated("src/x/y/generated/a.json", attr_rules=rules)

@@ -520,21 +520,39 @@ def _collect(env: dict[str, str]) -> CollectedReview:
 
 
 def _gitattributes_text(env: dict[str, str]) -> str:
-    """Best-effort .gitattributes from the workflow's checkout, for triage.
+    """Best-effort .gitattributes AT THE REVIEWED COMMIT, for triage.
 
-    The linguist rules only shift packing priority of an over-budget diff —
-    a missing or slightly stale file can never remove anything from review —
-    so reading the workflow checkout (which may trail the PR head by one
-    push) is acceptable.
+    `git show <head>:.gitattributes` against the workflow checkout's object
+    store pins the read to the reviewed commit and fails soft (empty string,
+    heuristics-only packing) in any checkout that does not contain that
+    commit — e.g. the reusable workflow's judge job, which checks out only
+    this action's repository and must not parse a foreign .gitattributes.
+
+    Trust note: .gitattributes is repository content, so on a PR it is
+    contributor-controlled. Honoring linguist-generated is still strictly
+    safer than the pre-triage behavior it replaces: a demoted file keeps its
+    stub, its coverage obligation, and tool access, while under the raw byte
+    cut an attacker could push hand-written code beyond the cutoff entirely
+    (no stub, no coverage, permanent partial). Demotion can never remove a
+    file from review.
     """
+    import subprocess
+
     root = _source_root(env)
-    if root is None:
+    head = (env.get("HEAD_SHA") or env.get("EVENT_AFTER") or "").strip()
+    if root is None or not head:
         return ""
-    path = root / ".gitattributes"
     try:
-        return path.read_text(encoding="utf-8") if path.is_file() else ""
-    except OSError:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "show", f"{head}:.gitattributes"],
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or b"").decode("utf-8", errors="replace")
 
 
 def _source_root(env: dict[str, str]) -> Path | None:
@@ -554,7 +572,14 @@ def _prepare_workspace(env: dict[str, str], collected: CollectedReview, work: Pa
     if dest.exists() and any(dest.iterdir()):
         return dest
     try:
-        return materialize_commit(source, collected.head_sha, dest)
+        # Stubbed files carry a tool-readability contract, so they may exceed
+        # the normal materialization cap (bounded by the oversized ceiling).
+        return materialize_commit(
+            source,
+            collected.head_sha,
+            dest,
+            oversized_ok=frozenset(collected.truncation.stubbed_files),
+        )
     except ActionError as exc:
         # Fail closed: the prompt mandates blast-radius tool use, so a
         # silently tool-less run could post an unmarked glance review.
@@ -639,10 +664,21 @@ def _finish(
     # Diff-budget triage: stub-only truncation (every changed file embedded
     # or stubbed) does not force partial — only dropped files or a raw byte
     # cut do, so dense PRs keep verdicts, ledger publication, and loop
-    # continuity.
+    # continuity. The stub contract is that TOOLS sweep the stubbed files,
+    # so a tool-less run cannot honor it: stubs + max_tool_turns=0 stays a
+    # partial review.
+    truncation_partial = collected.truncation.forces_partial
+    if collected.truncation.stubbed_files and parse_max_tool_turns(env.get("MAX_TOOL_TURNS")) == 0:
+        truncation_partial = True
+        notices.append(
+            "Diff-budget triage stubbed "
+            f"{len(collected.truncation.stubbed_files)} file(s) but tools are "
+            "disabled (max_tool_turns: 0), so the stubbed files could not be "
+            "swept. This review is partial."
+        )
     verdict = decide_verdict(
         issues=issues,
-        truncated=collected.truncation.forces_partial,
+        truncated=truncation_partial,
         successful_lanes=len(successful),
         fallback=collected.plan.fallback_notice is not None,
         stale=stale_notice is not None,

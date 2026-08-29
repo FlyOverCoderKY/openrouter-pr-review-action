@@ -317,7 +317,7 @@ def collected_from_fixture(
             fixture.diff,
             max_diff_kb,
             gitattributes_text=(
-                gitattributes.read_text(encoding="utf-8")
+                gitattributes.read_text(encoding="utf-8", errors="replace")
                 if gitattributes.is_file()
                 else ""
             ),

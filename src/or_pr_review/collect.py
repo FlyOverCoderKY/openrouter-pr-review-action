@@ -97,13 +97,15 @@ class Truncation:
             return (
                 f"The diff is {self.original_bytes / 1024:.1f} KB against a "
                 f"{self.max_diff_kb} KB embed budget (max_diff_kb). Diff-budget "
-                f"triage embedded {self.embedded_bytes / 1024:.1f} KB: "
-                f"{len(self.stubbed_files)} file(s) are stubs (header, +/- "
-                "counts, and first hunk only). Every stubbed file is in the "
-                "checkout and readable with the tools; each one still requires "
-                "a full sweep and its own coverage entry. No changed file was "
-                "dropped, so with the stub accounting this review still covers "
-                "every changed file."
+                f"triage embedded {self.embedded_bytes / 1024:.1f} KB; "
+                f"{len(self.stubbed_files)} file(s) kept only a stub — diff "
+                "header, +/- counts, and a first-hunk reference, with no "
+                f"reviewable hunks: {self._stub_names()}. Each stubbed file's "
+                "current content is in the checkout for the read-only tools "
+                "(deleted-line specifics exist only as counts), and each one "
+                "still requires a full sweep and its own coverage entry. No "
+                "changed file was dropped, so with the stub accounting this "
+                "review still covers every changed file."
             )
         if self.dropped_files:
             return (
@@ -121,6 +123,12 @@ class Truncation:
             "Later files/hunks are missing. This review is a partial verdict and "
             "must not be treated as clean."
         )
+
+    def _stub_names(self) -> str:
+        named = ", ".join(f"`{path}`" for path in self.stubbed_files[:15])
+        if len(self.stubbed_files) > 15:
+            named += f" (+{len(self.stubbed_files) - 15} more)"
+        return named
 
 
 @dataclass(frozen=True)

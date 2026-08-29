@@ -142,3 +142,40 @@ def test_materialize_commit_writes_full_manifest_despite_skips(tmp_path):
     assert (dest / "small.py").is_file()
     manifest = tracked_paths(dest)
     assert manifest == {"small.py", "big.bin"}
+
+
+def test_materialize_commit_allows_oversized_stubbed_files(tmp_path):
+    import subprocess
+
+    from or_pr_review.workspace import materialize_commit, tool_grep, tool_read_file
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=T",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=repo, check=True, capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    # Over the 1MB default cap; the class of file diff-budget triage stubs.
+    (repo / "snapshot.json").write_text(
+        '{"needle": "rgorg-plant"}' + "x" * 1_100_000, encoding="utf-8"
+    )
+    (repo / "huge.bin").write_bytes(b"\0" * 1_100_000)
+    git("add", "-A")
+    git("commit", "-q", "-m", "c")
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    dest = tmp_path / "inert-checkout"
+    materialize_commit(repo, sha, dest, oversized_ok=frozenset({"snapshot.json"}))
+    # The stubbed file honors its tool-readability contract...
+    assert (dest / "snapshot.json").is_file()
+    assert tool_read_file(dest, "snapshot.json").startswith('{"needle"')
+    assert "snapshot.json:1:" in tool_grep(dest, "rgorg-plant")
+    # ...while unlisted oversized files keep the normal cap.
+    assert not (dest / "huge.bin").exists()

@@ -34,6 +34,19 @@
   paying for 600 KB of generated JSON embed). Details in bench/RESULTS.md;
   the bench applies the same packing (`--legacy-truncation` replays the old
   raw cut for baselines).
+  Hardened by its own self-review (7 findings, round 1): stubbed files are
+  now materialized into the inert checkout past the normal 1 MB cap (up to
+  8 MB, and grep's per-file ceiling matches) so the stub's tool-readability
+  contract actually holds for the motivating 1.1 MB snapshot; stubs with
+  tools disabled (`max_tool_turns: 0`) force `partial`, since nothing can
+  sweep them; `.gitattributes` is read from the REVIEWED COMMIT via
+  `git show` (fail-soft — the judge job's action-repo checkout no longer
+  parses a foreign file) with the PR-content trust rationale documented;
+  `**/` in path globs now matches zero segments (`src/data/**/*.json`
+  covers `src/data/a.json` — also fixes `path_profiles`, which shares the
+  engine); a non-UTF-8 `.gitattributes` can no longer abort collection; the
+  triage notice names each stubbed file and no longer implies stubs carry a
+  reviewable hunk.
 - `bench/capture.py` decodes `gh` output as UTF-8 explicitly; on Windows the
   ANSI codepage crashed captures of PRs with non-ASCII diffs.
 

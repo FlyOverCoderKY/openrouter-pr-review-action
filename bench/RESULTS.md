@@ -11,6 +11,52 @@ usage at the listed provider's pricing on the run date.
 > `noise` column, so precision numbers are not directly comparable across
 > that boundary (recall numbers are).
 
+## 2026-08-28 — diff-budget triage A/B on the dense-PR replay fixture: ADOPTED (x-ai/grok-4.6, 5 runs/arm)
+
+The long-planned dense-PR replay fixture exists: `bench/fixtures-local/rgorg-108`
+(gitignored, private code) captures retiregolden.org#108 — the PR that proved
+the harness cannot fully review large PRs (1178 KB diff, max_diff_kb=600).
+Under the old raw byte cut the embed dies mid-way through the 1122 KB
+generated `src/data/ground-truth/rule-coverage.json` (which the repo itself
+marks `linguist-generated=true`): only 4 of 10 changed files are embedded and
+every hand-written file after it — 29 KB of loader logic, two pages, the
+test suite — is invisible. Six labeled plants (2 bug / 3 risk / 1 nit) were
+injected into those tail files: 0/6 appear in the legacy embed, 6/6 in the
+triaged embed (which stubs the generated file and embeds all nine
+hand-written files in 59.8 KB).
+
+| arm | tail recall | bug | risk | nit | findings/run | cost/run | time | prompt tokens |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| legacy raw cut | 73% (22/30) | 100% | 73% | 20% | 7.4 | $2.84 | 376s | 2.43M (93% cached) |
+| **diff-budget triage** | **97% (29/30)** | 100% | **100%** | **80%** | 9.8 | **$1.04** | 454s | 0.87M (65% cached) |
+
+Per-label: the legacy arm still finds the plants that sit on the paths its
+exhaustive tool sweep happens to walk (T1/T2/T3/T6 5/5 — the lane greps the
+checkout even for files it never saw hunks for), but the two plants nothing
+pointed at collapse: the vacuous-test plant T4 1/5 → **5/5** and the
+self-contradicting example T5 1/5 → **4/5**. That is the accountability
+mechanism, not extra context: the stub's explicit still-requires-a-coverage-
+entry contract forces a systematic sweep of the tail instead of an optional
+one. Precision 100% in both arms; the noise column (~43% vs ~41%) is
+UNADJUDICATED genuine observations about the real PR's own imperfections
+(both arms converge on the same recurring ones), not fabrications.
+
+Structural wins measured alongside recall: the triaged run costs **0.37×**
+the truncated run (the 1.1 MB generated embed was pure spend), and — the
+original failure — its verdict is no longer forced `partial`, so the loop
+ledger publishes and follow-up rounds regain continuity on dense PRs.
+Keyword note: one T2 under-credit (a correct finding phrased as "rejects
+unswept only when length > 1 … a single leftover file") was fixed by
+widening the label's keywords before final scoring; the widening applies to
+both arms and the legacy arm's numbers did not move.
+
+**Tier 2 (file-sharded lanes) not needed for this shape**: after triage the
+hand-written residue is 59.8 KB against a 600 KB budget and tail recall is
+97%. The trigger to revisit is a PR whose *hand-written* diff alone
+approaches the cap (triage would then demote hand-written files to stubs —
+watch for `hand-written, demoted to fit the embed budget` stub reasons in
+lane artifacts).
+
 ## 2026-08-28 — diversity attribution, corrected: pre-judge diversity is real; the judge loses it
 
 Measured on the hardened fixture. Union arms are computed offline from

@@ -24,9 +24,14 @@
   verdict, publishes the ledger, and restores review-loop continuity on
   dense PRs; `partial` remains for genuine overflow (files dropped entirely)
   and for unparseable diffs, which still take the raw byte cut. Stubs expose
-  no anchorable hunk lines, so findings on them stay body-only. Validated on
-  a dense-PR replay fixture built from retiregolden.org#108 with labeled
-  plants in the files beyond the 600 KB cutoff (see bench/RESULTS.md);
+  no anchorable hunk lines, so findings on them stay body-only. A/B-validated
+  on a dense-PR replay fixture built from retiregolden.org#108 (1178 KB diff
+  dominated by one linguist-generated 1122 KB JSON snapshot) with six labeled
+  plants in the hand-written files beyond the 600 KB cutoff: at 5 runs/arm
+  with grok-4.6, tail-plant recall 73%→97% — the two plants the baseline's
+  optional tool sweep never reached went 1/5→5/5 and 1/5→4/5 — with 100%
+  precision in both arms at 0.37× the cost per run (the truncated arm was
+  paying for 600 KB of generated JSON embed). Details in bench/RESULTS.md;
   the bench applies the same packing (`--legacy-truncation` replays the old
   raw cut for baselines).
 - `bench/capture.py` decodes `gh` output as UTF-8 explicitly; on Windows the

@@ -41,6 +41,12 @@ GENERATED_GLOBS_MAX_BYTES = 8_000
 
 # A committed machine-written snapshot (ground-truth JSON dumps, coverage
 # maps) is recognizable by a data-file suffix plus an outsized diff segment.
+# Deliberately size-based with no path allowlist: it engages only when the
+# diff already exceeds max_diff_kb, and demotion costs packing priority
+# only — the stub, the coverage obligation, and tool access all remain. A
+# hand-maintained large JSON can opt out with `-linguist-generated` at the
+# reviewed commit (which outranks this heuristic), or by raising
+# max_diff_kb.
 LARGE_SNAPSHOT_SUFFIXES = (".json", ".jsonl", ".geojson")
 LARGE_SNAPSHOT_DIFF_BYTES = 100 * 1024
 

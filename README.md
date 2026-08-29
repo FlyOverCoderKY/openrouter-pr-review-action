@@ -151,7 +151,7 @@ jobs:
       review_scope: full-pr
       review_mode: initial
       # Optional. Default is openai/gpt-5.6-luna (merge only).
-      # judge_model: openai/gpt-4.1-nano
+      # judge_model: google/gemini-3.1-flash-lite  # measured lower-latency override
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
@@ -163,7 +163,6 @@ Alternatives (do not change the default unless you mean to):
 | Slug | When to use |
 | --- | --- |
 | `google/gemini-3.1-flash-lite` | Lower-latency legacy default; the decision benchmark found lower recall and precision |
-| `openai/gpt-4.1-nano` | An unbenchmarked override when minimum latency matters more than measured merge quality |
 | `anthropic/claude-haiku-4.5` | An unbenchmarked cross-vendor override |
 
 A judge schema or transport failure is labeled on the posted review and falls back to the deterministic recall-safe union. Invalid lane artifacts or action-wide contract errors still fail closed.

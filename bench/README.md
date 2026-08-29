@@ -159,12 +159,15 @@ clerical judge.
 
 The production default is `openai/gpt-5.6-luna`, adopted from the 2026-08-29
 five-run-per-fixture decision screen recorded in [RESULTS.md](RESULTS.md).
-Exact OpenRouter slugs verified for that screen and possible follow-ups are:
+The adoption screen ran exactly these models:
 
 - `google/gemini-3.1-flash-lite` — the former default and benchmark baseline;
-- `openai/gpt-5.6-luna` — the adopted default;
-- `openai/gpt-5.4-mini` — a useful same-vendor control; and
-- `anthropic/claude-haiku-4.5` — a cross-vendor fast control.
+- `openai/gpt-5.6-luna` — the adopted default.
+
+Potential follow-up candidates that have **not** been benchmarked are
+`openai/gpt-5.4-mini` (same-vendor control) and
+`anthropic/claude-haiku-4.5` (cross-vendor control). Do not treat either as a
+production-quality alternative until it completes the protocol above.
 
 OpenRouter's catalogue changes, so re-check availability and structured-output
 support before spending on a later experiment. The synthetic acceptance bar

@@ -331,3 +331,12 @@ def test_split_diff_round_trips_without_trailing_newline() -> None:
     assert parsed is not None
     _, segments = parsed
     assert segments[0].text == diff + "\n"
+
+
+def test_omitted_marker_falls_back_to_count_for_long_paths() -> None:
+    long_dir = "very/long/directory/name/that/keeps/going/" * 4
+    diff = "".join(_file_diff(f"{long_dir}file{i:03}.py", 3) for i in range(200))
+    truncation = pack_diff(diff, 1)
+    assert truncation.dropped_files
+    assert "omitted entirely]" in truncation.text
+    assert len(truncation.text.encode("utf-8")) <= 1024

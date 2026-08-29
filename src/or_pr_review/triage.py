@@ -457,7 +457,8 @@ def plan_packing(
     dropped: list[str] = []
     include = [True] * len(segments)
     if total() > limit:
-        # Even the all-stubs form does not fit: drop trailing files entirely.
+        # Even the all-stubs form does not fit: keep pieces first-fit in
+        # original order and drop the rest entirely (surfaced as partial).
         budget = limit - _OMITTED_MARKER_RESERVE
         used = len(preamble.encode("utf-8"))
         for index, segment in enumerate(segments):
@@ -482,12 +483,19 @@ def plan_packing(
             parts.append(build_stub(segment, reason))
             stub_list.append((segment.path, reason))
     if dropped:
-        named = ", ".join(dropped[:10])
-        more = f" (+{len(dropped) - 10} more)" if len(dropped) > 10 else ""
-        parts.append(
+        marker = (
             f"[{len(dropped)} changed file(s) beyond the embed budget were "
-            f"omitted entirely: {named}{more}]\n"
+            f"omitted entirely: {', '.join(dropped[:10])}"
+            f"{f' (+{len(dropped) - 10} more)' if len(dropped) > 10 else ''}]\n"
         )
+        if len(marker.encode("utf-8")) > _OMITTED_MARKER_RESERVE:
+            # Long paths could blow the byte reserve the drop loop left for
+            # this marker; the count alone always fits.
+            marker = (
+                f"[{len(dropped)} changed file(s) beyond the embed budget "
+                "were omitted entirely]\n"
+            )
+        parts.append(marker)
     return PackedDiff(
         text="".join(parts),
         embedded=tuple(embedded),

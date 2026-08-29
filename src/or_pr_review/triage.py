@@ -404,8 +404,8 @@ def plan_packing(
     be larger than the hunks themselves). If the total still exceeds the
     budget, the largest remaining hand-written segment is demoted next, and
     so on — maximizing how many files keep their hunks embedded. Only when
-    even the all-stubs form exceeds the budget are trailing files dropped
-    entirely (which the caller must surface as a partial review).
+    even the all-stubs form exceeds the budget are files dropped entirely
+    (first-fit keeps what fits; the caller must surface drops as partial).
 
     Returns None when the diff has no parseable `diff --git` headers.
     """

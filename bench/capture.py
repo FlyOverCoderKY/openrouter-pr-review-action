@@ -38,7 +38,16 @@ def run(*argv: str, cwd: Path | None = None) -> str:
     env.setdefault("GH_NO_UPDATE_NOTIFIER", "1")
     try:
         result = subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT, env=env
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            # gh emits UTF-8 on every platform; without this, Windows decodes
+            # with the ANSI codepage and a non-ASCII diff crashes the reader.
+            encoding="utf-8",
+            errors="replace",
+            timeout=TIMEOUT,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         raise SystemExit(f"command timed out after {TIMEOUT}s: {' '.join(argv)}")

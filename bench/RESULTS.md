@@ -11,6 +11,28 @@ usage at the listed provider's pricing on the run date.
 > `noise` column, so precision numbers are not directly comparable across
 > that boundary (recall numbers are).
 
+## 2026-08-29 — synthetic judge model decision: ADOPTED (openai/gpt-5.6-luna, 5 runs/fixture)
+
+The production judge protocol was run against all three committed synthetic
+fixtures: clean diagnostic-only A/B, duplicate-plus-complementary A/B, and
+conflicting A/B/C with a minority critical finding. Each candidate received
+five runs per fixture. The clean fixture correctly short-circuited before a
+paid model call, leaving ten paid calls per candidate across the two non-empty
+fixtures.
+
+| model | finding recall | precision | duplicates | critical | verdicts | repair/fallback | mean latency/call | total measured cost |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| google/gemini-3.1-flash-lite | 43/50 (86%) | 43/45 (95.6%) | 0 | 5/5 | 15/15 | 0/10 | 1.92s | $0.00930 |
+| **openai/gpt-5.6-luna** | **50/50 (100%)** | **50/50 (100%)** | **0** | **5/5** | **15/15** | **0/10** | 3.66s | **$0.00596** |
+
+Luna met the strict adoption bar in every run. Gemini missed seven expected
+findings and produced two unsupported same-location lumps across the A/B/C
+runs; only one of its five A/B/C runs was perfect. Both candidates performed
+genuine model merges without invoking deterministic repair or union fallback.
+Luna was 90% slower but 36% cheaper in these calls. **Adopt Luna as the default
+judge**; retain Gemini as an explicit lower-latency override rather than a
+quality-equivalent default.
+
 ## 2026-08-28 — diff-budget triage A/B on the dense-PR replay fixture: ADOPTED (x-ai/grok-4.6, 5 runs/arm)
 
 The long-planned dense-PR replay fixture exists: `bench/fixtures-local/rgorg-108`

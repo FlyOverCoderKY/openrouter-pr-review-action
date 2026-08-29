@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from or_pr_review.harness import DEFAULT_MAX_TOOL_TURNS
+from or_pr_review.models import DEFAULT_JUDGE_MODEL
 
 
 def _input_default(text: str, name: str) -> str | None:
@@ -31,6 +32,8 @@ def test_action_yml_default_max_tool_turns_is_fifty() -> None:
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert _input_default(action, "max_tool_turns") == "50"
     assert _input_default(workflow, "max_tool_turns") == "50"
+    assert _input_default(action, "judge_model") == DEFAULT_JUDGE_MODEL
+    assert _input_default(workflow, "judge_model") == DEFAULT_JUDGE_MODEL
     assert 'max_tool_turns: ${{ inputs.max_tool_turns }}' in workflow
     # PAT/App-token callers must be able to keep the review loop working.
     assert workflow.count("bot_login: ${{ inputs.bot_login }}") == 2

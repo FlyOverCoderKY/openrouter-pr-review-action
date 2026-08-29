@@ -67,7 +67,7 @@ def test_invalid_slug_rejected() -> None:
 
 
 def test_judge_model_defaults_and_parses() -> None:
-    assert parse_judge_model("") == DEFAULT_JUDGE_MODEL == "google/gemini-3.1-flash-lite"
+    assert parse_judge_model("") == DEFAULT_JUDGE_MODEL == "openai/gpt-5.6-luna"
     assert parse_judge_model("anthropic/claude-haiku-4.5") == "anthropic/claude-haiku-4.5"
     with pytest.raises(ActionError, match="judge_model"):
         parse_judge_model("not-a-slug")

@@ -150,20 +150,20 @@ jobs:
       models: x-ai/grok-4.6,anthropic/claude-sonnet-4.6
       review_scope: full-pr
       review_mode: initial
-      # Optional. Default is google/gemini-3.1-flash-lite (merge only).
-      # judge_model: openai/gpt-4.1-nano
+      # Optional. Default is openai/gpt-5.6-luna (merge only).
+      # judge_model: google/gemini-3.1-flash-lite  # measured lower-latency override
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-Two or more slugs schedule a judge. The default judge is `google/gemini-3.1-flash-lite` (verified live on OpenRouter). It is a recall-safe **union-merge** of already-structured findings plus JSON schema — not a second reviewer and not a filter: identity-tracked coverage plus a same-location merge-legality check restore anything the judge drops or over-merges, so judged output cannot lose a lane's findings. Thinking/reasoning is pinned to `minimal`. In single-job `role: all`, lane deadlines reserve a meaningful judge window; if the lanes or caller's job deadline consume that window, the posted review explicitly uses the deterministic union. Give `role: all` callers at least a 25-minute job timeout (the reusable matrix workflow uses separate jobs and is not constrained by this shared envelope).
+Two or more slugs schedule a judge. The default judge is `openai/gpt-5.6-luna`, selected by the repeatable synthetic judge benchmark after it retained 50/50 expected findings with 100% precision, zero duplicates, correct verdicts, and no repair/fallback across five runs per fixture. It is a recall-safe **union-merge** of already-structured findings plus JSON schema — not a second reviewer and not a filter: identity-tracked coverage plus a same-location merge-legality check restore anything the judge drops or over-merges, so judged output cannot lose a lane's findings. Thinking/reasoning is pinned to `minimal`. In single-job `role: all`, lane deadlines reserve a meaningful judge window; if the lanes or caller's job deadline consume that window, the posted review explicitly uses the deterministic union. Give `role: all` callers at least a 25-minute job timeout (the reusable matrix workflow uses separate jobs and is not constrained by this shared envelope).
 
 Alternatives (do not change the default unless you mean to):
 
 | Slug | When to use |
 | --- | --- |
-| `openai/gpt-4.1-nano` | Cheaper/faster if you want to trade merge quality |
-| `anthropic/claude-haiku-4.5` | Upgrade if judged reviews frequently carry `repaired`/`union-fallback` notes (the safety net restoring what a weaker judge mishandled) |
+| `google/gemini-3.1-flash-lite` | Lower-latency legacy default; the decision benchmark found lower recall and precision |
+| `anthropic/claude-haiku-4.5` | An unbenchmarked cross-vendor override |
 
 A judge schema or transport failure is labeled on the posted review and falls back to the deterministic recall-safe union. Invalid lane artifacts or action-wide contract errors still fail closed.
 
@@ -179,7 +179,7 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | --- | --- | --- |
 | `role` | `all` | `all` (collect + lanes + optional judge + post) \| `setup` (parse matrix) \| `lane` \| `judge` |
 | `models` | `x-ai/grok-4.6` | Comma-separated OpenRouter slugs. Length = lane count. Cap 4. |
-| `judge_model` | `google/gemini-3.1-flash-lite` | Independent of `models`. Used only when two or more lanes are configured. |
+| `judge_model` | `openai/gpt-5.6-luna` | Independent of `models`. Used only when two or more lanes are configured. |
 | `judge_needed` | _empty_ | `true` / `false` override. Empty infers from `models` length. |
 | `github_token` | `${{ github.token }}` | Needs `pull-requests: write` to post the review. |
 | `github_timeout_seconds` | `120` | Per-operation `gh` timeout; 1–600. |

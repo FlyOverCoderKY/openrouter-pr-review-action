@@ -741,7 +741,7 @@ def test_judge_run_records_repeatability_metadata_without_secret(
         assert payload["fixture_sha256"]
         assert payload["prompt_sha256"]
         assert payload["harness_version"]
-        assert payload["production_default_judge"] == "google/gemini-3.1-flash-lite"
+        assert payload["production_default_judge"] == "openai/gpt-5.6-luna"
         assert payload["cost_usd"] == 0.000123
 
 

@@ -41,7 +41,7 @@ from or_pr_review.schema import (
     valid_review_path,
 )
 
-# Cheapest/fastest thinking level Gemini 3.1 Flash Lite documents (minimal/off).
+# Keep the judge clerical and low-latency. Luna's adoption benchmark used this setting.
 JUDGE_REASONING = {"effort": "minimal"}
 
 _SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}

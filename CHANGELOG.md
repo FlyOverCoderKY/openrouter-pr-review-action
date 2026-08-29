@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Changed the default merge/de-duplication judge from
+  `google/gemini-3.1-flash-lite` to `openai/gpt-5.6-luna`. In the repeatable
+  synthetic A/B and A/B/C decision benchmark (five runs per fixture), Luna
+  met every acceptance gate without repair/fallback while the former default
+  missed seven of 50 expected non-empty-fixture findings. Luna also cost 36%
+  less in the measured calls, with a 90% latency increase.
+
 ## 1.2.7 — 2026-08-29
 
 - **Deadline-safe review publication**: lane work now has a protected

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Paid benchmark lanes now persist an atomic aggregate-only progress checkpoint
+  after every completed OpenRouter response, allowing provider-reported cost and
+  usage to survive an outer process timeout without storing prompts, findings,
+  code, paths, or credentials. Checkpoint failure is non-fatal to review work,
+  tool-round counts stay current, and stale JSON/tmp sidecars are cleared before
+  a fresh batch.
 - Full-PR acquisition now falls back to an unlimited local
   `git diff base...head` when GitHub rejects `gh pr diff` with its 20,000-line
   HTTP 406 response. The fallback uses fresh base/head commit OIDs from PR

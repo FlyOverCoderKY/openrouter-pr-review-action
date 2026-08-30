@@ -380,17 +380,63 @@ def test_cmd_run_clears_stale_files_and_flags_failures(
     out.mkdir()
     stale = out / "run-7.json"
     stale.write_text("{}", encoding="utf-8")
+    stale_progress = out / "progress-7.json"
+    stale_progress.write_text("{}", encoding="utf-8")
+    stale_progress_tmp = out / "progress-7.tmp"
+    stale_progress_tmp.write_text("{}", encoding="utf-8")
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
-    monkeypatch.setattr(bench_mod, "run_lane", lambda **kwargs: _fake_lane(ok=True))
+
+    def successful(**kwargs):
+        kwargs["progress"]({"elapsed_ms": 1, "cost_usd": 0.001, "requests": 1})
+        return _fake_lane(ok=True)
+
+    monkeypatch.setattr(bench_mod, "run_lane", successful)
     rc = main(["run", str(fixture_dir), "--runs", "2", "--out", str(out)])
     assert rc == 0
     assert not stale.exists()  # stale run files must not contaminate `score`
+    assert not stale_progress.exists()
+    assert not stale_progress_tmp.exists()
+    assert not list(out.glob("progress-*"))
     assert sorted(p.name for p in out.glob("run-*.json")) == ["run-0.json", "run-1.json"]
 
     monkeypatch.setattr(bench_mod, "run_lane", lambda **kwargs: _fake_lane(ok=False))
     assert main(["run", str(fixture_dir), "--runs", "1", "--out", str(out)]) == 1
 
     assert main(["run", str(fixture_dir), "--runs", "0", "--out", str(out)]) == 1
+
+
+def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    fixture_dir = tmp_path / "f"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+
+    def interrupted(**kwargs):
+        kwargs["progress"](
+            {
+                "elapsed_ms": 123,
+                "cost_usd": 0.004,
+                "requests": 2,
+                "provider": "example",
+            }
+        )
+        raise ActionError("interrupted")
+
+    monkeypatch.setattr(bench_mod, "run_lane", interrupted)
+    assert main(["run", str(fixture_dir), "--out", str(out)]) == 1
+    progress = json.loads((out / "progress-0.json").read_text(encoding="utf-8"))
+    assert progress == {
+        "schema": "or-pr-review/bench-progress/1",
+        "model": "x-ai/grok-4.6",
+        "elapsed_ms": 123,
+        "cost_usd": 0.004,
+        "requests": 2,
+        "provider": "example",
+    }
 
 
 def test_cmd_score_reports_means_and_skips_failed_runs(

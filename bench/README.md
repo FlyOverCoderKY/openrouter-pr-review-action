@@ -31,8 +31,12 @@ python -m or_pr_review.bench score bench/fixtures/planted-mini /tmp/bench-out
 ```
 
 Lanes are nondeterministic — `run` defaults to 3 runs, and `score` prints a
-mean row across the successful runs. `run` clears stale `run-*.json` files
-from `--out` first (leftovers would silently mix experiments), exits
+mean row across the successful runs. During each paid lane, `run` atomically
+writes an aggregate-only `progress-N.json` checkpoint containing elapsed time,
+usage, request/tool counts, provider, and provider-reported cost; it contains no
+prompt, code, findings, paths, or credentials. A completed `run-N.json` replaces
+that checkpoint. `run` clears stale `run-*.json`, `progress-*.json`, and
+`progress-*.tmp` files from `--out` first (leftovers would mix experiments), exits
 non-zero when any lane fails, and defaults `--effort` to empty to match the
 shipped action (pass `--effort high` explicitly to mirror a caller that sets
 it). `score` reports per-severity and per-context recall (detection,

@@ -50,7 +50,13 @@ DIVERGED_NOTICE = (
 class ReviewSource(Protocol):
     def pr_view(self, number: int) -> dict[str, object]: ...
 
-    def pr_diff(self, number: int) -> str: ...
+    def pr_diff(
+        self,
+        number: int,
+        *,
+        base_sha: str | None = None,
+        head_sha: str | None = None,
+    ) -> str: ...
 
     def compare_diff(self, before: str, after: str) -> str: ...
 
@@ -197,17 +203,19 @@ def plan_diff(
     before_sha: str | None,
     after_sha: str | None,
     head_sha: str | None,
+    base_sha: str | None = None,
 ) -> DiffPlan:
     """Decide which range to embed. latest-commit never plans a full-PR diff."""
     head = normalize_sha(head_sha)
     after = normalize_sha(after_sha) or head
     before = normalize_sha(before_sha)
+    base = normalize_sha(base_sha)
 
     if scope == "full-pr":
         return DiffPlan(
             scope=scope,
             kind="full-pr",
-            from_sha=None,
+            from_sha=base,
             to_sha=after,
             fallback_notice=None,
         )
@@ -316,7 +324,9 @@ def _cut_at_boundary(data: bytes, limit: int) -> bytes:
 def fetch_scoped_diff(pr_number: int, plan: DiffPlan, source: ReviewSource) -> tuple[str, DiffPlan]:
     """Return (diff, plan). latest-commit never calls pr_diff."""
     if plan.kind == "full-pr":
-        return source.pr_diff(pr_number), plan
+        return source.pr_diff(
+            pr_number, base_sha=plan.from_sha, head_sha=plan.to_sha
+        ), plan
 
     if plan.kind == "commit-range":
         if plan.from_sha is None or plan.to_sha is None:
@@ -373,7 +383,11 @@ def collect_review(
             scope=scope,
             before_sha=None,
             after_sha=None,
-            head_sha=head_from_pr or head_sha,
+            # HEAD_SHA is the commit actions/checkout materialized. Prefer it
+            # so a concurrent push is rejected by the confirmation below
+            # instead of selecting an object absent from the inert checkout.
+            head_sha=head_sha or head_from_pr,
+            base_sha=_as_str(pr.get("baseRefOid")),
         )
     else:
         plan = plan_diff(

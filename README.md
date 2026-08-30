@@ -182,7 +182,7 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `judge_model` | `openai/gpt-5.6-luna` | Independent of `models`. Used only when two or more lanes are configured. |
 | `judge_needed` | _empty_ | `true` / `false` override. Empty infers from `models` length. |
 | `github_token` | `${{ github.token }}` | Needs `pull-requests: write` to post the review. |
-| `github_timeout_seconds` | `120` | Per-operation `gh` timeout; 1–600. |
+| `github_timeout_seconds` | `120` | Per-operation `gh` or fallback local-git timeout; 1–600. |
 | `pr_number` | PR that triggered the workflow | Required for `workflow_dispatch`. |
 | `fail_on` | `never` | Finding policy: `never` \| `bugs` \| `any`. Operational/schema errors always fail. |
 | `roast_level` | `professional` | `professional` \| `playful`. |

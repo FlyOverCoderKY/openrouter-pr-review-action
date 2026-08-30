@@ -26,11 +26,18 @@ class FakeSource:
             "body": "please review",
             "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "headRefName": "feature",
+            "baseRefOid": "dddddddddddddddddddddddddddddddddddddddd",
             "baseRefName": "main",
         }
 
-    def pr_diff(self, number: int) -> str:
-        self.calls.append(("pr_diff", number))
+    def pr_diff(
+        self,
+        number: int,
+        *,
+        base_sha: str | None = None,
+        head_sha: str | None = None,
+    ) -> str:
+        self.calls.append(("pr_diff", (number, base_sha, head_sha)))
         return "FULL_PR_DIFF"
 
     def compare_diff(self, before: str, after: str) -> str:
@@ -150,7 +157,13 @@ def test_fetch_scoped_diff_distinguishes_diverged_from_transport() -> None:
         def pr_view(self, number: int) -> dict[str, object]:
             raise AssertionError("unused")
 
-        def pr_diff(self, number: int) -> str:
+        def pr_diff(
+            self,
+            number: int,
+            *,
+            base_sha: str | None = None,
+            head_sha: str | None = None,
+        ) -> str:
             raise AssertionError("unused")
 
         def compare_diff(self, before: str, after: str) -> str:
@@ -182,7 +195,13 @@ def test_collect_review_packs_over_budget_diff_with_triage_inputs() -> None:
     )
 
     class _Source(FakeSource):
-        def pr_diff(self, number: int) -> str:
+        def pr_diff(
+            self,
+            number: int,
+            *,
+            base_sha: str | None = None,
+            head_sha: str | None = None,
+        ) -> str:
             return handwritten + snapshot
 
     collected = collect_review(
@@ -202,3 +221,31 @@ def test_collect_review_packs_over_budget_diff_with_triage_inputs() -> None:
     assert handwritten in collected.diff
     # Full-diff path accounting is unaffected by the packing.
     assert collected.all_changed_paths == ("src/main.py", "src/data/snap.dat")
+
+
+def test_full_pr_uses_checkout_head_and_rejects_a_concurrent_push() -> None:
+    checkout_head = "a" * 40
+    pushed_head = "b" * 40
+
+    class _Source(FakeSource):
+        def pr_view(self, number: int) -> dict[str, object]:
+            payload = super().pr_view(number)
+            payload["headRefOid"] = pushed_head
+            return payload
+
+    source = _Source()
+    with pytest.raises(ActionError, match="PR head changed"):
+        collect_review(
+            pr_number=1,
+            scope="full-pr",
+            mode="initial",
+            before_sha=None,
+            after_sha=None,
+            head_sha=checkout_head,
+            max_diff_kb=300,
+            source=source,
+        )
+    assert (
+        "pr_diff",
+        (1, "d" * 40, checkout_head),
+    ) in source.calls

@@ -81,7 +81,13 @@ class GitHub:
             raise ActionError("gh pr view returned a non-object")
         return parsed
 
-    def pr_diff(self, number: int) -> str:
+    def pr_diff(
+        self,
+        number: int,
+        *,
+        base_sha: str | None = None,
+        head_sha: str | None = None,
+    ) -> str:
         try:
             return self._gh("pr", "diff", str(number), "--repo", self.repository)
         except ActionError as exc:
@@ -90,11 +96,11 @@ class GitHub:
 
         # GitHub's PR diff endpoint rejects diffs over 20,000 lines with a
         # 406 even though actions/checkout has already materialized the full
-        # repository history. Resolve both tips from fresh PR metadata and
-        # compute the same merge-base-relative range in the inert checkout.
-        pr = self.pr_view(number)
-        base = _full_sha(pr.get("baseRefOid"), "base")
-        head = _full_sha(pr.get("headRefOid"), "head")
+        # repository history. Use the range collection already pinned before
+        # the API call: resolving live PR metadata again could select a pushed
+        # head that the inert checkout does not contain.
+        base = _full_sha(base_sha, "base")
+        head = _full_sha(head_sha, "head")
         workspace = (
             os.environ.get("SOURCE_WORKSPACE")
             or os.environ.get("GITHUB_WORKSPACE")
@@ -109,6 +115,7 @@ class GitHub:
                 [
                     "git",
                     "diff",
+                    "--no-color",
                     "--no-ext-diff",
                     "--no-textconv",
                     "--find-renames",

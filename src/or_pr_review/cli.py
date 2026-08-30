@@ -347,12 +347,12 @@ def _role_all(env: dict[str, str]) -> int:
     )
     remaining = _remaining_job_seconds(env)
     lane_timeout = DEFAULT_LANE_TIMEOUT_SECONDS
+    judge_reserve = 0
     if remaining is not None:
         # role=all shares one job with the judge. Reserve enough time for a
         # meaningful request on every HTTP attempt plus retry delay and post;
         # otherwise lanes that consume their advertised budget make the judge
         # mathematically impossible to start.
-        judge_reserve = 0
         if needed:
             judge_reserve = (
                 POST_RESERVE_SECONDS

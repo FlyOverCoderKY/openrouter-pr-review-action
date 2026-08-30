@@ -269,8 +269,10 @@ def run_lane(
     tools = list(READ_ONLY_TOOLS) if workspace is not None and max_tool_turns > 0 else None
     usage: dict[str, int | float] = {}
     meta: dict[str, str] = {}
+    progress_warning_emitted = False
 
     def emit_progress() -> None:
+        nonlocal progress_warning_emitted
         if progress is None:
             return
         snapshot: dict[str, int | float | str] = {
@@ -287,7 +289,18 @@ def run_lane(
         provider = meta.get("provider")
         if provider:
             snapshot["provider"] = provider
-        progress(snapshot)
+        try:
+            progress(snapshot)
+        except Exception:
+            # Telemetry is best-effort and must never abort already-billed
+            # review work. Keep the warning aggregate and secret-free.
+            if not progress_warning_emitted:
+                print(
+                    "warning: aggregate progress checkpoint failed",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                progress_warning_emitted = True
 
     def _validate(content: str) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
         findings, resolutions, coverage = parse_lane_payload(
@@ -584,6 +597,8 @@ def _run_loop(
                 turns += 1
                 if stats is not None:
                     stats["tool_rounds"] = turns
+                if progress is not None:
+                    progress()
                 for call in tool_calls:
                     tool_deadline = (
                         deadline - finalize_reserve_seconds

@@ -1245,19 +1245,66 @@ def test_run_lane_sums_byok_upstream_cost_and_requests_usage(tmp_path: Path) -> 
     assert result.ok
     assert result.cost_usd == pytest.approx(0.011)  # 0.009 upstream + 0.002 BYOK fee
     assert payloads[0]["usage"] == {"include": True}
-    assert progress == [
-        {
-            "elapsed_ms": progress[0]["elapsed_ms"],
-            "prompt_tokens": 5,
-            "completion_tokens": 5,
-            "cost_usd": pytest.approx(0.011),
-            "requests": 1,
-        }
-    ]
+    assert len(progress) == 1
+    assert progress[0]["elapsed_ms"] >= 0
+    assert {key: value for key, value in progress[0].items() if key != "elapsed_ms"} == {
+        "prompt_tokens": 5,
+        "completion_tokens": 5,
+        "cost_usd": pytest.approx(0.011),
+        "requests": 1,
+    }
     # Round-trips through the lane artifact.
     from or_pr_review.schema import parse_lane_artifact
 
     assert parse_lane_artifact(result.to_dict()).cost_usd == pytest.approx(0.011)
+
+
+def test_run_lane_progress_records_current_tool_round(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    responses = iter(
+        [
+            _tool_reply(),
+            {
+                "choices": [{"message": {"content": '{"findings": []}'}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "cost": 0.001},
+            },
+        ]
+    )
+    progress: list[dict[str, int | float | str]] = []
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=1,
+        chat=lambda _payload: next(responses),
+        progress=progress.append,
+    )
+
+    assert result.ok
+    assert any(snapshot.get("tool_rounds") == 1 for snapshot in progress)
+
+
+def test_run_lane_progress_failure_does_not_abort_paid_work(tmp_path: Path) -> None:
+    def broken_progress(_snapshot: dict[str, int | float | str]) -> None:
+        raise OSError("disk full")
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        chat=lambda _payload: {
+            "choices": [{"message": {"content": '{"findings": []}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "cost": 0.001},
+        },
+        progress=broken_progress,
+    )
+
+    assert result.ok
+    assert result.cost_usd == pytest.approx(0.001)
 
 
 def test_response_spend_policy() -> None:

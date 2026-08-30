@@ -483,6 +483,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     stale = sorted(out_dir.glob("run-*.json"))
     stale.extend(sorted(out_dir.glob("progress-*.json")))
+    stale.extend(sorted(out_dir.glob("progress-*.tmp")))
     if stale:
         # Final leftovers would be globbed by `score`; progress leftovers
         # would otherwise make a fresh batch look like a resumed one.

@@ -8,7 +8,8 @@ import secrets
 import sys
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -389,7 +390,7 @@ def _role_all(env: dict[str, str]) -> int:
         _persist_lane_artifact(lane_dir, 0, lane)
         lanes.append(lane)
     else:
-        deadline_seconds = _all_role_deadline_seconds(env)
+        deadline_seconds = _all_role_deadline_seconds(env, remaining, judge_reserve)
         pool = ThreadPoolExecutor(max_workers=min(len(slugs), LANE_CAP))
         timed_out = False
         try:
@@ -397,7 +398,11 @@ def _role_all(env: dict[str, str]) -> int:
             by_index: dict[int, LaneResult] = {}
             pending = set(futures)
             try:
-                iterator = as_completed(futures, timeout=deadline_seconds) if deadline_seconds > 0 else as_completed(futures)
+                iterator = (
+                    as_completed(futures, timeout=deadline_seconds)
+                    if deadline_seconds > 0
+                    else as_completed(futures)
+                )
                 for future in iterator:
                     pending.discard(future)
                     i = futures[future]
@@ -418,17 +423,27 @@ def _role_all(env: dict[str, str]) -> int:
                 timed_out = True
                 completed = len(by_index)
                 for future in pending:
-                    future.cancel()
-                for future in pending:
                     i = futures[future]
-                    lane = failed_lane(
-                        slugs[i],
-                        "role=all deadline reached before every lane finished; "
-                        f"salvaging {completed}/{len(slugs)} completed lane(s)",
-                    )
+                    if future.done():
+                        try:
+                            lane = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            lane = failed_lane(slugs[i], redact(str(exc)))
+                    else:
+                        future.cancel()
+                        lane = failed_lane(
+                            slugs[i],
+                            "role=all deadline reached before every lane finished; "
+                            f"salvaging {completed}/{len(slugs)} completed lane(s)",
+                        )
                     lane.head_sha = collected.head_sha
                     by_index[i] = lane
                     _persist_lane_artifact(lane_dir, i, lane)
+                    print(
+                        f"lane {i} `{slugs[i]}` persisted "
+                        f"({'ok' if lane.ok else 'failed-open'})",
+                        flush=True,
+                    )
         finally:
             pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
         lanes = [by_index[i] for i in range(len(slugs))]
@@ -1040,9 +1055,16 @@ def _write_lane_file(env: dict[str, str], index: int, result: LaneResult) -> Pat
     return path
 
 
-def _all_role_deadline_seconds(env: dict[str, str]) -> int:
-    """Reserve time to post a salvaged review before the outer job kills us."""
-    return max(_int_env(env, "ALL_ROLE_DEADLINE_SECONDS", 1500), 0)
+def _all_role_deadline_seconds(
+    env: dict[str, str], remaining: float | None, judge_reserve: int
+) -> int:
+    """Bound lane collection while preserving the judge/publication window."""
+    configured = (env.get("ALL_ROLE_DEADLINE_SECONDS") or "").strip()
+    if configured:
+        return max(_int_env(env, "ALL_ROLE_DEADLINE_SECONDS", 1500), 0)
+    if remaining is None:
+        return 1500
+    return max(int(remaining - max(POST_RESERVE_SECONDS, judge_reserve)), 0)
 
 
 def _persist_lane_artifact(directory: Path, index: int, result: LaneResult) -> Path:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 
 import pytest
@@ -781,7 +782,8 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
         # next future, because GitHub can cancel at this exact point.
         assert (artifact_dir / "lane-0.json").is_file()
         captured["early_artifact"] = True
-        yield ordered[1]
+        captured["timed_out"] = True
+        raise FutureTimeoutError()
 
     def fake_finish(
         env: dict[str, str],
@@ -811,9 +813,11 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
         PR_NUMBER="1",
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
+        ALL_ROLE_DEADLINE_SECONDS="1",
     )
     assert main(["all"], env) == 0
     assert captured["early_artifact"] is True
+    assert captured["timed_out"] is True
     lanes = captured["lanes"]
     assert isinstance(lanes, list)
     assert lanes[0].ok

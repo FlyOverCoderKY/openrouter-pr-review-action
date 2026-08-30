@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from typing import Any
 
@@ -18,6 +19,7 @@ _BOT_BODY_PREFIXES = (
     "## OpenRouter pull-request review",
     "## OpenRouter review incomplete",
 )
+_FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 class GitHub:
@@ -28,6 +30,7 @@ class GitHub:
         repository: str,
         timeout: int = 120,
         runner: Any = None,
+        git_runner: Any = None,
     ) -> None:
         if not token.strip():
             raise ActionError("github_token is empty")
@@ -39,6 +42,7 @@ class GitHub:
         self.repository = repository
         self.timeout = timeout
         self._runner = runner or _run_gh
+        self._git_runner = git_runner or _run_git
         self.owner, self.repo = repository.split("/", 1)
 
     def _env(self) -> dict[str, str]:
@@ -67,7 +71,7 @@ class GitHub:
             "--repo",
             self.repository,
             "--json",
-            "number,title,body,headRefOid,headRefName,baseRefName,url",
+            "number,title,body,headRefOid,headRefName,baseRefOid,baseRefName,url",
         )
         try:
             parsed = json.loads(raw)
@@ -77,8 +81,52 @@ class GitHub:
             raise ActionError("gh pr view returned a non-object")
         return parsed
 
-    def pr_diff(self, number: int) -> str:
-        return self._gh("pr", "diff", str(number), "--repo", self.repository)
+    def pr_diff(
+        self,
+        number: int,
+        *,
+        base_sha: str | None = None,
+        head_sha: str | None = None,
+    ) -> str:
+        try:
+            return self._gh("pr", "diff", str(number), "--repo", self.repository)
+        except ActionError as exc:
+            if not _is_pr_diff_too_large(str(exc)):
+                raise
+
+        # GitHub's PR diff endpoint rejects diffs over 20,000 lines with a
+        # 406 even though actions/checkout has already materialized the full
+        # repository history. Use the range collection already pinned before
+        # the API call: resolving live PR metadata again could select a pushed
+        # head that the inert checkout does not contain.
+        base = _full_sha(base_sha, "base")
+        head = _full_sha(head_sha, "head")
+        workspace = (
+            os.environ.get("SOURCE_WORKSPACE")
+            or os.environ.get("GITHUB_WORKSPACE")
+            or os.getcwd()
+        )
+        print(
+            "notice: GitHub rejected the PR diff as too large; "
+            "falling back to local git diff base...head"
+        )
+        try:
+            return self._git_runner(
+                [
+                    "git",
+                    "diff",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--find-renames",
+                    f"{base}...{head}",
+                    "--",
+                ],
+                timeout=self.timeout,
+                cwd=workspace,
+            )
+        except ActionError as exc:
+            raise ActionError(redact(str(exc))) from exc
 
     def compare_diff(self, before: str, after: str) -> str:
         """Raw unified diff for a verified linear fast-forward range.
@@ -283,6 +331,22 @@ def _json_object(raw: str, what: str) -> dict[str, Any]:
     return parsed
 
 
+def _is_pr_diff_too_large(message: str) -> bool:
+    lowered = message.lower()
+    return "http 406" in lowered and (
+        "diff exceeded the maximum number of lines" in lowered
+        or "pullrequest.diff too_large" in lowered
+    )
+
+
+def _full_sha(value: object, label: str) -> str:
+    if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
+        raise ActionError(
+            f"PR {label} SHA is missing or invalid; cannot compute the local diff"
+        )
+    return value.lower()
+
+
 def _run_gh(
     cmd: list[str],
     *,
@@ -307,6 +371,25 @@ def _run_gh(
         err = redact((proc.stderr or b"").decode("utf-8", errors="replace")[:600])
         raise ActionError(f"GitHub CLI failed ({' '.join(cmd[1:4])}): {err}")
     return proc.stdout.decode("utf-8")
+
+
+def _run_git(cmd: list[str], *, timeout: int, cwd: str) -> str:
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ActionError(f"Local git diff timed out after {timeout}s") from exc
+    except OSError as exc:
+        raise ActionError(f"failed to run local git diff: {exc}") from exc
+    if proc.returncode != 0:
+        err = redact((proc.stderr or b"").decode("utf-8", errors="replace")[:600])
+        raise ActionError(f"Local git diff failed: {err}")
+    return proc.stdout.decode("utf-8", errors="replace")
 
 
 def upsert_status_comment(

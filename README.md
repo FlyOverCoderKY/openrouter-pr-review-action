@@ -125,7 +125,7 @@ jobs:
 
 Pin `@main` only until you choose a commit SHA. Do not put first-pass and follow-up in one concurrency group that `synchronize` can cancel.
 
-`latest-commit` never silently falls back to the full PR diff. If `before...after` is missing or the compare fails, the action embeds the **single latest head commit** and says so. A truncated diff posts a visible **partial** verdict and is never treated as clean.
+`latest-commit` never silently falls back to the full PR diff. If `before...after` is missing or the compare fails, the action embeds the **single latest head commit** and says so. For `full-pr`, if GitHub rejects `gh pr diff` because the patch exceeds its line limit, the action computes the complete `git diff base...head` from the full-depth workflow checkout before applying the normal diff-budget triage. A truncated diff posts a visible **partial** verdict and is never treated as clean.
 
 The initial round is the exhaustive pass: the prompt requires a per-file, all-severity sweep (bug, risk, **and** nit), and each coverage entry claims a completed sweep of that file. From verify round 2 onward a **severity floor** applies: carried `nit` findings are retired — stated visibly in the round's resolution section, never silently — so follow-up rounds track the bug/risk backlog to convergence instead of re-adjudicating nits forever.
 
@@ -182,7 +182,7 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `judge_model` | `openai/gpt-5.6-luna` | Independent of `models`. Used only when two or more lanes are configured. |
 | `judge_needed` | _empty_ | `true` / `false` override. Empty infers from `models` length. |
 | `github_token` | `${{ github.token }}` | Needs `pull-requests: write` to post the review. |
-| `github_timeout_seconds` | `120` | Per-operation `gh` timeout; 1–600. |
+| `github_timeout_seconds` | `120` | Per-operation `gh` or fallback local-git timeout; 1–600. |
 | `pr_number` | PR that triggered the workflow | Required for `workflow_dispatch`. |
 | `fail_on` | `never` | Finding policy: `never` \| `bugs` \| `any`. Operational/schema errors always fail. |
 | `roast_level` | `professional` | `professional` \| `playful`. |

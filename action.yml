@@ -41,7 +41,7 @@ inputs:
     required: false
     default: ${{ github.token }}
   github_timeout_seconds:
-    description: "Timeout for each GitHub CLI operation (1-600 seconds)."
+    description: "Timeout for each GitHub CLI or fallback local-git operation (1-600 seconds)."
     required: false
     default: "120"
   pr_number:

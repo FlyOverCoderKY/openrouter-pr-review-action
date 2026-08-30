@@ -48,6 +48,66 @@ def test_commit_diff_uses_raw_media_type() -> None:
     assert "Accept: application/vnd.github.diff" in calls[0]
 
 
+@pytest.mark.parametrize(
+    "too_large_message",
+    [
+        "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)",
+        "HTTP 406: PullRequest.diff too_large",
+    ],
+)
+def test_pr_diff_falls_back_to_local_git_on_github_line_limit(
+    monkeypatch, too_large_message: str
+) -> None:
+    base = "a" * 40
+    head = "b" * 40
+    gh_calls: list[list[str]] = []
+    git_calls: list[tuple[list[str], int, str]] = []
+
+    def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
+        gh_calls.append(cmd)
+        assert cmd[1:3] == ["pr", "diff"]
+        raise ActionError(too_large_message)
+
+    def git_runner(cmd: list[str], *, timeout: int, cwd: str) -> str:
+        git_calls.append((cmd, timeout, cwd))
+        return "complete-local-diff"
+
+    monkeypatch.setenv("SOURCE_WORKSPACE", "/checkout")
+    gh = GitHub(
+        token="t", repository="o/r", timeout=45, runner=runner, git_runner=git_runner
+    )
+    assert gh.pr_diff(7, base_sha=base, head_sha=head) == "complete-local-diff"
+    assert len(gh_calls) == 1
+    assert git_calls == [
+        (
+            [
+                "git",
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--find-renames",
+                f"{base}...{head}",
+                "--",
+            ],
+            45,
+            "/checkout",
+        )
+    ]
+
+
+def test_pr_diff_does_not_hide_other_github_failures() -> None:
+    def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
+        raise ActionError("HTTP 403: resource not accessible")
+
+    def git_runner(cmd: list[str], *, timeout: int, cwd: str) -> str:
+        raise AssertionError("local git must not run")
+
+    gh = GitHub(token="t", repository="o/r", runner=runner, git_runner=git_runner)
+    with pytest.raises(ActionError, match="HTTP 403"):
+        gh.pr_diff(7)
+
+
 def test_list_bot_review_bodies_filters_author() -> None:
     reviews = [
         [

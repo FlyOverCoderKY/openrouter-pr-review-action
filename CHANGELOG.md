@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Full-PR acquisition now falls back to an unlimited local
+  `git diff base...head` when GitHub rejects `gh pr diff` with its 20,000-line
+  HTTP 406 response. The fallback uses fresh base/head commit OIDs from PR
+  metadata and the full-depth workflow checkout, then feeds the complete patch
+  through the existing generated-file-aware diff-budget triage.
 - Changed the default merge/de-duplication judge from
   `google/gemini-3.1-flash-lite` to `openai/gpt-5.6-luna`. In the repeatable
   synthetic A/B and A/B/C decision benchmark (five runs per fixture), Luna

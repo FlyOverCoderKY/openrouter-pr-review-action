@@ -8,7 +8,7 @@ import secrets
 import sys
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -389,27 +389,48 @@ def _role_all(env: dict[str, str]) -> int:
         _persist_lane_artifact(lane_dir, 0, lane)
         lanes.append(lane)
     else:
-        # Thread workers are safe to join because run_lane bounds every HTTP
-        # request and executes each repository tool in a killable subprocess.
-        # Do not use shutdown(wait=False): running Python threads cannot be
-        # cancelled, and pretending otherwise recreates the PR358 failure.
-        with ThreadPoolExecutor(max_workers=min(len(slugs), LANE_CAP)) as pool:
+        deadline_seconds = _all_role_deadline_seconds(env)
+        pool = ThreadPoolExecutor(max_workers=min(len(slugs), LANE_CAP))
+        timed_out = False
+        try:
             futures = {pool.submit(_one, model): i for i, model in enumerate(slugs)}
             by_index: dict[int, LaneResult] = {}
-            for future in as_completed(futures):
-                i = futures[future]
-                model = slugs[i]
-                try:
-                    by_index[i] = future.result()
-                except Exception as exc:  # noqa: BLE001
-                    by_index[i] = failed_lane(model, redact(str(exc)))
-                by_index[i].head_sha = collected.head_sha
-                _persist_lane_artifact(lane_dir, i, by_index[i])
-                print(
-                    f"lane {i} `{model}` persisted "
-                    f"({'ok' if by_index[i].ok else 'failed-open'})",
-                    flush=True,
-                )
+            pending = set(futures)
+            try:
+                iterator = as_completed(futures, timeout=deadline_seconds) if deadline_seconds > 0 else as_completed(futures)
+                for future in iterator:
+                    pending.discard(future)
+                    i = futures[future]
+                    model = slugs[i]
+                    try:
+                        lane = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        lane = failed_lane(model, redact(str(exc)))
+                    lane.head_sha = collected.head_sha
+                    by_index[i] = lane
+                    _persist_lane_artifact(lane_dir, i, lane)
+                    print(
+                        f"lane {i} `{model}` persisted "
+                        f"({'ok' if lane.ok else 'failed-open'})",
+                        flush=True,
+                    )
+            except FutureTimeoutError:
+                timed_out = True
+                completed = len(by_index)
+                for future in pending:
+                    future.cancel()
+                for future in pending:
+                    i = futures[future]
+                    lane = failed_lane(
+                        slugs[i],
+                        "role=all deadline reached before every lane finished; "
+                        f"salvaging {completed}/{len(slugs)} completed lane(s)",
+                    )
+                    lane.head_sha = collected.head_sha
+                    by_index[i] = lane
+                    _persist_lane_artifact(lane_dir, i, lane)
+        finally:
+            pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
         lanes = [by_index[i] for i in range(len(slugs))]
     return _finish(env, lanes, collected=collected, loop=state)
 
@@ -1017,6 +1038,11 @@ def _write_lane_file(env: dict[str, str], index: int, result: LaneResult) -> Pat
     path = directory / f"lane-{index}.json"
     path.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def _all_role_deadline_seconds(env: dict[str, str]) -> int:
+    """Reserve time to post a salvaged review before the outer job kills us."""
+    return max(_int_env(env, "ALL_ROLE_DEADLINE_SECONDS", 1500), 0)
 
 
 def _persist_lane_artifact(directory: Path, index: int, result: LaneResult) -> Path:

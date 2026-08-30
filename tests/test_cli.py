@@ -774,7 +774,7 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
             error=None,
         )
 
-    def fake_as_completed(futures: object):
+    def fake_as_completed(futures: object, timeout: int | None = None):
         ordered = list(futures)
         yield ordered[0]
         # _role_all must persist the completed result before asking for the

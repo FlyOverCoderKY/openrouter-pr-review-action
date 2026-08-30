@@ -85,6 +85,7 @@ MAX_TOOL_CALL_SECONDS = 30
 
 ChatFn = Callable[[dict[str, Any]], dict[str, Any]]
 SleepFn = Callable[[float], None]
+ProgressFn = Callable[[dict[str, int | float | str]], None]
 
 
 def require_openrouter_key(env: dict[str, str]) -> str:
@@ -249,6 +250,7 @@ def run_lane(
     expected_paths: set[str] | None = None,
     expected_resolution_ids: set[str] | None = None,
     lane_timeout: int = DEFAULT_LANE_TIMEOUT_SECONDS,
+    progress: ProgressFn | None = None,
 ) -> LaneResult:
     started = time.monotonic()
     deadline = started + lane_timeout
@@ -267,6 +269,25 @@ def run_lane(
     tools = list(READ_ONLY_TOOLS) if workspace is not None and max_tool_turns > 0 else None
     usage: dict[str, int | float] = {}
     meta: dict[str, str] = {}
+
+    def emit_progress() -> None:
+        if progress is None:
+            return
+        snapshot: dict[str, int | float | str] = {
+            "elapsed_ms": _elapsed_ms(started),
+        }
+        for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cost_usd"):
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                snapshot[key] = value
+        for key in ("requests", "tool_rounds", "retries"):
+            value = stats.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                snapshot[key] = value
+        provider = meta.get("provider")
+        if provider:
+            snapshot["provider"] = provider
+        progress(snapshot)
 
     def _validate(content: str) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
         findings, resolutions, coverage = parse_lane_payload(
@@ -317,6 +338,7 @@ def run_lane(
                 if chat is not None
                 else lambda value: request_deadline.__setitem__("value", value)
             ),
+            progress=emit_progress,
         )
         findings, resolutions, coverage = _validate(content)
         gate_root = workspace if workspace is not None else anchor_root
@@ -380,6 +402,7 @@ def _run_loop(
     deadline: float | None = None,
     finalize_reserve_seconds: int = FINAL_RESPONSE_RESERVE_SECONDS,
     set_request_deadline: Callable[[float], None] | None = None,
+    progress: Callable[[], None] | None = None,
 ) -> str:
     payload_base: dict[str, Any] = {
         "model": model,
@@ -462,6 +485,8 @@ def _run_loop(
             try:
                 response = send(payload)
                 _absorb_usage(usage, response, meta)
+                if progress is not None:
+                    progress()
                 # In-body errors (HTTP 200 whose JSON carries an error object,
                 # a common OpenRouter provider-failure shape) must reach the
                 # same schema-fallback and salvage handling as HTTP errors.
@@ -557,6 +582,8 @@ def _run_loop(
                     use_schema = True
                     continue
                 turns += 1
+                if stats is not None:
+                    stats["tool_rounds"] = turns
                 for call in tool_calls:
                     tool_deadline = (
                         deadline - finalize_reserve_seconds

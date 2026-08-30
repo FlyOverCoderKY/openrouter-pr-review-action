@@ -393,6 +393,40 @@ def test_cmd_run_clears_stale_files_and_flags_failures(
     assert main(["run", str(fixture_dir), "--runs", "0", "--out", str(out)]) == 1
 
 
+def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    fixture_dir = tmp_path / "f"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+
+    def interrupted(**kwargs):
+        kwargs["progress"](
+            {
+                "elapsed_ms": 123,
+                "cost_usd": 0.004,
+                "requests": 2,
+                "provider": "example",
+            }
+        )
+        raise ActionError("interrupted")
+
+    monkeypatch.setattr(bench_mod, "run_lane", interrupted)
+    assert main(["run", str(fixture_dir), "--out", str(out)]) == 1
+    progress = json.loads((out / "progress-0.json").read_text(encoding="utf-8"))
+    assert progress == {
+        "schema": "or-pr-review/bench-progress/1",
+        "model": "x-ai/grok-4.6",
+        "elapsed_ms": 123,
+        "cost_usd": 0.004,
+        "requests": 2,
+        "provider": "example",
+    }
+
+
 def test_cmd_score_reports_means_and_skips_failed_runs(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

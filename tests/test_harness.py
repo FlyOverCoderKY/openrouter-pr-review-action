@@ -1215,6 +1215,7 @@ def test_lane_artifact_roundtrip_with_stats_fields() -> None:
 
 def test_run_lane_sums_byok_upstream_cost_and_requests_usage(tmp_path: Path) -> None:
     payloads: list[dict] = []
+    progress: list[dict[str, int | float | str]] = []
 
     def chat(payload: dict) -> dict:
         payloads.append(payload)
@@ -1239,10 +1240,20 @@ def test_run_lane_sums_byok_upstream_cost_and_requests_usage(tmp_path: Path) -> 
         workspace=tmp_path,
         max_tool_turns=0,
         chat=chat,
+        progress=progress.append,
     )
     assert result.ok
     assert result.cost_usd == pytest.approx(0.011)  # 0.009 upstream + 0.002 BYOK fee
     assert payloads[0]["usage"] == {"include": True}
+    assert progress == [
+        {
+            "elapsed_ms": progress[0]["elapsed_ms"],
+            "prompt_tokens": 5,
+            "completion_tokens": 5,
+            "cost_usd": pytest.approx(0.011),
+            "requests": 1,
+        }
+    ]
     # Round-trips through the lane artifact.
     from or_pr_review.schema import parse_lane_artifact
 

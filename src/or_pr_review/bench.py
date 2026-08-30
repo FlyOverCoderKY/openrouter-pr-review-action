@@ -448,8 +448,6 @@ def score_run(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    import os
-
     if args.runs < 1:
         raise ActionError("--runs must be at least 1")
     fixture = load_fixture(Path(args.fixture))
@@ -484,15 +482,30 @@ def _cmd_run(args: argparse.Namespace) -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     stale = sorted(out_dir.glob("run-*.json"))
+    stale.extend(sorted(out_dir.glob("progress-*.json")))
     if stale:
-        # Leftovers from an earlier batch would be globbed by `score` and
-        # silently mix experiments.
+        # Final leftovers would be globbed by `score`; progress leftovers
+        # would otherwise make a fresh batch look like a resumed one.
         print(f"clearing {len(stale)} stale run file(s) from {out_dir}")
         for path in stale:
             path.unlink()
     failures = 0
     for index in range(args.runs):
-        print(f"bench run {index + 1}/{args.runs}: model={args.model}")
+        print(f"bench run {index + 1}/{args.runs}: model={args.model}", flush=True)
+        progress_path = out_dir / f"progress-{index}.json"
+
+        def checkpoint(
+            payload: dict[str, int | float | str], progress_path: Path = progress_path
+        ) -> None:
+            record: dict[str, Any] = {
+                "schema": "or-pr-review/bench-progress/1",
+                "model": args.model,
+                **payload,
+            }
+            pending = progress_path.with_suffix(".tmp")
+            pending.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            os.replace(pending, progress_path)
+
         lane = run_lane(
             model=args.model,
             messages=[dict(message) for message in messages],
@@ -508,17 +521,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
             ),
             expect_coverage=True,
             expected_paths=expected_paths,
+            progress=checkpoint,
         )
         payload = lane.to_dict()
         out_path = out_dir / f"run-{index}.json"
         out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        progress_path.unlink(missing_ok=True)
         status = "ok" if lane.ok else f"FAILED: {lane.error}"
         if not lane.ok:
             failures += 1
         via = f", via {lane.provider}" if lane.provider else ""
         print(
             f"  -> {out_path} ({status}; {len(lane.findings)} finding(s), "
-            f"{lane.tool_rounds or 0} tool round(s){via})"
+            f"{lane.tool_rounds or 0} tool round(s){via})",
+            flush=True,
         )
     if failures:
         print(f"{failures}/{args.runs} lane(s) failed")

@@ -15,25 +15,28 @@ usage at the listed provider's pricing on the run date.
 
 PR #22 tested two attempts to make a broad agent-to-agent review batch easier
 for the fixing agent to adjudicate without adding a precision gate. Every arm
-used DeepInfra, the planted-mini fixture, its clean twin, the shipped empty
-effort, and a 50-tool-turn ceiling. The contemporaneous unchanged-main control
-was rerun rather than comparing only with an older sample.
+used DeepInfra, the hardened v2.1 planted-mini fixture at
+`b46023acffbc041ea2be8b2cf1dc19d01fcb5fce` (13 labels: 2 bug / 6 risk /
+5 nit), its clean twin, the shipped empty effort, and a 50-tool-turn ceiling.
+The contemporaneous unchanged-main control was rerun rather than comparing
+only with an older sample.
 
-| arm | recall | bug | risk | nit | sev-agree | planted precision | clean findings/run |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| unchanged main | 94% | 90% | **100%** | 88% | 41% | 100% | 4.8 |
-| + severity guidance and conservative consolidation | 95% | **100%** | 97% | **92%** | **48%** | 100% | **4.0** |
-| + severity guidance only | 89% | 90% | 93% | 84% | **48%** | 100% | 4.2 |
+| arm | lanes ok | recall | bug | risk | nit | diff | file | repo | sev-agree | planted precision | planted noise | clean findings/run | gate |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| unchanged main | 5/5 | 94% | 90% | 100% | 88% | 92% | 100% | 100% | 41% | 100% | 0% | 4.8 | control |
+| + severity guidance and conservative consolidation | 5/6 | 95% | 100% | 97% | 92% | 96% | 100% | 90% | 48% | 100% | 0% | 4.0 | reject |
+| + severity guidance only | 5/5 | 89% | 90% | 93% | 84% | 90% | 100% | 80% | 48% | 100% | 0% | 4.2 | reject |
 
 **Rejected.** The consolidation arm improved aggregate and bug recall, but a
-repo-context risk fell from 5/5 on main to 4/5 and one of its original five
-planted lanes failed coverage-manifest validation. A make-up lane supplied the
-fifth valid score; the operational failure remains part of the result. Removing
-consolidation did not recover recall: the narrower severity-only arm regressed
-overall, risk, nit, diff-context, and repo-context recall. Better severity
-agreement and slightly lower clean-twin volume are secondary to those losses in
-this recall-first product, so neither prompt change was adopted and the Grok
-cross-model arm was not run.
+repo-context `R6` plant (the out-of-diff `report.py` default-year caller) fell
+from 5/5 on main to 4/5 and one of its original five planted lanes failed
+coverage-manifest validation. A make-up lane supplied the fifth valid score;
+the operational failure remains part of the result. Removing consolidation did
+not recover recall: the narrower severity-only arm regressed overall, risk, nit,
+diff-context, and repo-context recall. Better severity agreement and slightly
+lower clean-twin volume are secondary to those losses in this recall-first
+product, so neither prompt change was adopted and the Grok cross-model arm was
+not run.
 
 The complete 31-call screen cost $0.056428 in provider-reported charges. This
 negative result also corrects the tuning premise: clean-twin volume measures

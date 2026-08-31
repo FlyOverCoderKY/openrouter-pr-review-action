@@ -295,12 +295,14 @@ LEAD each finding body with the concrete failure scenario itself; the
 falsification evidence and any proof gap come after it, because downstream
 consumers may see only the first part of the body.
 
-Before returning the findings, consolidate only evidence-equivalent drafts:
-when multiple drafts have the same trigger, root cause, and corrective change,
-return one finding and list its concrete instances in the body. Preserve
-separate findings when the trigger, root cause, or required fix differs, even
-when they share a file or line. Consolidation is an output-packaging step, not
-a reason to suppress a distinct candidate or unresolved risk.
+Before returning the findings, consolidate only evidence-equivalent drafts at
+the same primary code location: when multiple drafts at that location have the
+same trigger, root cause, and corrective change, return one finding. Preserve
+separate findings for separate files or hunks, or whenever the trigger, root
+cause, or required fix differs. The schema and fixing loop track one primary
+file and line per finding, so never hide a second location only in another
+finding's body. Consolidation is an output-packaging step, not a reason to
+suppress a distinct candidate or unresolved risk.
 """
     return f"""You are a pull-request reviewer. Tone: {tone_word}.
 
@@ -349,11 +351,12 @@ Calibrate severity for the fixing agent:
 - nit: an objective, localized low-impact defect or maintenance cost; not a
   personal style preference.
 
-Never hide uncertainty by overstating severity. State the strongest evidence
-and the material proof gap plainly so the fixing agent can confirm or refute
-the candidate efficiently. A proof gap may make a candidate a `risk` instead
-of a `bug`; under this recall-first contract it does not, by itself, erase a
-genuine candidate.
+Never hide uncertainty or material impact by misrating severity. State the
+strongest evidence and the material proof gap plainly so the fixing agent can
+confirm or refute the candidate efficiently. Certainty distinguishes a
+demonstrated `bug` from a credible `risk`; impact distinguishes both from a
+low-impact `nit`. Never demote materially harmful behavior to `nit` merely
+because its trigger has a proof gap.
 
 Write each body for a human skimming a review, not as one dense block: short
 paragraphs separated by blank lines (Markdown needs a blank line to break a

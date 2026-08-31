@@ -167,14 +167,16 @@ def test_initial_prompt_demands_exhaustive_all_severity_sweep() -> None:
     assert "LEAD each finding body with the concrete failure scenario" in system
     # Recall-preserving output discipline: consolidate only equivalent drafts
     # and communicate uncertainty through severity instead of suppressing it.
+    assert "same primary code location" in system
     assert "same trigger, root cause, and corrective change" in system
-    assert "Preserve\nseparate findings" in system
-    assert "not\na reason to suppress a distinct candidate" in system
+    assert "Preserve\nseparate findings for separate files or hunks" in system
+    assert "never hide a second location" in system
+    assert "not a reason to\nsuppress a distinct candidate" in system
     assert "current code and a concrete trigger demonstrate" in system
     assert "proof gap prevents calling it demonstrated" in system
     assert "not a\n  personal style preference" in system
-    assert "proof gap may make a candidate a `risk`" in system
-    assert "does not, by itself, erase" in system
+    assert "Certainty distinguishes a\ndemonstrated `bug`" in system
+    assert "Never demote materially harmful behavior to `nit`" in system
 
 
 def test_verify_prompt_omits_the_initial_sweep_block() -> None:
@@ -186,7 +188,8 @@ def test_verify_prompt_omits_the_initial_sweep_block() -> None:
     # But NEW verify findings get the same asymmetric falsification bar.
     assert "try to falsify it against current callers" in system
     assert "uncertainty is not rejection" in system
-    assert "proof gap may make a candidate a `risk`" in system
+    assert "Never demote materially harmful behavior to `nit`" in system
+    assert "under this recall-first contract" not in system
 
 
 def test_verify_prompt_still_requires_tools_before_empty_findings() -> None:

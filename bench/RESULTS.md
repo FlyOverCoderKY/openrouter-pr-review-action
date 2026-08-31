@@ -11,6 +11,38 @@ usage at the listed provider's pricing on the run date.
 > `noise` column, so precision numbers are not directly comparable across
 > that boundary (recall numbers are).
 
+## 2026-08-31 — recall-first output/severity prompt screen: REJECTED (z-ai/glm-5.3-flash, 5 runs/arm)
+
+PR #22 tested two attempts to make a broad agent-to-agent review batch easier
+for the fixing agent to adjudicate without adding a precision gate. Every arm
+used DeepInfra, the hardened v2.1 planted-mini fixture at
+`b46023acffbc041ea2be8b2cf1dc19d01fcb5fce` (13 labels: 2 bug / 6 risk /
+5 nit), its clean twin, the shipped empty effort, and a 50-tool-turn ceiling.
+The contemporaneous unchanged-main control was rerun rather than comparing
+only with an older sample.
+
+| arm | lanes ok | recall | bug | risk | nit | diff | file | repo | sev-agree | planted precision | planted noise | clean findings/run | gate |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| unchanged main | 5/5 | 94% | 90% | 100% | 88% | 92% | 100% | 100% | 41% | 100% | 0% | 4.8 | control |
+| + severity guidance and conservative consolidation | 5/6 | 95% | 100% | 97% | 92% | 96% | 100% | 90% | 48% | 100% | 0% | 4.0 | reject |
+| + severity guidance only | 5/5 | 89% | 90% | 93% | 84% | 90% | 100% | 80% | 48% | 100% | 0% | 4.2 | reject |
+
+**Rejected.** The consolidation arm improved aggregate and bug recall, but a
+repo-context `R6` plant (the out-of-diff `report.py` default-year caller) fell
+from 5/5 on main to 4/5 and one of its original five planted lanes failed
+coverage-manifest validation. A make-up lane supplied the fifth valid score;
+the operational failure remains part of the result. Removing consolidation did
+not recover recall: the narrower severity-only arm regressed overall, risk, nit,
+diff-context, and repo-context recall. Better severity agreement and slightly
+lower clean-twin volume are secondary to those losses in this recall-first
+product, so neither prompt change was adopted and the Grok cross-model arm was
+not run.
+
+The complete 31-call screen cost $0.056428 in provider-reported charges. This
+negative result also corrects the tuning premise: clean-twin volume measures
+downstream agent adjudication cost, not a human-review false-positive budget,
+and must not become a reason to suppress an undisproved candidate.
+
 ## 2026-08-29 — synthetic judge model decision: ADOPTED (openai/gpt-5.6-luna, 5 runs/fixture)
 
 The production judge protocol was run against all three committed synthetic

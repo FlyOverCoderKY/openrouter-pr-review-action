@@ -208,13 +208,16 @@ def test_parse_lane_payload_coverage_rules() -> None:
             "m",
             expect_coverage=True,
         )
-    with pytest.raises(LaneError, match="more than once"):
-        parse_lane_payload(
-            '{"findings": [], "coverage": '
-            '[{"path": "a.py", "findings": 0}, {"path": "a.py", "findings": 1}]}',
-            "m",
-            expect_coverage=True,
-        )
+    _findings, _resolutions, duplicate_coverage = parse_lane_payload(
+        '{"findings": [], "coverage": '
+        '[{"path": "a.py", "findings": 2}, '
+        '{"path": "a.py", "findings": 1}, '
+        '{"path": "b.py", "findings": 0}, '
+        '{"path": "a.py", "findings": 3}]}',
+        "m",
+        expect_coverage=True,
+    )
+    assert duplicate_coverage == [("a.py", 3), ("b.py", 0)]
 
 
 def test_oversized_coverage_truncates_when_not_required() -> None:
@@ -233,6 +236,29 @@ def test_oversized_coverage_truncates_when_not_required() -> None:
     assert len(coverage) == MAX_COVERAGE_ENTRIES  # advisory extras dropped
     with pytest.raises(LaneError, match="exceeds the limit"):
         parse_lane_payload(text, "m", expect_coverage=True)
+
+
+def test_coverage_limit_counts_unique_paths_after_duplicate_normalization() -> None:
+    import json as _json
+
+    from or_pr_review.schema import MAX_COVERAGE_ENTRIES, parse_lane_payload
+
+    unique_count = (MAX_COVERAGE_ENTRIES // 2) + 1
+    entries = [
+        {"path": f"f{number}.txt", "findings": sweep}
+        for sweep in range(3)
+        for number in range(unique_count)
+    ]
+    assert len(entries) > MAX_COVERAGE_ENTRIES
+
+    _findings, _resolutions, coverage = parse_lane_payload(
+        _json.dumps({"findings": [], "coverage": entries}),
+        "m",
+        expect_coverage=True,
+    )
+
+    assert len(coverage) == unique_count
+    assert coverage[0] == ("f0.txt", 2)
 
 
 def test_parse_lane_payload_resolutions() -> None:

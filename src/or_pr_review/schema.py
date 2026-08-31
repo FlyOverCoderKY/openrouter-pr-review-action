@@ -303,14 +303,8 @@ def _parse_coverage(raw: object, *, required: bool) -> list[tuple[str, int]]:
         return []
     if not isinstance(raw, list):
         raise LaneError("coverage must be an array or absent")
-    if len(raw) > MAX_COVERAGE_ENTRIES:
-        if required:
-            raise LaneError(f"coverage exceeds the limit of {MAX_COVERAGE_ENTRIES}")
-        # Enforcement is off (diff too large for a manifest); keep what fits
-        # instead of failing the lane over advisory extra entries.
-        raw = raw[:MAX_COVERAGE_ENTRIES]
     entries: list[tuple[str, int]] = []
-    seen: set[str] = set()
+    positions: dict[str, int] = {}
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             raise LaneError(f"coverage[{index}] must be an object")
@@ -321,10 +315,21 @@ def _parse_coverage(raw: object, *, required: bool) -> list[tuple[str, int]]:
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise LaneError(f"coverage[{index}].findings must be a nonnegative integer")
         normalized = path.strip()
-        if normalized in seen:
-            raise LaneError(f"coverage lists {normalized!r} more than once")
-        seen.add(normalized)
+        if normalized in positions:
+            existing_index = positions[normalized]
+            existing_path, existing_count = entries[existing_index]
+            # Repeated model-authored rows describe the same file. Keep the
+            # strongest claim without double-counting the manifest.
+            entries[existing_index] = (existing_path, max(existing_count, count))
+            continue
+        positions[normalized] = len(entries)
         entries.append((normalized, count))
+    if len(entries) > MAX_COVERAGE_ENTRIES:
+        if required:
+            raise LaneError(f"coverage exceeds the limit of {MAX_COVERAGE_ENTRIES}")
+        # Enforcement is off (diff too large for a manifest); keep what fits
+        # instead of failing the lane over advisory extra entries.
+        entries = entries[:MAX_COVERAGE_ENTRIES]
     return entries
 
 

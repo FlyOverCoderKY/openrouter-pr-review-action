@@ -520,6 +520,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 if args.provider
                 else None
             ),
+            provider_data_collection=args.provider_data_collection or None,
+            provider_zdr=args.provider_zdr,
             expect_coverage=True,
             expected_paths=expected_paths,
             progress=checkpoint,
@@ -1181,6 +1183,17 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="pin OpenRouter provider routing (comma-separated order, no fallbacks), "
         "e.g. 'baseten' — for provider bake-offs",
+    )
+    run_parser.add_argument(
+        "--provider-data-collection",
+        choices=("allow", "deny"),
+        default="",
+        help="set OpenRouter's provider.data_collection policy per request",
+    )
+    run_parser.add_argument(
+        "--provider-zdr",
+        action="store_true",
+        help="require an OpenRouter zero-data-retention endpoint per request",
     )
     run_parser.set_defaults(func=_cmd_run)
 

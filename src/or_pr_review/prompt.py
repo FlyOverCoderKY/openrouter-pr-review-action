@@ -295,14 +295,6 @@ LEAD each finding body with the concrete failure scenario itself; the
 falsification evidence and any proof gap come after it, because downstream
 consumers may see only the first part of the body.
 
-Before returning the findings, consolidate only evidence-equivalent drafts at
-the same primary code location: when multiple drafts at that location have the
-same trigger, root cause, and corrective change, return one finding. Preserve
-separate findings for separate files or hunks, or whenever the trigger, root
-cause, or required fix differs. The schema and fixing loop track one primary
-file and line per finding, so never hide a second location only in another
-finding's body. Consolidation is an output-packaging step, not a reason to
-suppress a distinct candidate or unresolved risk.
 """
     return f"""You are a pull-request reviewer. Tone: {tone_word}.
 

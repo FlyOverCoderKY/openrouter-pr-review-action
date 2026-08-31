@@ -7,10 +7,9 @@
   positive over a missed valid bug and retains unresolved genuine candidates,
   but now reserves `bug` for demonstrated failures, uses `risk` for credible
   material paths with a stated condition or proof gap, and reserves `nit` for
-  objective low-impact defects rather than subjective style. Evidence-equivalent
-  drafts are consolidated only when they share a primary code location, trigger,
-  root cause, and fix, reducing duplicate adjudication without collapsing
-  separately tracked locations or distinct defects.
+  objective low-impact defects rather than subjective style. Material candidates
+  must not be demoted to soon-retired `nit` findings merely because their trigger
+  has a proof gap.
 - Paid benchmark lanes now persist an atomic aggregate-only progress checkpoint
   after every completed OpenRouter response, allowing provider-reported cost and
   usage to survive an outer process timeout without storing prompts, findings,

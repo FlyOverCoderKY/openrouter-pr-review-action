@@ -165,13 +165,8 @@ def test_initial_prompt_demands_exhaustive_all_severity_sweep() -> None:
     assert "can NEVER disprove a finding" in system
     # The ledger clips bodies, so the failure scenario must lead the body.
     assert "LEAD each finding body with the concrete failure scenario" in system
-    # Recall-preserving output discipline: consolidate only equivalent drafts
-    # and communicate uncertainty through severity instead of suppressing it.
-    assert "same primary code location" in system
-    assert "same trigger, root cause, and corrective change" in system
-    assert "Preserve\nseparate findings for separate files or hunks" in system
-    assert "never hide a second location" in system
-    assert "not a reason to\nsuppress a distinct candidate" in system
+    # Recall-preserving output discipline communicates uncertainty through
+    # severity instead of suppressing the candidate.
     assert "current code and a concrete trigger demonstrate" in system
     assert "proof gap prevents calling it demonstrated" in system
     assert "not a\n  personal style preference" in system

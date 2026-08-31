@@ -208,13 +208,16 @@ def test_parse_lane_payload_coverage_rules() -> None:
             "m",
             expect_coverage=True,
         )
-    with pytest.raises(LaneError, match="more than once"):
-        parse_lane_payload(
-            '{"findings": [], "coverage": '
-            '[{"path": "a.py", "findings": 0}, {"path": "a.py", "findings": 1}]}',
-            "m",
-            expect_coverage=True,
-        )
+    _findings, _resolutions, duplicate_coverage = parse_lane_payload(
+        '{"findings": [], "coverage": '
+        '[{"path": "a.py", "findings": 2}, '
+        '{"path": "a.py", "findings": 1}, '
+        '{"path": "b.py", "findings": 0}, '
+        '{"path": "a.py", "findings": 3}]}',
+        "m",
+        expect_coverage=True,
+    )
+    assert duplicate_coverage == [("a.py", 3), ("b.py", 0)]
 
 
 def test_oversized_coverage_truncates_when_not_required() -> None:

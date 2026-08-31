@@ -238,6 +238,29 @@ def test_oversized_coverage_truncates_when_not_required() -> None:
         parse_lane_payload(text, "m", expect_coverage=True)
 
 
+def test_coverage_limit_counts_unique_paths_after_duplicate_normalization() -> None:
+    import json as _json
+
+    from or_pr_review.schema import MAX_COVERAGE_ENTRIES, parse_lane_payload
+
+    unique_count = (MAX_COVERAGE_ENTRIES // 2) + 1
+    entries = [
+        {"path": f"f{number}.txt", "findings": sweep}
+        for sweep in range(3)
+        for number in range(unique_count)
+    ]
+    assert len(entries) > MAX_COVERAGE_ENTRIES
+
+    _findings, _resolutions, coverage = parse_lane_payload(
+        _json.dumps({"findings": [], "coverage": entries}),
+        "m",
+        expect_coverage=True,
+    )
+
+    assert len(coverage) == unique_count
+    assert coverage[0] == ("f0.txt", 2)
+
+
 def test_parse_lane_payload_resolutions() -> None:
     import pytest
 

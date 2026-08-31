@@ -303,12 +303,6 @@ def _parse_coverage(raw: object, *, required: bool) -> list[tuple[str, int]]:
         return []
     if not isinstance(raw, list):
         raise LaneError("coverage must be an array or absent")
-    if len(raw) > MAX_COVERAGE_ENTRIES:
-        if required:
-            raise LaneError(f"coverage exceeds the limit of {MAX_COVERAGE_ENTRIES}")
-        # Enforcement is off (diff too large for a manifest); keep what fits
-        # instead of failing the lane over advisory extra entries.
-        raw = raw[:MAX_COVERAGE_ENTRIES]
     entries: list[tuple[str, int]] = []
     positions: dict[str, int] = {}
     for index, item in enumerate(raw):
@@ -330,6 +324,12 @@ def _parse_coverage(raw: object, *, required: bool) -> list[tuple[str, int]]:
             continue
         positions[normalized] = len(entries)
         entries.append((normalized, count))
+    if len(entries) > MAX_COVERAGE_ENTRIES:
+        if required:
+            raise LaneError(f"coverage exceeds the limit of {MAX_COVERAGE_ENTRIES}")
+        # Enforcement is off (diff too large for a manifest); keep what fits
+        # instead of failing the lane over advisory extra entries.
+        entries = entries[:MAX_COVERAGE_ENTRIES]
     return entries
 
 

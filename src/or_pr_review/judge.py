@@ -492,6 +492,8 @@ def run_llm_judge(
     api_key: str,
     timeout: int = 180,
     chat: ChatFn | None = None,
+    provider_data_collection: str | None = None,
+    provider_zdr: bool = False,
 ) -> tuple[list[MergedIssue], str, float | None]:
     """Returns (issues, mode, cost).
 
@@ -520,6 +522,15 @@ def run_llm_judge(
         "reasoning": dict(JUDGE_REASONING),
         "usage": {"include": True},
     }
+    if provider_data_collection not in {None, "allow", "deny"}:
+        raise ActionError("provider_data_collection must be allow, deny, or unset")
+    if provider_data_collection or provider_zdr:
+        provider_policy: dict[str, Any] = {}
+        if provider_data_collection:
+            provider_policy["data_collection"] = provider_data_collection
+        if provider_zdr:
+            provider_policy["zdr"] = True
+        payload["provider"] = provider_policy
     try:
         response = send(payload)
     except Exception as exc:  # noqa: BLE001

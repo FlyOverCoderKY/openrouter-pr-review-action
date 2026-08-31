@@ -88,6 +88,59 @@ def test_run_lane_enforces_explicit_benchmark_data_policy(tmp_path: Path) -> Non
     }
 
 
+@pytest.mark.parametrize(
+    ("data_collection", "zdr", "expected"),
+    [
+        ("deny", False, {"data_collection": "deny"}),
+        (None, True, {"zdr": True}),
+    ],
+)
+def test_run_lane_supports_unpinned_provider_data_policy(
+    tmp_path: Path,
+    data_collection: str | None,
+    zdr: bool,
+    expected: dict[str, object],
+) -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        return {
+            "provider": "example",
+            "choices": [{"message": {"content": '{"findings": []}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5},
+        }
+
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        provider_data_collection=data_collection,
+        provider_zdr=zdr,
+        chat=chat,
+    )
+
+    assert result.ok
+    assert payloads[0]["provider"] == expected
+
+
+def test_run_lane_rejects_invalid_provider_data_collection(tmp_path: Path) -> None:
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        provider_data_collection="sometimes",
+        chat=lambda _payload: {},
+    )
+
+    assert not result.ok
+    assert "provider_data_collection" in (result.error or "")
+
+
 def test_lane_parses_structured_findings(tmp_path: Path) -> None:
     def chat(_payload: dict) -> dict:
         return {

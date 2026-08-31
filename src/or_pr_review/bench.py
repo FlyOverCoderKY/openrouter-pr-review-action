@@ -1020,6 +1020,8 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
                 api_key=api_key,
                 timeout=args.timeout,
                 chat=capturing_chat,
+                provider_data_collection="deny",
+                provider_zdr=True,
             )
             record: dict[str, Any] = {
                 "schema_version": JUDGE_RUN_SCHEMA_VERSION,
@@ -1036,7 +1038,7 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
                 "production_default_judge": DEFAULT_JUDGE_MODEL,
                 "mode": mode,
                 "cost_usd": cost,
-                "routing": "openrouter-default",
+                "routing": "openrouter-zdr-data-collection-deny",
                 **response_meta,
                 "issues": [_merged_issue_dict(issue) for issue in issues],
             }
@@ -1187,13 +1189,16 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument(
         "--provider-data-collection",
         choices=("allow", "deny"),
-        default="",
-        help="set OpenRouter's provider.data_collection policy per request",
+        default="deny",
+        help="set OpenRouter's provider.data_collection policy per request "
+        "(default: deny)",
     )
     run_parser.add_argument(
         "--provider-zdr",
         action="store_true",
-        help="require an OpenRouter zero-data-retention endpoint per request",
+        default=True,
+        help="require an OpenRouter zero-data-retention endpoint per request "
+        "(enabled for benchmark runs)",
     )
     run_parser.set_defaults(func=_cmd_run)
 

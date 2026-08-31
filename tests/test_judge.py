@@ -116,6 +116,8 @@ def test_run_llm_judge_sends_schema_and_minimal_reasoning() -> None:
         ],
         api_key="sk-test",
         chat=chat,
+        provider_data_collection="deny",
+        provider_zdr=True,
     )
     issues, mode, cost = issues
     assert mode == "merged"
@@ -124,6 +126,7 @@ def test_run_llm_judge_sends_schema_and_minimal_reasoning() -> None:
     assert seen["model"] == "google/gemini-3.1-flash-lite"
     assert seen["reasoning"] == {"effort": "minimal"}
     assert seen["usage"] == {"include": True}
+    assert seen["provider"] == {"data_collection": "deny", "zdr": True}
     assert seen["response_format"]["type"] == "json_schema"
 
 

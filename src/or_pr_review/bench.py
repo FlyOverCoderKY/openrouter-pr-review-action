@@ -1195,10 +1195,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--provider-zdr",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
         help="require an OpenRouter zero-data-retention endpoint per request "
-        "(enabled for benchmark runs)",
+        "(default: enabled; use --no-provider-zdr only for non-private bake-offs)",
     )
     run_parser.set_defaults(func=_cmd_run)
 

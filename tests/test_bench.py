@@ -443,6 +443,24 @@ def test_cmd_run_wires_provider_data_policy_flags(
     assert calls[0]["provider_data_collection"] == "deny"
     assert calls[0]["provider_zdr"] is True
 
+    calls.clear()
+    assert (
+        main(
+            [
+                "run",
+                str(fixture_dir),
+                "--out",
+                str(out),
+                "--provider-data-collection",
+                "allow",
+                "--no-provider-zdr",
+            ]
+        )
+        == 0
+    )
+    assert calls[0]["provider_data_collection"] == "allow"
+    assert calls[0]["provider_zdr"] is False
+
 
 def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

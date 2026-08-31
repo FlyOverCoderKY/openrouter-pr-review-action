@@ -138,6 +138,8 @@ def test_initial_prompt_demands_exhaustive_all_severity_sweep() -> None:
     system = build_messages(_collected())[0]["content"]
     # Recall-over-precision framing with the loop rationale.
     assert "prefer recall over precision" in system
+    assert "false positive is cheaper" in system
+    assert "than a missed valid bug" in system
     assert "do not self-censor borderline findings" in system
     assert "may dispute it" in system
     # Numeric expectation anchor, not just a cap.
@@ -163,6 +165,16 @@ def test_initial_prompt_demands_exhaustive_all_severity_sweep() -> None:
     assert "can NEVER disprove a finding" in system
     # The ledger clips bodies, so the failure scenario must lead the body.
     assert "LEAD each finding body with the concrete failure scenario" in system
+    # Recall-preserving output discipline: consolidate only equivalent drafts
+    # and communicate uncertainty through severity instead of suppressing it.
+    assert "same trigger, root cause, and corrective change" in system
+    assert "Preserve\nseparate findings" in system
+    assert "not\na reason to suppress a distinct candidate" in system
+    assert "current code and a concrete trigger demonstrate" in system
+    assert "proof gap prevents calling it demonstrated" in system
+    assert "not a\n  personal style preference" in system
+    assert "proof gap may make a candidate a `risk`" in system
+    assert "does not, by itself, erase" in system
 
 
 def test_verify_prompt_omits_the_initial_sweep_block() -> None:
@@ -174,6 +186,7 @@ def test_verify_prompt_omits_the_initial_sweep_block() -> None:
     # But NEW verify findings get the same asymmetric falsification bar.
     assert "try to falsify it against current callers" in system
     assert "uncertainty is not rejection" in system
+    assert "proof gap may make a candidate a `risk`" in system
 
 
 def test_verify_prompt_still_requires_tools_before_empty_findings() -> None:

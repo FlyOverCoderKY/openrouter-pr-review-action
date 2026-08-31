@@ -231,7 +231,8 @@ def _system_prompt(*, tone: str, mode: str) -> str:
             "This is the initial, exhaustive review (round 1) of an automated "
             "review loop. Your findings are consumed by a fixing agent that "
             "evaluates every finding and may dispute it, so prefer recall over "
-            "precision: report every genuine issue you can name a concrete "
+            "precision: a well-explained false positive is cheaper in this workflow "
+            "than a missed valid bug. Report every genuine issue you can name a concrete "
             "failure scenario or cost for, at every severity — bug, risk, and "
             "nit — and do not self-censor borderline findings. Genuine means "
             "you can name the concrete failure scenario or cost; never pad "
@@ -293,6 +294,13 @@ keep the finding and state the material proof gap explicitly in its body.
 LEAD each finding body with the concrete failure scenario itself; the
 falsification evidence and any proof gap come after it, because downstream
 consumers may see only the first part of the body.
+
+Before returning the findings, consolidate only evidence-equivalent drafts:
+when multiple drafts have the same trigger, root cause, and corrective change,
+return one finding and list its concrete instances in the body. Preserve
+separate findings when the trigger, root cause, or required fix differs, even
+when they share a file or line. Consolidation is an output-packaging step, not
+a reason to suppress a distinct candidate or unresolved risk.
 """
     return f"""You are a pull-request reviewer. Tone: {tone_word}.
 
@@ -332,6 +340,20 @@ Return a JSON object with a "findings" array. Each finding:
 - severity: bug | risk | nit
 - file: repository-relative path or null
 - line: 1-based line number if known, otherwise null
+
+Calibrate severity for the fixing agent:
+- bug: the current code and a concrete trigger demonstrate incorrect behavior,
+  including build, data, security, or contract failures.
+- risk: a credible, materially harmful failure path remains, but a stated
+  condition or proof gap prevents calling it demonstrated.
+- nit: an objective, localized low-impact defect or maintenance cost; not a
+  personal style preference.
+
+Never hide uncertainty by overstating severity. State the strongest evidence
+and the material proof gap plainly so the fixing agent can confirm or refute
+the candidate efficiently. A proof gap may make a candidate a `risk` instead
+of a `bug`; under this recall-first contract it does not, by itself, erase a
+genuine candidate.
 
 Write each body for a human skimming a review, not as one dense block: short
 paragraphs separated by blank lines (Markdown needs a blank line to break a

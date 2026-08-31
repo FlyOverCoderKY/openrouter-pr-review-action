@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added recall-preserving output discipline to the review prompt. The
+  agent-to-agent workflow still explicitly prefers a well-explained false
+  positive over a missed valid bug and retains unresolved genuine candidates,
+  but now reserves `bug` for demonstrated failures, uses `risk` for credible
+  material paths with a stated condition or proof gap, and rejects subjective
+  style as a `nit`. Evidence-equivalent drafts are consolidated only when they
+  share a trigger, root cause, and fix, reducing duplicate adjudication without
+  collapsing distinct defects.
 - Paid benchmark lanes now persist an atomic aggregate-only progress checkpoint
   after every completed OpenRouter response, allowing provider-reported cost and
   usage to survive an outer process timeout without storing prompts, findings,

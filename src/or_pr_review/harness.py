@@ -241,6 +241,8 @@ def run_lane(
     effort: str = "",
     timeout: int = DEFAULT_TIMEOUT,
     provider_order: list[str] | None = None,
+    provider_data_collection: str | None = None,
+    provider_zdr: bool = False,
     # Anchor-gate reference tree for tool-less runs (workspace None): a full
     # checkout of the reviewed head, used only for path/line existence checks.
     anchor_root: Path | None = None,
@@ -337,6 +339,8 @@ def run_lane(
             stats=stats,
             meta=meta,
             provider_order=provider_order,
+            provider_data_collection=provider_data_collection,
+            provider_zdr=provider_zdr,
             response_schema=findings_json_schema(
                 include_coverage=expect_coverage,
                 include_resolutions=expect_resolutions,
@@ -410,6 +414,8 @@ def _run_loop(
     stats: dict[str, int] | None = None,
     meta: dict[str, str] | None = None,
     provider_order: list[str] | None = None,
+    provider_data_collection: str | None = None,
+    provider_zdr: bool = False,
     response_schema: dict[str, Any] | None = None,
     validate_final: Callable[[str], object] | None = None,
     deadline: float | None = None,
@@ -429,10 +435,20 @@ def _run_loop(
     }
     if effort:
         payload_base["reasoning"] = {"effort": effort}
-    if provider_order:
-        # Pin OpenRouter's provider routing (e.g. for provider bake-offs).
-        # No fallbacks: a pinned comparison must not silently reroute.
-        payload_base["provider"] = {"order": list(provider_order), "allow_fallbacks": False}
+    if provider_data_collection not in {None, "allow", "deny"}:
+        raise LaneError("provider_data_collection must be allow, deny, or unset")
+    if provider_order or provider_data_collection or provider_zdr:
+        provider_policy: dict[str, Any] = {}
+        if provider_order:
+            provider_policy.update(
+                {"order": list(provider_order), "allow_fallbacks": False}
+            )
+        if provider_data_collection:
+            provider_policy["data_collection"] = provider_data_collection
+        if provider_zdr:
+            provider_policy["zdr"] = True
+        # Pin routing for comparisons and make benchmark data policy explicit.
+        payload_base["provider"] = provider_policy
 
     turns = 0
     repairs = 0

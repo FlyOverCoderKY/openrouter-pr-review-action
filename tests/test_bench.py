@@ -405,6 +405,63 @@ def test_cmd_run_clears_stale_files_and_flags_failures(
     assert main(["run", str(fixture_dir), "--runs", "0", "--out", str(out)]) == 1
 
 
+def test_cmd_run_wires_provider_data_policy_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    fixture_dir = tmp_path / "f"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    calls: list[dict] = []
+
+    def successful(**kwargs):
+        calls.append(kwargs)
+        return _fake_lane(ok=True)
+
+    monkeypatch.setattr(bench_mod, "run_lane", successful)
+    assert (
+        main(
+            [
+                "run",
+                str(fixture_dir),
+                "--out",
+                str(out),
+                "--provider-data-collection",
+                "deny",
+                "--provider-zdr",
+            ]
+        )
+        == 0
+    )
+    assert calls[0]["provider_data_collection"] == "deny"
+    assert calls[0]["provider_zdr"] is True
+
+    calls.clear()
+    assert main(["run", str(fixture_dir), "--out", str(out)]) == 0
+    assert calls[0]["provider_data_collection"] == "deny"
+    assert calls[0]["provider_zdr"] is True
+
+    calls.clear()
+    assert (
+        main(
+            [
+                "run",
+                str(fixture_dir),
+                "--out",
+                str(out),
+                "--provider-data-collection",
+                "allow",
+                "--no-provider-zdr",
+            ]
+        )
+        == 0
+    )
+    assert calls[0]["provider_data_collection"] == "allow"
+    assert calls[0]["provider_zdr"] is False
+
+
 def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -778,6 +835,8 @@ def test_judge_run_records_repeatability_metadata_without_secret(
         "google/gemini-3.1-flash-lite",
         "openai/gpt-5.6-luna",
     ]
+    assert all(call["provider_data_collection"] == "deny" for call in calls)
+    assert all(call["provider_zdr"] is True for call in calls)
     results = sorted(out.glob("judge-*.json"))
     assert len(results) == 2
     for result in results:

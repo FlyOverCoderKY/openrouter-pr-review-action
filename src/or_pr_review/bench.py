@@ -520,6 +520,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 if args.provider
                 else None
             ),
+            provider_data_collection=args.provider_data_collection or None,
+            provider_zdr=args.provider_zdr,
             expect_coverage=True,
             expected_paths=expected_paths,
             progress=checkpoint,
@@ -1018,6 +1020,8 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
                 api_key=api_key,
                 timeout=args.timeout,
                 chat=capturing_chat,
+                provider_data_collection="deny",
+                provider_zdr=True,
             )
             record: dict[str, Any] = {
                 "schema_version": JUDGE_RUN_SCHEMA_VERSION,
@@ -1034,7 +1038,7 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
                 "production_default_judge": DEFAULT_JUDGE_MODEL,
                 "mode": mode,
                 "cost_usd": cost,
-                "routing": "openrouter-default",
+                "routing": "openrouter-zdr-data-collection-deny",
                 **response_meta,
                 "issues": [_merged_issue_dict(issue) for issue in issues],
             }
@@ -1181,6 +1185,20 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="pin OpenRouter provider routing (comma-separated order, no fallbacks), "
         "e.g. 'baseten' — for provider bake-offs",
+    )
+    run_parser.add_argument(
+        "--provider-data-collection",
+        choices=("allow", "deny"),
+        default="deny",
+        help="set OpenRouter's provider.data_collection policy per request "
+        "(default: deny)",
+    )
+    run_parser.add_argument(
+        "--provider-zdr",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="require an OpenRouter zero-data-retention endpoint per request "
+        "(default: enabled; use --no-provider-zdr only for non-private bake-offs)",
     )
     run_parser.set_defaults(func=_cmd_run)
 

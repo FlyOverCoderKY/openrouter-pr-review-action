@@ -462,6 +462,39 @@ def test_cmd_run_wires_provider_data_policy_flags(
     assert calls[0]["provider_zdr"] is False
 
 
+def test_cmd_run_wires_benchmark_lane_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    fixture_dir = tmp_path / "f"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    calls: list[dict] = []
+
+    def successful(**kwargs):
+        calls.append(kwargs)
+        return _fake_lane(ok=True)
+
+    monkeypatch.setattr(bench_mod, "run_lane", successful)
+
+    assert (
+        main(
+            [
+                "run",
+                str(fixture_dir),
+                "--out",
+                str(out),
+                "--lane-timeout",
+                "1680",
+            ]
+        )
+        == 0
+    )
+    assert calls[0]["lane_timeout"] == 1680
+
+
 def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

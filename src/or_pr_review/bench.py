@@ -57,7 +57,7 @@ from typing import Any
 from or_pr_review import __version__
 from or_pr_review.collect import CollectedReview, DiffPlan, pack_diff, truncate_diff
 from or_pr_review.errors import ActionError
-from or_pr_review.harness import openrouter_chat, run_lane
+from or_pr_review.harness import DEFAULT_LANE_TIMEOUT_SECONDS, openrouter_chat, run_lane
 from or_pr_review.judge import (
     JUDGE_REASONING,
     build_judge_messages,
@@ -515,6 +515,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             max_tool_turns=args.max_tool_turns,
             effort=args.effort,
             timeout=args.timeout,
+            lane_timeout=args.lane_timeout,
             provider_order=(
                 [p.strip() for p in args.provider.split(",") if p.strip()]
                 if args.provider
@@ -1174,6 +1175,12 @@ def main(argv: list[str] | None = None) -> int:
         help="reasoning effort; empty matches the action's default (no effort field)",
     )
     run_parser.add_argument("--timeout", type=int, default=180)
+    run_parser.add_argument(
+        "--lane-timeout",
+        type=int,
+        default=DEFAULT_LANE_TIMEOUT_SECONDS,
+        help="outer lane deadline in seconds; benchmark runners may raise it for 50-turn reviews",
+    )
     run_parser.add_argument(
         "--legacy-truncation",
         action="store_true",

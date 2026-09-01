@@ -674,6 +674,27 @@ def _run_loop(
                 return content
             if last_error:
                 raise last_error
+            if not finalize_retried:
+                # Some otherwise healthy providers occasionally return an
+                # empty assistant message after several successful tool
+                # rounds. Treat that like a malformed finish: preserve the
+                # gathered evidence and make one bounded, schema-enforced,
+                # tool-free finalization request instead of discarding the
+                # entire review.
+                finalize_retried = True
+                conversation.append(_assistant_record(message))
+                conversation.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{FINALIZE_RETRY_NOTICE} Problem: the previous "
+                            "assistant message was empty."
+                        ),
+                    }
+                )
+                tools_active = False
+                use_schema = True
+                continue
             raise LaneError("OpenRouter returned an empty assistant message")
     finally:
         if stats is not None:

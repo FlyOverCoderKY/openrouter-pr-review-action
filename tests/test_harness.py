@@ -652,6 +652,53 @@ def test_malformed_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None
     assert len(payloads) == 3
 
 
+def test_empty_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        if len(payloads) == 2:
+            return {"choices": [{"message": {"content": ""}}]}
+        assert "response_format" in payload
+        assert "tools" not in payload
+        assert "previous assistant message was empty" in payload["messages"][-1][
+            "content"
+        ]
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=50,
+    )
+    assert result.ok
+    assert len(payloads) == 3
+
+
+def test_empty_finish_fails_open_after_single_retry() -> None:
+    calls = {"n": 0}
+
+    def chat(_payload: dict) -> dict:
+        calls["n"] += 1
+        return {"choices": [{"message": {"content": ""}}]}
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+    )
+    assert not result.ok
+    assert calls["n"] == 2
+
+
 def test_malformed_finish_fails_open_after_single_retry() -> None:
     calls = {"n": 0}
 

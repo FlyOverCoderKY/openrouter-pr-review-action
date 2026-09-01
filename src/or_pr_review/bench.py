@@ -450,6 +450,19 @@ def score_run(
 def _cmd_run(args: argparse.Namespace) -> int:
     if args.runs < 1:
         raise ActionError("--runs must be at least 1")
+    lane_timeout = args.lane_timeout
+    if lane_timeout is None:
+        raw_lane_timeout = os.environ.get("OR_PR_REVIEW_BENCH_LANE_TIMEOUT_SECONDS", "")
+        try:
+            lane_timeout = (
+                int(raw_lane_timeout)
+                if raw_lane_timeout
+                else DEFAULT_LANE_TIMEOUT_SECONDS
+            )
+        except ValueError as exc:
+            raise ActionError("benchmark lane timeout must be a positive integer") from exc
+    if lane_timeout < 1:
+        raise ActionError("benchmark lane timeout must be a positive integer")
     fixture = load_fixture(Path(args.fixture))
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
@@ -515,7 +528,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             max_tool_turns=args.max_tool_turns,
             effort=args.effort,
             timeout=args.timeout,
-            lane_timeout=args.lane_timeout,
+            lane_timeout=lane_timeout,
             provider_order=(
                 [p.strip() for p in args.provider.split(",") if p.strip()]
                 if args.provider
@@ -1178,7 +1191,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument(
         "--lane-timeout",
         type=int,
-        default=DEFAULT_LANE_TIMEOUT_SECONDS,
+        default=None,
         help="outer lane deadline in seconds; benchmark runners may raise it for 50-turn reviews",
     )
     run_parser.add_argument(

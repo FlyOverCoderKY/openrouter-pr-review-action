@@ -494,6 +494,14 @@ def test_cmd_run_wires_benchmark_lane_timeout(
     )
     assert calls[0]["lane_timeout"] == 1680
 
+    calls.clear()
+    monkeypatch.setenv("OR_PR_REVIEW_BENCH_LANE_TIMEOUT_SECONDS", "1740")
+    assert main(["run", str(fixture_dir), "--out", str(out)]) == 0
+    assert calls[0]["lane_timeout"] == 1740
+
+    monkeypatch.setenv("OR_PR_REVIEW_BENCH_LANE_TIMEOUT_SECONDS", "invalid")
+    assert main(["run", str(fixture_dir), "--out", str(out)]) == 1
+
 
 def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

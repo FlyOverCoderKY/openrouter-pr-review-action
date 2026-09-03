@@ -464,6 +464,7 @@ def _run_loop(
     finalize_retried = False
     salvage_attempted = False
     deadline_finalizing = False
+    serial_tool_calls = model.startswith("google/gemini-3")
     try:
         while True:
             now = time.monotonic()
@@ -509,6 +510,14 @@ def _run_loop(
             if tools_active:
                 payload["tools"] = tools
                 payload["tool_choice"] = "required" if force_tool else "auto"
+                # Gemini 3 strictly validates thought signatures across a
+                # function-calling turn.  Parallel calls have intermittently
+                # arrived without a usable signature for every call, causing
+                # the next otherwise-valid request to fail with HTTP 400
+                # INVALID_ARGUMENT.  Keep Gemini's tool transcript serial so
+                # there is exactly one signature-bearing call to round-trip.
+                if serial_tool_calls:
+                    payload["parallel_tool_calls"] = False
             if stats is not None:
                 stats["requests"] = stats.get("requests", 0) + 1
             try:

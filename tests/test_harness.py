@@ -652,6 +652,55 @@ def test_malformed_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None
     assert len(payloads) == 3
 
 
+def test_gemini_3_disables_parallel_tool_calls_only_while_tools_are_active(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=1,
+    )
+
+    assert result.ok
+    assert payloads[0]["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in payloads[1]
+
+
+def test_non_gemini_tool_calls_keep_provider_default_parallelism(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=1,
+    )
+
+    assert result.ok
+    assert "parallel_tool_calls" not in payloads[0]
+
+
 def test_empty_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     payloads: list[dict] = []

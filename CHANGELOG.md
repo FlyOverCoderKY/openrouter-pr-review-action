@@ -8,6 +8,13 @@
   code, paths, or credentials. Checkpoint failure is non-fatal to review work,
   tool-round counts stay current, and stale JSON/tmp sidecars are cleared before
   a fresh batch.
+- Gemini 3 tool loops now round-trip the complete assistant message, including
+  opaque thought-signature and provider metadata. An unsigned tool request is
+  never executed or added to history; the lane instead makes one structured,
+  tool-free finish from the last valid transcript. Gemini salvage also removes
+  rejected tool protocol blocks while retaining their read-only observations,
+  and lane artifacts expose aggregate signature-recovery counts without
+  persisting signature values.
 - Full-PR acquisition now falls back to an unlimited local
   `git diff base...head` when GitHub rejects `gh pr diff` with its 20,000-line
   HTTP 406 response. The fallback uses fresh base/head commit OIDs from PR

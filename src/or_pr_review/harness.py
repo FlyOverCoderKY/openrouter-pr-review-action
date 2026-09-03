@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import math
@@ -74,6 +75,12 @@ DEADLINE_FINALIZE_NOTICE = (
     "The review lane is approaching its wall-clock deadline. Stop using tools "
     "and return the best complete JSON result now from the embedded diff and "
     "all evidence gathered so far."
+)
+MISSING_SIGNATURE_FINALIZE_NOTICE = (
+    "The tool request could not be safely continued because its provider "
+    "reasoning signature was missing. Do not call tools. Return the best "
+    'complete JSON result now as {"findings": [...]} from the embedded diff '
+    "and evidence already gathered."
 )
 # Bound on stub-repair rounds if a model keeps emitting tool calls after the
 # tool budget was withdrawn.
@@ -390,6 +397,9 @@ def _attach_stats(
     result.requests = stats.get("requests")
     result.tool_rounds = stats.get("tool_rounds")
     result.retries = stats.get("retries")
+    result.thought_signature_tool_turns = stats.get("thought_signature_tool_turns")
+    result.thought_signature_recoveries = stats.get("thought_signature_recoveries")
+    result.sanitized_tool_turns = stats.get("sanitized_tool_turns")
     result.cached_tokens = usage.get("cached_tokens")
     cost = usage.get("cost_usd")
     if isinstance(cost, (int, float)) and not isinstance(cost, bool):
@@ -465,6 +475,17 @@ def _run_loop(
     salvage_attempted = False
     deadline_finalizing = False
     serial_tool_calls = model.startswith("google/gemini-3")
+    signature_finalizing = False
+
+    def sanitize_gemini_history() -> None:
+        if not serial_tool_calls:
+            return
+        sanitized = _sanitize_tool_history_for_finalize(conversation)
+        if stats is not None and sanitized:
+            stats["sanitized_tool_turns"] = (
+                stats.get("sanitized_tool_turns", 0) + sanitized
+            )
+
     try:
         while True:
             now = time.monotonic()
@@ -507,16 +528,24 @@ def _run_loop(
             }
             if not use_schema:
                 payload.pop("response_format", None)
-            if tools_active:
+            replay_tools = (
+                serial_tool_calls
+                and not tools_active
+                and _conversation_has_tool_protocol(conversation)
+            )
+            if tools_active or replay_tools:
                 payload["tools"] = tools
-                payload["tool_choice"] = "required" if force_tool else "auto"
+                if tools_active:
+                    payload["tool_choice"] = "required" if force_tool else "auto"
+                else:
+                    payload["tool_choice"] = "none"
                 # Gemini 3 strictly validates thought signatures across a
                 # function-calling turn.  Parallel calls have intermittently
                 # arrived without a usable signature for every call, causing
                 # the next otherwise-valid request to fail with HTTP 400
                 # INVALID_ARGUMENT.  Keep Gemini's tool transcript serial so
                 # there is exactly one signature-bearing call to round-trip.
-                if serial_tool_calls:
+                if serial_tool_calls and tools_active:
                     payload["parallel_tool_calls"] = False
             if stats is not None:
                 stats["requests"] = stats.get("requests", 0) + 1
@@ -530,6 +559,12 @@ def _run_loop(
                 # same schema-fallback and salvage handling as HTTP errors.
                 message = _assistant_message(response)
             except LaneError as exc:
+                if signature_finalizing:
+                    # An unsigned tool turn gets one safe, tool-free finish.
+                    # Retrying it with another transcript mutation would no
+                    # longer be the promised recovery from the last valid
+                    # provider-authenticated history.
+                    raise
                 message = str(exc)
                 lowered = message.lower()
                 schema_rejected = "response_format" in lowered or "json_schema" in lowered
@@ -538,6 +573,29 @@ def _run_loop(
                     last_error = exc
                     if deadline_finalizing:
                         finalize_retried = True
+                    continue
+                if (
+                    serial_tool_calls
+                    and turns > 0
+                    and _looks_like_gemini_signature_rejection(lowered)
+                ):
+                    # The provider rejected an ostensibly signed tool history.
+                    # Strip the protocol blocks once, retain their observations
+                    # as attributed plain evidence, and make one no-tools
+                    # structured finish rather than replaying poisoned history.
+                    sanitize_gemini_history()
+                    signature_finalizing = True
+                    salvage_attempted = True
+                    if stats is not None:
+                        stats["salvaged"] = 1
+                        stats["thought_signature_recoveries"] = (
+                            stats.get("thought_signature_recoveries", 0) + 1
+                        )
+                    conversation.append(
+                        {"role": "user", "content": MISSING_SIGNATURE_FINALIZE_NOTICE}
+                    )
+                    tools_active = False
+                    use_schema = True
                     continue
                 deadline_pressure = (
                     deadline is not None
@@ -603,7 +661,52 @@ def _run_loop(
                 raise
             tool_calls = message.get("tool_calls") or []
             if tool_calls:
+                if signature_finalizing:
+                    raise LaneError(
+                        "Gemini returned another tool call during thought-signature recovery"
+                    )
                 force_tool = False
+                if serial_tool_calls and not tools_active:
+                    # The provider ignored tool_choice=none. Do not append or
+                    # execute the unexpected turn; finish once from attributed
+                    # plain evidence without replaying tool protocol.
+                    sanitize_gemini_history()
+                    signature_finalizing = True
+                    salvage_attempted = True
+                    if stats is not None:
+                        stats["salvaged"] = 1
+                        stats["thought_signature_recoveries"] = (
+                            stats.get("thought_signature_recoveries", 0) + 1
+                        )
+                    conversation.append(
+                        {"role": "user", "content": MISSING_SIGNATURE_FINALIZE_NOTICE}
+                    )
+                    use_schema = True
+                    continue
+                if serial_tool_calls and not _has_round_trippable_gemini_signature(message):
+                    # Gemini 3 requires the thought signature from each
+                    # function-calling step to appear unchanged in the next
+                    # request. Never execute a call whose response cannot be
+                    # replayed: doing so would both waste local work and poison
+                    # every subsequent provider request, including salvage.
+                    signature_finalizing = True
+                    salvage_attempted = True
+                    if stats is not None:
+                        stats["salvaged"] = 1
+                        stats["thought_signature_recoveries"] = (
+                            stats.get("thought_signature_recoveries", 0) + 1
+                        )
+                    sanitize_gemini_history()
+                    conversation.append(
+                        {"role": "user", "content": MISSING_SIGNATURE_FINALIZE_NOTICE}
+                    )
+                    tools_active = False
+                    use_schema = True
+                    continue
+                if serial_tool_calls and stats is not None:
+                    stats["thought_signature_tool_turns"] = (
+                        stats.get("thought_signature_tool_turns", 0) + 1
+                    )
                 conversation.append(_assistant_record(message))
                 if not tools_active or workspace is None:
                     # The model produced tool calls this loop never solicited
@@ -663,7 +766,7 @@ def _run_loop(
                     else:
                         parse_model_findings(content, model)
                 except LaneError as exc:
-                    if finalize_retried:
+                    if finalize_retried or signature_finalizing:
                         raise
                     # The tool-backed path runs without response_format, so a
                     # malformed natural finish gets exactly one
@@ -721,6 +824,21 @@ def _looks_like_context_overflow(lowered_error: str) -> bool:
     )
 
 
+def _looks_like_gemini_signature_rejection(lowered_error: str) -> bool:
+    if "thought_signature" in lowered_error or "thought signature" in lowered_error:
+        return True
+    return "invalid_argument" in lowered_error and (
+        "function call" in lowered_error or "tool" in lowered_error
+    )
+
+
+def _conversation_has_tool_protocol(conversation: list[dict[str, Any]]) -> bool:
+    return any(
+        message.get("role") == "assistant" and bool(message.get("tool_calls"))
+        for message in conversation
+    )
+
+
 def _shrink_tool_history(
     conversation: list[dict[str, Any]], *, keep_last: int = 2, keep_bytes: int = 2_000
 ) -> None:
@@ -773,18 +891,123 @@ def _message_text(message: dict[str, Any]) -> str:
 
 
 def _assistant_record(message: dict[str, Any]) -> dict[str, Any]:
-    record: dict[str, Any] = {"role": "assistant", "content": message.get("content") or ""}
-    if message.get("tool_calls"):
-        record["tool_calls"] = message["tool_calls"]
-    # OpenRouter's reasoning contract: reasoning_details must be passed back
-    # unmodified when continuing a tool-calling conversation. Dropping it
-    # strips the model's prior reasoning from every later turn. `reasoning`
-    # is the normalized text form some providers return instead.
-    if message.get("reasoning_details"):
-        record["reasoning_details"] = message["reasoning_details"]
-    elif message.get("reasoning"):
-        record["reasoning"] = message["reasoning"]
+    # Provider adapters can attach opaque continuity metadata to an assistant
+    # message. Reconstructing only the fields known to this harness drops that
+    # metadata (including Gemini thought signatures). Echo the complete
+    # message exactly as returned, using a deep copy so later local mutations
+    # cannot alter the provider-authenticated object.
+    record = copy.deepcopy(message)
+    record["role"] = "assistant"
     return record
+
+
+def _has_round_trippable_gemini_signature(message: dict[str, Any]) -> bool:
+    """Return whether a Gemini tool step carries an opaque signature we echo.
+
+    OpenRouter normally exposes Gemini signatures as a google-gemini-v1
+    reasoning detail. Direct thought-signature fields are also accepted for
+    compatibility with adapters that retain Google's function-call metadata.
+    Plain reasoning/reasoning_content text is useful context but is not a
+    cryptographic thought signature.
+    """
+    details = message.get("reasoning_details")
+    if isinstance(details, list):
+        for detail in details:
+            if not isinstance(detail, dict) or detail.get("format") != "google-gemini-v1":
+                continue
+            signature = detail.get("signature")
+            data = detail.get("data")
+            if isinstance(signature, str) and signature.strip():
+                return True
+            if (
+                detail.get("type") == "reasoning.encrypted"
+                and isinstance(data, str)
+                and data.strip()
+            ):
+                return True
+
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list) or not calls or not isinstance(calls[0], dict):
+        return False
+    first = calls[0]
+    function = first.get("function")
+    candidates = [first]
+    if isinstance(function, dict):
+        candidates.append(function)
+    for candidate in candidates:
+        for key in ("thought_signature", "thoughtSignature"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+    return False
+
+
+def _sanitize_tool_history_for_finalize(conversation: list[dict[str, Any]]) -> int:
+    """Replace tool protocol history with plain evidence for safe salvage.
+
+    A provider 400 can mean an earlier tool-call signature is unacceptable.
+    Re-sending the same function-call blocks poisons a no-tools salvage request
+    too. Remove assistant function-call messages and convert their tool results
+    to ordinary user evidence, retaining the observations without asking the
+    provider to authenticate the broken tool protocol.
+    """
+    sanitized: list[dict[str, Any]] = []
+    call_provenance: dict[str, tuple[str, str]] = {}
+    removed_turns = 0
+    for message in conversation:
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            removed_turns += 1
+            calls = message.get("tool_calls")
+            if isinstance(calls, list):
+                for call in calls:
+                    if not isinstance(call, dict):
+                        continue
+                    call_id = str(call.get("id") or "unknown")
+                    function = call.get("function")
+                    if not isinstance(function, dict):
+                        function = {}
+                    call_provenance[call_id] = (
+                        str(function.get("name") or "unknown"),
+                        _canonical_tool_arguments(function.get("arguments")),
+                    )
+            assistant_text = _message_text(message).strip()
+            if assistant_text:
+                sanitized.append({"role": "assistant", "content": assistant_text})
+            continue
+        if message.get("role") == "tool":
+            content = message.get("content")
+            if not isinstance(content, str):
+                content = json.dumps(content, sort_keys=True, ensure_ascii=False)
+            call_id = str(message.get("tool_call_id") or "unknown")
+            name, arguments = call_provenance.get(call_id, ("unknown", "{}"))
+            sanitized.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Previously gathered read-only tool evidence:\n"
+                        f"Tool: {name}\n"
+                        f"Arguments: {arguments}\n"
+                        "Result:\n"
+                        f"{content}"
+                    ),
+                }
+            )
+            continue
+        sanitized.append(message)
+    conversation[:] = sanitized
+    return removed_turns
+
+
+def _canonical_tool_arguments(value: object) -> str:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return json.dumps(value, ensure_ascii=False)
+    try:
+        return json.dumps(value if value is not None else {}, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return json.dumps(str(value), ensure_ascii=False)
 
 
 def _stub_tool_result(call: object) -> dict[str, Any]:

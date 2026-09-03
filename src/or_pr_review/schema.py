@@ -159,6 +159,12 @@ class LaneResult:
     provider: str | None = None
     resolutions: list[Resolution] = field(default_factory=list)
     coverage: list[tuple[str, int]] = field(default_factory=list)
+    # Aggregate-safe Gemini continuity diagnostics. No signature values or
+    # transcript contents are persisted. Keep new fields at the end so older
+    # positional LaneResult construction remains source-compatible.
+    thought_signature_tool_turns: int | None = None
+    thought_signature_recoveries: int | None = None
+    sanitized_tool_turns: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -176,6 +182,9 @@ class LaneResult:
             "tool_rounds": self.tool_rounds,
             "retries": self.retries,
             "salvaged": self.salvaged,
+            "thought_signature_tool_turns": self.thought_signature_tool_turns,
+            "thought_signature_recoveries": self.thought_signature_recoveries,
+            "sanitized_tool_turns": self.sanitized_tool_turns,
             "head_sha": self.head_sha,
             "provider": self.provider,
             "resolutions": [resolution.to_dict() for resolution in self.resolutions],
@@ -564,6 +573,13 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         tool_rounds=_optional_int(payload.get("tool_rounds")),
         retries=_optional_int(payload.get("retries")),
         salvaged=salvaged,
+        thought_signature_tool_turns=_optional_int(
+            payload.get("thought_signature_tool_turns")
+        ),
+        thought_signature_recoveries=_optional_int(
+            payload.get("thought_signature_recoveries")
+        ),
+        sanitized_tool_turns=_optional_int(payload.get("sanitized_tool_turns")),
         head_sha=head_sha,
         provider=provider,
         resolutions=resolutions,

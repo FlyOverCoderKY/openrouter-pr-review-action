@@ -3,6 +3,7 @@ from __future__ import annotations
 import email.message
 import inspect
 import io
+import json
 import urllib.error
 from pathlib import Path
 
@@ -1146,12 +1147,14 @@ def test_repeated_resolution_contradiction_fails_visibly_after_retry() -> None:
     assert "note contradicts" in (result.error or "")
 
 
-def _http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
+def _http_error(
+    code: int, retry_after: str | None = None, body: bytes = b"body"
+) -> urllib.error.HTTPError:
     headers = email.message.Message()
     if retry_after:
         headers["Retry-After"] = retry_after
     return urllib.error.HTTPError(
-        "https://openrouter.ai/api/v1/chat/completions", code, "err", headers, io.BytesIO(b"body")
+        "https://openrouter.ai/api/v1/chat/completions", code, "err", headers, io.BytesIO(body)
     )
 
 
@@ -1231,6 +1234,138 @@ def test_openrouter_chat_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyP
         harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append)
     assert len(sleeps) == harness.MAX_HTTP_ATTEMPTS - 1
     assert sleeps == [2.0, 4.0, 8.0]
+
+
+def test_openrouter_chat_rate_limit_retries_longer_with_stable_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import harness
+
+    body = (
+        b'{"error":{"message":"Provider returned error","code":429,'
+        b'"metadata":{"provider_name":"Google"}}}'
+    )
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        raise _http_error(429, body=body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    with pytest.raises(harness.OpenRouterHTTPError) as raised:
+        harness.openrouter_chat(
+            "sk-test", {"model": "google/gemini-3.8-flash"}, timeout=5, sleep=sleeps.append
+        )
+
+    assert raised.value.provider == "Google"
+    assert raised.value.zero_cost is True
+    assert len(sleeps) == harness.MAX_RATE_LIMIT_ATTEMPTS - 1
+    assert sleeps == [
+        harness._retry_delay(index, None)
+        + harness._stable_rate_limit_jitter(
+            b'{"model": "google/gemini-3.8-flash"}', index
+        )
+        for index in range(1, harness.MAX_RATE_LIMIT_ATTEMPTS)
+    ]
+
+
+def test_lane_preserves_terminal_http_provider_and_zero_cost() -> None:
+    from or_pr_review import harness
+
+    def chat(_payload: dict) -> dict:
+        raise harness.OpenRouterHTTPError(
+            "OpenRouter HTTP 429: rate limited", provider="Google", zero_cost=True
+        )
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "verify"}],
+        api_key="sk-test",
+        workspace=None,
+        max_tool_turns=0,
+        chat=chat,
+    )
+
+    assert result.ok is False
+    assert result.provider == "Google"
+    assert result.cost_usd == 0.0
+
+
+def test_terminal_http_error_does_not_hide_prior_unknown_cost(tmp_path: Path) -> None:
+    from or_pr_review import harness
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    calls = 0
+
+    def chat(_payload: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _tool_reply()
+        raise harness.OpenRouterHTTPError(
+            "OpenRouter HTTP 429: rate limited", provider="Google", zero_cost=True
+        )
+
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "verify"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=1,
+        chat=chat,
+    )
+
+    assert result.ok is False
+    assert result.provider == "Google"
+    assert result.cost_usd is None
+
+
+def test_http_error_provider_is_parsed_beyond_display_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import harness
+
+    body = json.dumps(
+        {
+            "error": {
+                "message": "x" * 1_000,
+                "metadata": {"provider_name": "Google"},
+            }
+        }
+    ).encode()
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        raise _http_error(400, body=body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(harness.OpenRouterHTTPError) as raised:
+        harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5)
+
+    assert raised.value.provider == "Google"
+
+
+def test_rate_limit_deadline_preserves_provider_and_zero_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import harness
+
+    body = b'{"error":{"metadata":{"provider_name":"Google"}}}'
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        raise _http_error(429, body=body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(harness.OpenRouterHTTPError) as raised:
+        harness.openrouter_chat(
+            "sk-test",
+            {"model": "google/gemini-3.8-flash"},
+            timeout=5,
+            sleep=lambda _delay: None,
+            deadline=harness.time.monotonic() + 1,
+        )
+
+    assert raised.value.provider == "Google"
+    assert raised.value.zero_cost is True
+    assert "budget exhausted" in str(raised.value)
 
 
 def test_openrouter_chat_does_not_retry_client_errors(monkeypatch: pytest.MonkeyPatch) -> None:

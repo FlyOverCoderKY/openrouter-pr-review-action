@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import http.client
 import json
 import math
@@ -44,8 +45,10 @@ FINAL_RESPONSE_RESERVE_SECONDS = DEFAULT_TIMEOUT
 # in _run_loop instead of discarding the gathered evidence.
 RETRYABLE_STATUS = (408, 429, 500, 502, 503, 504)
 MAX_HTTP_ATTEMPTS = 4
+MAX_RATE_LIMIT_ATTEMPTS = 7
 BACKOFF_BASE_SECONDS = 2.0
 MAX_RETRY_AFTER_SECONDS = 30.0
+RATE_LIMIT_JITTER_SECONDS = 5.0
 # First-pass budget matches the sibling Grok action's default max_turns=50.
 # Follow-up jobs may pass a lower value (sibling callers often use 30).
 DEFAULT_MAX_TOOL_TURNS = 50
@@ -82,6 +85,17 @@ MISSING_SIGNATURE_FINALIZE_NOTICE = (
     'complete JSON result now as {"findings": [...]} from the embedded diff '
     "and evidence already gathered."
 )
+
+
+class OpenRouterHTTPError(LaneError):
+    """Terminal OpenRouter HTTP error with aggregate-safe routing metadata."""
+
+    def __init__(self, message: str, *, provider: str | None, zero_cost: bool) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.zero_cost = zero_cost
+
+
 # Bound on stub-repair rounds if a model keeps emitting tool calls after the
 # tool budget was withdrawn.
 MAX_REPAIR_ROUNDS = 3
@@ -154,16 +168,36 @@ def openrouter_chat(
                 raw = response.read().decode("utf-8")
             break
         except urllib.error.HTTPError as exc:
-            err_body = exc.read().decode("utf-8", errors="replace")[:800]
-            if exc.code in RETRYABLE_STATUS and attempt < MAX_HTTP_ATTEMPTS:
+            full_error_body = exc.read().decode("utf-8", errors="replace")
+            err_body = full_error_body[:800]
+            provider = _provider_from_error_body(full_error_body)
+            max_attempts = (
+                MAX_RATE_LIMIT_ATTEMPTS if exc.code == 429 else MAX_HTTP_ATTEMPTS
+            )
+            if exc.code in RETRYABLE_STATUS and attempt < max_attempts:
                 _count_retry(stats)
-                _sleep_before_retry(
-                    _retry_delay(attempt, exc.headers.get("Retry-After")),
-                    sleep=sleep,
-                    deadline=deadline,
-                )
+                retry_after = exc.headers.get("Retry-After")
+                delay = _retry_delay(attempt, retry_after)
+                if exc.code == 429 and retry_after is None:
+                    delay += _stable_rate_limit_jitter(body, attempt)
+                try:
+                    _sleep_before_retry(delay, sleep=sleep, deadline=deadline)
+                except LaneError as deadline_error:
+                    raise OpenRouterHTTPError(
+                        f"{deadline_error}; last OpenRouter HTTP {exc.code}: "
+                        f"{redact(err_body)}",
+                        provider=provider,
+                        zero_cost=True,
+                    ) from exc
                 continue
-            raise LaneError(f"OpenRouter HTTP {exc.code}: {redact(err_body)}") from exc
+            raise OpenRouterHTTPError(
+                f"OpenRouter HTTP {exc.code}: {redact(err_body)}",
+                provider=provider,
+                # OpenRouter's zero-completion insurance makes a terminal
+                # HTTP error response non-billable. Any earlier successful
+                # requests in the lane retain their separately reported cost.
+                zero_cost=True,
+            ) from exc
         except TimeoutError as exc:
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
@@ -236,6 +270,35 @@ def _retry_delay(attempt: int, retry_after: str | None) -> float:
         except ValueError:
             pass
     return BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+
+
+def _stable_rate_limit_jitter(body: bytes, attempt: int) -> float:
+    """Desynchronize concurrent benchmark lanes without nondeterministic tests."""
+
+    digest = hashlib.sha256(body + attempt.to_bytes(4, "big")).digest()
+    fraction = int.from_bytes(digest[:2], "big") / 65_535
+    return fraction * RATE_LIMIT_JITTER_SECONDS
+
+
+def _provider_from_error_body(body: str) -> str | None:
+    """Read only the aggregate provider name from an OpenRouter error body."""
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    metadata = error.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    provider = metadata.get("provider_name")
+    if not isinstance(provider, str) or not provider.strip():
+        return None
+    return provider.strip()
 
 
 def run_lane(
@@ -476,6 +539,7 @@ def _run_loop(
     deadline_finalizing = False
     serial_tool_calls = model.startswith("google/gemini-3")
     signature_finalizing = False
+    successful_responses = 0
 
     def sanitize_gemini_history() -> None:
         if not serial_tool_calls:
@@ -551,6 +615,7 @@ def _run_loop(
                 stats["requests"] = stats.get("requests", 0) + 1
             try:
                 response = send(payload)
+                successful_responses += 1
                 _absorb_usage(usage, response, meta)
                 if progress is not None:
                     progress()
@@ -559,6 +624,17 @@ def _run_loop(
                 # same schema-fallback and salvage handling as HTTP errors.
                 message = _assistant_message(response)
             except LaneError as exc:
+                if isinstance(exc, OpenRouterHTTPError):
+                    if exc.provider and meta is not None:
+                        meta["provider"] = exc.provider
+                    if (
+                        exc.zero_cost
+                        and successful_responses == 0
+                        and "cost_usd" not in usage
+                    ):
+                        usage["cost_usd"] = 0.0
+                    if progress is not None:
+                        progress()
                 if signature_finalizing:
                     # An unsigned tool turn gets one safe, tool-free finish.
                     # Retrying it with another transcript mutation would no

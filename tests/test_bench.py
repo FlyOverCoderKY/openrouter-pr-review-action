@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import tarfile
 from pathlib import Path
@@ -23,6 +24,15 @@ from or_pr_review.prompt import build_messages, changed_paths_from_diff
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "bench" / "fixtures" / "planted-mini"
 JUDGE_FIXTURE_DIR = Path(__file__).resolve().parent.parent / "bench" / "judge-fixtures"
+
+
+def _load_capture():
+    path = FIXTURE_DIR.parent.parent / "capture.py"
+    spec = importlib.util.spec_from_file_location("bench_capture", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_planted_fixture_loads_and_builds_messages() -> None:
@@ -275,11 +285,9 @@ def test_committed_fixtures_pin_the_production_embed_cap() -> None:
 
 
 def test_capture_default_matches_production_embed_cap() -> None:
-    from bench.capture import DEFAULT_CAPTURE_MAX_DIFF_KB
-
     from or_pr_review.bench import DEFAULT_MAX_DIFF_KB
 
-    assert DEFAULT_CAPTURE_MAX_DIFF_KB == DEFAULT_MAX_DIFF_KB
+    assert _load_capture().DEFAULT_CAPTURE_MAX_DIFF_KB == DEFAULT_MAX_DIFF_KB
 
 
 def test_bench_run_cli_defaults_follow_production_constants(
@@ -303,7 +311,7 @@ def test_bench_run_cli_defaults_follow_production_constants(
 def test_capture_legacy_extraction_validates_members_before_extracting(
     tmp_path: Path,
 ) -> None:
-    from bench.capture import _extract_archive
+    extract_archive = _load_capture()._extract_archive
 
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -321,14 +329,14 @@ def test_capture_legacy_extraction_validates_members_before_extracting(
             return [tarfile.TarInfo("safe.txt")]
 
     tar = FakeTar()
-    _extract_archive(tar, checkout)
+    extract_archive(tar, checkout)
     assert len(tar.calls) == 2
     assert "filter" in tar.calls[0][1]
     assert tar.calls[1][1] == {}
 
 
 def test_capture_legacy_extraction_rejects_links(tmp_path: Path) -> None:
-    from bench.capture import _extract_archive
+    extract_archive = _load_capture()._extract_archive
 
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -345,7 +353,7 @@ def test_capture_legacy_extraction_rejects_links(tmp_path: Path) -> None:
             return [link]
 
     with pytest.raises(SystemExit, match="links are not allowed"):
-        _extract_archive(FakeTar(), checkout)
+        extract_archive(FakeTar(), checkout)
 
 
 def _load_generator():

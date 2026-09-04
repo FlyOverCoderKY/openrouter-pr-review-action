@@ -69,6 +69,32 @@ def test_lane_rejects_invalid_model_and_timeout(tmp_path: Path, name: str, value
     assert main(["lane"], env) == 1
 
 
+def test_invalid_status_comments_does_not_escape_error_handler(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = _base_env(tmp_path, STATUS_COMMENTS="maybe", PR_NUMBER="1")
+
+    assert main(["lane"], env) == 1
+    captured = capsys.readouterr()
+    assert "status_comments must be true or false" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_invalid_all_role_deadline_is_rejected_before_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import cli as cli_mod
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_collect_with_loop",
+        lambda _env: pytest.fail("collection must not run before input validation"),
+    )
+    env = _base_env(tmp_path, ALL_ROLE_DEADLINE_SECONDS="0")
+
+    assert main(["all"], env) == 1
+
+
 def test_setup_default_model(tmp_path: Path) -> None:
     env = _base_env(tmp_path, MODELS="")
     assert main(["setup"], env) == 0
@@ -95,13 +121,14 @@ def test_invalid_job_budget_is_reported_as_an_action_error(
 def test_anchor_checkout_requires_the_reviewed_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A reusable judge must not anchor findings against its action checkout."""
+    """An available commit object is insufficient when HEAD is elsewhere."""
     from or_pr_review import cli as cli_mod
 
     calls: list[list[str]] = []
 
     class Result:
-        returncode = 1
+        returncode = 0
+        stdout = "b" * 40 + "\n"
 
     def fake_run(cmd: list[str], **_kwargs: object) -> Result:
         calls.append(cmd)
@@ -109,7 +136,25 @@ def test_anchor_checkout_requires_the_reviewed_commit(
 
     monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
     assert not cli_mod._checkout_has_commit(tmp_path, "a" * 40)
-    assert calls[0][-2:] == ["-e", f"{'a' * 40}^{{commit}}"]
+    assert calls[0][-3:] == ["rev-parse", "--verify", "HEAD"]
+
+    Result.stdout = "A" * 40 + "\n"
+    assert cli_mod._checkout_has_commit(tmp_path, "a" * 40)
+
+
+@pytest.mark.parametrize("value", ["line one\nline two", "line one\rline two"])
+def test_set_output_rejects_multiline_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.errors import ActionError
+
+    output = tmp_path / "output.txt"
+    monkeypatch.setattr(cli_mod, "_ACTIVE_ENV", {"GITHUB_OUTPUT": str(output)})
+
+    with pytest.raises(ActionError, match="must be a single line"):
+        cli_mod._set_output("unsafe", value)
+    assert not output.exists()
 
 
 def test_capped_union_note_is_visible_to_review_readers(
@@ -270,6 +315,10 @@ def test_one_lane_posts_without_judge(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "identified by x-ai/grok-4.6" in posted[0]
     assert "single review lane" in posted[0]
     assert "OPENROUTER_API_KEY=should-not-be-used-for-judge" not in posted[0]
+    outputs = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert outputs.count("judge_needed=") == 1
+    assert "judge_needed=false" in outputs
+    assert outputs.count("judge_model=") == 1
 
 
 def test_diagnostic_only_lane_posts_visible_partial_review(
@@ -316,6 +365,8 @@ def test_diagnostic_only_lane_posts_visible_partial_review(
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
     )
+    monkeypatch.setattr(cli_mod, "_ACTIVE_ENV", env)
+    cli_mod._write_lane_setup_outputs(["x-ai/grok-4.6"])
     assert (
         cli_mod._finish(
             env,
@@ -328,6 +379,9 @@ def test_diagnostic_only_lane_posts_visible_partial_review(
     assert "**Verdict:** `partial`" in posted[0]
     assert "review environment" in posted[0]
     assert "must not be treated as a clean pass" in posted[0]
+    outputs = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert outputs.count("judge_needed=") == 1
+    assert outputs.count("judge_model=") == 1
 
 
 def test_two_lanes_require_judge_and_attribution(
@@ -337,27 +391,46 @@ def test_two_lanes_require_judge_and_attribution(
     from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
     from or_pr_review.merge import MergedIssue
 
+    reviewed_sha = "a" * 40
+    source = tmp_path / "reviewed"
+    (source / "src").mkdir(parents=True)
+    (source / "src/api.py").write_text("unsafe_call()\n", encoding="utf-8")
+    diff = (
+        "diff --git a/src/api.py b/src/api.py\n"
+        "--- /dev/null\n"
+        "+++ b/src/api.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+unsafe_call()\n"
+    )
     collected = CollectedReview(
         pr_number=1,
         title="t",
         body="",
-        head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        head_sha=reviewed_sha,
         base_ref="main",
         head_ref="feat",
-        plan=DiffPlan("full-pr", "full-pr", None, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", None),
-        truncation=Truncation("diff", False, 4, 4, 300),
+        plan=DiffPlan("full-pr", "full-pr", None, reviewed_sha, None),
+        truncation=Truncation(diff, False, len(diff), len(diff), 300),
         mode="initial",
     )
     posted: list[str] = []
+    inline_comments: list[dict[str, object]] = []
     judge_calls = {"n": 0}
 
     class DummyGitHub:
-        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
+        def create_review(
+            self,
+            number: int,
+            body: str,
+            commit_id: str,
+            comments: list[dict[str, object]] | None = None,
+        ) -> dict[str, object]:
             posted.append(body)
+            inline_comments.extend(comments or [])
             return {"html_url": "https://example.test/review"}
 
         def pr_view(self, number: int) -> dict[str, object]:
-            return {"headRefOid": "a" * 40}
+            return {"headRefOid": reviewed_sha}
 
     def _judge(**kwargs: object) -> list[MergedIssue]:
         judge_calls["n"] += 1
@@ -369,7 +442,7 @@ def test_two_lanes_require_judge_and_attribution(
                     body="Unauthenticated POST",
                     severity="bug",
                     file="src/api.py",
-                    line=42,
+                    line=1,
                     models=["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"],
                 )
             ],
@@ -381,6 +454,13 @@ def test_two_lanes_require_judge_and_attribution(
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
     monkeypatch.setattr(cli_mod, "_maybe_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli_mod, "run_llm_judge", _judge)
+    monkeypatch.setattr(
+        cli_mod.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type(
+            "Result", (), {"returncode": 0, "stdout": reviewed_sha + "\n"}
+        )(),
+    )
 
     lane_dir = tmp_path / "lanes"
     lane_dir.mkdir()
@@ -397,7 +477,7 @@ def test_two_lanes_require_judge_and_attribution(
                             "body": "Unauthenticated POST",
                             "severity": "bug",
                             "file": "src/api.py",
-                            "line": 42,
+                            "line": 1,
                             "model_id": model,
                         }
                     ],
@@ -415,6 +495,7 @@ def test_two_lanes_require_judge_and_attribution(
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
         OPENROUTER_API_KEY="sk-test",
+        SOURCE_WORKSPACE=str(source),
     )
     assert main(["judge"], env) == 0
     assert judge_calls["n"] == 1
@@ -427,6 +508,9 @@ def test_two_lanes_require_judge_and_attribution(
     # labeled incomplete rather than posing as the run total).
     assert "**Cost:** $0.0021" in posted[0]
     assert "incomplete: no cost reported for" in posted[0]
+    assert inline_comments
+    assert inline_comments[0]["path"] == "src/api.py"
+    assert inline_comments[0]["line"] == 1
 
 
 def test_two_lanes_judge_schema_mismatch_uses_validated_union(
@@ -593,6 +677,65 @@ def test_judge_merges_valid_artifacts(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "verdict=issues" in out
     assert "issue_count=1" in out
     assert "bug_count=1" in out
+    assert out.count("judge_needed=") == 1
+    assert "judge_needed=true" in out
+    assert out.count("judge_model=") == 1
+
+
+def test_explicit_judge_override_runs_with_one_successful_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import cli as cli_mod
+    from or_pr_review.merge import MergedIssue
+    from or_pr_review.schema import Finding, LaneResult
+
+    lane = LaneResult(
+        schema_version=SCHEMA_VERSION,
+        ok=True,
+        model="fast/model",
+        findings=[
+            Finding(
+                title="Race",
+                body="check then act",
+                severity="bug",
+                file="a.py",
+                line=1,
+                model_id="fast/model",
+            )
+        ],
+        error=None,
+    )
+    calls = {"count": 0}
+
+    def fake_judge(**_kwargs: object):
+        calls["count"] += 1
+        return (
+            [
+                MergedIssue(
+                    title="Race",
+                    body="check then act",
+                    severity="bug",
+                    file="a.py",
+                    line=1,
+                    models=["fast/model"],
+                )
+            ],
+            "merged",
+            0.001,
+        )
+
+    monkeypatch.setattr(cli_mod, "run_llm_judge", fake_judge)
+    env = {
+        "MODELS": "fast/model",
+        "JUDGE_NEEDED": "true",
+        "OPENROUTER_API_KEY": "sk-test",
+    }
+
+    outcome = cli_mod._resolve_issues(env, ["fast/model"], [lane], [lane])
+
+    assert calls["count"] == 1
+    assert outcome.ran is True
+    assert outcome.issues[0].title == "Race"
 
 
 def test_fail_on_bugs_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

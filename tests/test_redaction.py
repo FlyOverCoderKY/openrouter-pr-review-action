@@ -15,6 +15,14 @@ def test_redact_env_values(monkeypatch) -> None:
     assert "sk-or-v1-please-hide" not in text
 
 
+def test_redact_discovers_secrets_added_after_an_earlier_call(monkeypatch) -> None:
+    assert redact("ordinary output") == "ordinary output"
+
+    monkeypatch.setenv("LATE_PROVIDER_API_KEY", "late-provider-secret")
+
+    assert redact("received late-provider-secret") == "received [redacted]"
+
+
 def test_redact_common_json_key_shapes() -> None:
     text = redact(
         '{"api_key": "sk-json-secret", "OPENAI_API_KEY": "sk-openai-secret", '
@@ -24,6 +32,14 @@ def test_redact_common_json_key_shapes() -> None:
     assert "sk-openai-secret" not in text
     assert "token-json-secret" not in text
     assert '"api_key": "[redacted]"' in text
+
+
+def test_redact_multi_segment_secret_key_names() -> None:
+    text = redact(
+        '{"AZURE_OPENAI_API_KEY": "sk-azure-secret"} CUSTOM_SERVICE_TOKEN=custom-service-secret'
+    )
+    assert "sk-azure-secret" not in text
+    assert "custom-service-secret" not in text
 
 
 def test_redact_quoted_assignment_with_escaped_quote() -> None:

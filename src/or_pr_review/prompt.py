@@ -11,7 +11,7 @@ from or_pr_review.loop import LoopState
 from or_pr_review.triage import (
     accounted_paths_from_diff,
     path_glob_regex,
-    paths_from_git_header,
+    split_diff,
 )
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -118,33 +118,35 @@ def diff_right_side_lines(diff: str) -> dict[str, set[int]]:
     added and context lines on the new side qualify. One out-of-hunk anchor
     rejects the whole batched review, so callers restrict to these lines.
     """
+    parsed = split_diff(diff)
+    if parsed is None:
+        return {}
+    _preamble, segments = parsed
     lines_by_path: dict[str, set[int]] = {}
-    current: str | None = None
-    new_line = 0
-    in_hunk = False
-    for line in (diff or "").splitlines():
-        header = paths_from_git_header(line)
-        if header is not None:
-            current = header[1]
-            in_hunk = False
+    for segment in segments:
+        current = segment.new_path
+        if current in {"/dev/null", "dev/null"}:
             continue
-        if line.startswith("@@"):
-            match = _HUNK_RE.match(line)
-            if match and current is not None:
-                new_line = int(match.group(1))
-                in_hunk = True
+        new_line = 0
+        in_hunk = False
+        for line in segment.lines:
+            if line.startswith("@@"):
+                match = _HUNK_RE.match(line)
+                if match:
+                    new_line = int(match.group(1))
+                    in_hunk = True
+                else:
+                    in_hunk = False
+                continue
+            if not in_hunk:
+                continue
+            if line.startswith("+") or line.startswith(" ") or line == "":
+                lines_by_path.setdefault(current, set()).add(new_line)
+                new_line += 1
+            elif line.startswith("-") or line.startswith("\\"):
+                continue
             else:
                 in_hunk = False
-            continue
-        if not in_hunk or current is None:
-            continue
-        if line.startswith("+") or line.startswith(" ") or line == "":
-            lines_by_path.setdefault(current, set()).add(new_line)
-            new_line += 1
-        elif line.startswith("-") or line.startswith("\\"):
-            continue
-        else:
-            in_hunk = False
     return lines_by_path
 
 
@@ -228,6 +230,8 @@ def _system_prompt(*, tone: str, mode: str) -> str:
             "severity and found exactly the findings you reported — not that you\n"
             "saw its name. A diff file you cannot account for means the review is\n"
             "not finished. Do not list files that are not in the embedded diff.\n"
+            "Use the destination/new path for a rename and the source/old path\n"
+            "for a deletion (whose destination is `/dev/null`).\n"
             "A file whose hunks were replaced by a `[diff stubbed by budget\n"
             "triage: ...]` line is still an embedded-diff file: read it with the\n"
             "tools, sweep it at every severity, and give it a coverage entry\n"
@@ -384,28 +388,30 @@ def _loop_block(loop: LoopState | None, agent_replies: str) -> str:
     if loop is None or loop.mode != "verify":
         return ""
     lines = ["## Prior findings to verify", ""]
-    prior_lines: list[str] = []
+    open_lines: list[str] = []
     if loop.open_prior:
         for finding in loop.open_prior:
             location = finding.file or "(no path)"
             if finding.line is not None:
                 location = f"{location}:{finding.line}"
-            prior_lines.append(
+            open_lines.append(
                 f"- `{finding.id}` [{finding.severity}] `{location}` — {finding.title}"
             )
             if finding.evidence:
-                prior_lines.append(f"  - evidence: {finding.evidence}")
+                open_lines.append(f"  - evidence: {finding.evidence}")
     else:
-        prior_lines.append("- (none open)")
-    if loop.disputed_prior:
-        prior_lines.extend(["", "Already disputed and settled — do not re-raise:", ""])
-        for finding in loop.disputed_prior:
-            prior_lines.append(f"- `{finding.id}` [{finding.severity}] — {finding.title}")
-    # Findings came from prior model output and may contain prompt-like text.
-    # Fence the complete block so titles, paths, and evidence cannot create
-    # headings or otherwise escape the untrusted-data boundary.
-    lines.append(_fence("\n".join(prior_lines)))
+        open_lines.append("- (none open)")
+    # Finding fields came from prior model output and may contain prompt-like
+    # text. Fence only those records; the surrounding disposition instructions
+    # are trusted application text and must remain outside the data boundary.
+    lines.append(_fence("\n".join(open_lines)))
     lines.append("")
+    if loop.disputed_prior:
+        lines.extend(["Already disputed and settled — do not re-raise:", ""])
+        disputed_lines: list[str] = []
+        for finding in loop.disputed_prior:
+            disputed_lines.append(f"- `{finding.id}` [{finding.severity}] — {finding.title}")
+        lines.extend([_fence("\n".join(disputed_lines)), ""])
     if agent_replies:
         lines.extend(
             [

@@ -25,6 +25,9 @@ ReviewMode = Literal["auto", "initial", "verify"]
 ResolvedMode = Literal["initial", "verify"]
 DiffKind = Literal["full-pr", "commit-range", "single-commit"]
 
+# Public production default shared by the action and offline benchmark tools.
+DEFAULT_MAX_DIFF_KB = 300
+
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _ZERO_RE = re.compile(r"^0+$")
 

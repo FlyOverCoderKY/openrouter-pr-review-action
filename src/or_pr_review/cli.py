@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from or_pr_review.collect import (
+    DEFAULT_MAX_DIFF_KB,
     DIVERGED_NOTICE,
     CollectedReview,
     collect_review,
@@ -95,6 +96,7 @@ JOB_BUDGET_SECONDS = 22 * 60
 POST_RESERVE_SECONDS = 3 * 60
 JUDGE_SCHEDULING_MARGIN_SECONDS = 5
 MIN_JUDGE_ATTEMPT_SECONDS = 30
+DEFAULT_BOT_LOGIN = "github-actions[bot]"
 _JOB_DEADLINE_KEY = "_OR_PR_REVIEW_JOB_DEADLINE_MONOTONIC"
 
 
@@ -162,9 +164,17 @@ def _role_setup(env: dict[str, str]) -> int:
 
 
 def _write_setup_outputs(slugs: list[str], needed: bool, judge_model: str) -> None:
+    _write_lane_setup_outputs(slugs)
+    _write_judge_outputs(needed, judge_model)
+
+
+def _write_lane_setup_outputs(slugs: list[str]) -> None:
     _set_output("models_json", models_json(slugs))
     _set_output("matrix", matrix_json(slugs))
     _set_output("lane_count", str(len(slugs)))
+
+
+def _write_judge_outputs(needed: bool, judge_model: str) -> None:
     _set_output("judge_needed", "true" if needed else "false")
     _set_output("judge_model", judge_model)
 
@@ -221,13 +231,14 @@ def _validate_inputs(env: dict[str, str]) -> list[str]:
     roast = (env.get("ROAST_LEVEL") or "professional").strip().lower()
     if roast not in {"professional", "playful"}:
         raise ActionError("roast_level must be professional or playful in v1")
-    max_diff = _int_env(env, "MAX_DIFF_KB", 300)
+    max_diff = _int_env(env, "MAX_DIFF_KB", DEFAULT_MAX_DIFF_KB)
     if max_diff <= 0:
         raise ActionError("max_diff_kb must be a positive integer")
     parse_max_tool_turns(env.get("MAX_TOOL_TURNS"))
     openrouter_timeout = _int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180)
     if openrouter_timeout < 1 or openrouter_timeout > 600:
         raise ActionError("openrouter_timeout_seconds must be an integer from 1 through 600")
+    _configured_all_role_deadline_seconds(env)
     override = (env.get("LANE_MODEL") or "").strip()
     if override:
         parse_slug(override, what="lane_model")
@@ -255,7 +266,8 @@ def _resolve_issues(
     if not successful:
         return JudgeOutcome([], "skipped (no successful lanes)", None, False, [])
     reviewable_payloads, diagnostics = partition_reviewable_lanes(lane_payloads)
-    if len(successful) == 1:
+    needed = _judge_needed(env, slugs)
+    if len(successful) == 1 and (len(slugs) > 1 or not needed):
         print("judge skipped: one successful lane; posting that lane directly")
         reason = (
             "skipped (single review lane; one reviewer = no judge)"
@@ -265,7 +277,7 @@ def _resolve_issues(
         return JudgeOutcome(
             issues_from_single_lane(successful[0]), reason, None, False, diagnostics
         )
-    if not _judge_needed(env, slugs):
+    if not needed:
         # Defensive only: model validation currently makes multiple lanes
         # imply a judge unless the caller explicitly overrides judge_needed.
         issues, note = _capped_union_note(
@@ -287,7 +299,7 @@ def _resolve_issues(
     judge_timeout = _judge_request_timeout(env)
     if judge_timeout is None:
         print(
-            "judge skipped near the job deadline; using the deterministic recall-safe union",
+            "judge skipped near the job deadline; using the cap-aware deterministic union",
             flush=True,
         )
         issues, note = _capped_union_note(
@@ -315,11 +327,11 @@ def _resolve_issues(
         )
     except SchemaError as exc:
         # The lane artifacts already passed our schema and anchor gates. A
-        # malformed judge answer cannot erase that validated recall; make the
-        # degraded merge explicit on the review instead.
+        # malformed judge answer falls back to the validated lane findings;
+        # make the publication cap and degraded merge explicit on the review.
         print(
             f"warning: judge schema failed ({redact(str(exc))}); using the "
-            "deterministic recall-safe union",
+            "cap-aware deterministic union",
             flush=True,
         )
         issues, note = _capped_union_note(
@@ -333,12 +345,12 @@ def _resolve_issues(
             diagnostics,
         )
     except ActionError as exc:
-        # Review lanes are the source of recall; a judge transport failure
-        # must not erase their completed work. Judge schema failures use the
-        # same explicit deterministic-union degradation above.
+        # Review lanes are the source evidence; a judge transport failure
+        # falls back to their completed work. Judge schema failures use the
+        # same explicit, cap-aware deterministic-union degradation above.
         print(
             f"warning: judge transport failed ({redact(str(exc))}); using the "
-            "deterministic recall-safe union",
+            "cap-aware deterministic union",
             flush=True,
         )
         issues, note = _capped_union_note(
@@ -351,14 +363,14 @@ def _resolve_issues(
             False,
             diagnostics,
         )
-    # Recall-safety outcomes are visible on the posted review, not only in
-    # the job log: readers must be able to tell a clean merge from a
-    # repaired or fallback (chattier, exact-dedup union) post.
+    # Merge outcomes are visible on the posted review, not only in the job
+    # log: readers must be able to tell a clean merge from a repaired or
+    # fallback post. Source accounting is lossless before the global cap.
     if mode == "merged":
         return JudgeOutcome(issues, f"`{judge_model}`", judge_cost, True, diagnostics)
     return JudgeOutcome(
         issues,
-        f"`{judge_model}` ({mode}: recall-safe coverage enforced)",
+        f"`{judge_model}` ({mode}: source coverage preserved before publication cap)",
         judge_cost,
         True,
         diagnostics,
@@ -375,7 +387,9 @@ def _capped_union_note(lanes: list[dict[str, Any]], note: str) -> tuple[list[Mer
 def _role_all(env: dict[str, str]) -> int:
     slugs = _validate_inputs(env)
     needed = _judge_needed(env, slugs)
-    _write_setup_outputs(slugs, needed, parse_judge_model(env.get("JUDGE_MODEL")))
+    # role=all needs the matrix metadata immediately, but judge outputs are
+    # emitted once by _finish alongside the other public result outputs.
+    _write_lane_setup_outputs(slugs)
     collected, state, agent_replies = _collect_with_loop(env)
     _maybe_status(
         env,
@@ -386,29 +400,13 @@ def _role_all(env: dict[str, str]) -> int:
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected, state, agent_replies)
     expect_coverage, expected_paths = _coverage_expectations(state, collected)
-    expected_ids = {finding.id for finding in state.open_prior} if state.mode == "verify" else None
+    expected_ids = _expected_resolution_ids(state)
     remaining = _remaining_job_seconds(env)
-    lane_timeout = DEFAULT_LANE_TIMEOUT_SECONDS
-    judge_reserve = 0
-    if remaining is not None:
-        # role=all shares one job with the judge. Reserve enough time for a
-        # meaningful request on every HTTP attempt plus retry delay and post;
-        # otherwise lanes that consume their advertised budget make the judge
-        # mathematically impossible to start.
-        if needed:
-            judge_reserve = (
-                POST_RESERVE_SECONDS
-                + (MAX_RATE_LIMIT_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
-                + JUDGE_SCHEDULING_MARGIN_SECONDS
-                + MAX_RATE_LIMIT_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS
-            )
-        lane_timeout = max(
-            1,
-            min(
-                DEFAULT_LANE_TIMEOUT_SECONDS,
-                int(remaining - max(POST_RESERVE_SECONDS, judge_reserve)),
-            ),
-        )
+    lane_timeout, judge_reserve = _lane_budget(
+        remaining,
+        judge_needed=needed,
+        shares_job_with_judge=True,
+    )
     lane_dir = Path(env.get("ALL_LANE_RESULTS_DIR") or (work / "lanes"))
     lane_dir.mkdir(parents=True, exist_ok=True)
 
@@ -433,6 +431,9 @@ def _role_all(env: dict[str, str]) -> int:
         lanes.append(lane)
     else:
         deadline_seconds = _all_role_deadline_seconds(env, remaining, judge_reserve)
+        # A timed-out pool cannot stop requests already in flight. The lane
+        # clock's per-request clamp guarantees those stragglers end within
+        # their lane deadline after non-waiting shutdown returns control.
         pool = ThreadPoolExecutor(max_workers=min(len(slugs), LANE_CAP))
         timed_out = False
         try:
@@ -488,13 +489,11 @@ def _run_one_lane(env: dict[str, str], model: str) -> tuple[LaneResult, Collecte
     _maybe_status(env, collected.pr_number, f"Lane `{model}` is reviewing via OpenRouter.")
     expect_coverage, expected_paths = _coverage_expectations(state, collected)
     remaining = _remaining_job_seconds(env)
-    lane_timeout = DEFAULT_LANE_TIMEOUT_SECONDS
-    if remaining is not None:
-        reserve = 0 if _judge_needed(env, parse_models(env.get("MODELS"))) else POST_RESERVE_SECONDS
-        lane_timeout = max(
-            1,
-            min(DEFAULT_LANE_TIMEOUT_SECONDS, int(remaining - reserve)),
-        )
+    lane_timeout, _judge_reserve = _lane_budget(
+        remaining,
+        judge_needed=_judge_needed(env, parse_models(env.get("MODELS"))),
+        shares_job_with_judge=False,
+    )
     result = _invoke_lane(
         env,
         model,
@@ -503,9 +502,7 @@ def _run_one_lane(env: dict[str, str], model: str) -> tuple[LaneResult, Collecte
         expect_coverage=expect_coverage,
         expect_resolutions=state.mode == "verify",
         expected_paths=expected_paths,
-        expected_resolution_ids=(
-            {finding.id for finding in state.open_prior} if state.mode == "verify" else None
-        ),
+        expected_resolution_ids=_expected_resolution_ids(state),
         lane_timeout=lane_timeout,
     )
     result.head_sha = collected.head_sha
@@ -583,8 +580,43 @@ def _coverage_expectations(
     return True, paths
 
 
+def _expected_resolution_ids(state: LoopState) -> set[str] | None:
+    """Prior finding ids a verify lane must explicitly resolve."""
+    if state.mode != "verify":
+        return None
+    return {finding.id for finding in state.open_prior}
+
+
+def _lane_budget(
+    remaining: float | None,
+    *,
+    judge_needed: bool,
+    shares_job_with_judge: bool,
+) -> tuple[int, int]:
+    """Return the lane timeout and same-job judge reserve."""
+    judge_reserve = 0
+    if shares_job_with_judge and judge_needed:
+        # role=all shares one job with the judge. Reserve enough time for a
+        # meaningful request on every HTTP attempt plus retry delay and post;
+        # otherwise lanes that consume their advertised budget make the judge
+        # mathematically impossible to start.
+        judge_reserve = (
+            POST_RESERVE_SECONDS
+            + (MAX_RATE_LIMIT_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
+            + JUDGE_SCHEDULING_MARGIN_SECONDS
+            + MAX_RATE_LIMIT_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS
+        )
+    if remaining is None:
+        return DEFAULT_LANE_TIMEOUT_SECONDS, judge_reserve
+    reserve = (
+        max(POST_RESERVE_SECONDS, judge_reserve) if shares_job_with_judge or not judge_needed else 0
+    )
+    timeout = max(1, min(DEFAULT_LANE_TIMEOUT_SECONDS, int(remaining - reserve)))
+    return timeout, judge_reserve
+
+
 def _bot_login(env: dict[str, str]) -> str:
-    login = (env.get("BOT_LOGIN") or "").strip() or "github-actions[bot]"
+    login = (env.get("BOT_LOGIN") or "").strip() or DEFAULT_BOT_LOGIN
     if len(login) > 100 or any(character.isspace() for character in login):
         raise ActionError("bot_login must be a GitHub login of at most 100 characters")
     return login
@@ -699,7 +731,7 @@ def _collect(env: dict[str, str]) -> CollectedReview:
     github = _github(env)
     scope = parse_scope(env.get("REVIEW_SCOPE") or "full-pr")
     mode = resolve_mode(parse_mode(env.get("REVIEW_MODE") or "auto"), env.get("EVENT_ACTION"))
-    max_diff_kb = _int_env(env, "MAX_DIFF_KB", 300)
+    max_diff_kb = _int_env(env, "MAX_DIFF_KB", DEFAULT_MAX_DIFF_KB)
     return collect_review(
         pr_number=pr_number,
         scope=scope,
@@ -765,12 +797,12 @@ def _work_dir(env: dict[str, str]) -> Path:
 
 
 def _checkout_has_commit(root: Path | None, sha: str) -> bool:
-    """Whether ``root`` is the reviewed checkout represented by ``sha``.
+    """Whether ``root`` is checked out exactly at the reviewed ``sha``.
 
     A directory existing is insufficient in a reusable judge job: that job
-    also has an action checkout.  This deliberately verifies only object
-    availability, not a branch/ref relationship, because lane artifacts are
-    the authority for the reviewed SHA.
+    also has an action checkout. Object availability is insufficient too: a
+    checkout can contain the reviewed commit while its worktree is at another
+    commit, which would validate anchors against the wrong file contents.
     """
     if root is None:
         return False
@@ -780,17 +812,18 @@ def _checkout_has_commit(root: Path | None, sha: str) -> bool:
         return False
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "cat-file", "-e", f"{checked}^{{commit}}"],
+            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
             capture_output=True,
             check=False,
+            text=True,
             timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    if proc.returncode != 0:
+    checkout_head = (getattr(proc, "stdout", "") or "").strip().lower()
+    if proc.returncode != 0 or checkout_head != checked:
         print(
-            "notice: reviewed checkout does not contain the lane commit; "
-            "leaving judge anchors body-only"
+            "notice: reviewed checkout is not at the lane commit; leaving judge anchors body-only"
         )
         return False
     return True
@@ -830,11 +863,7 @@ def _messages(
     agent_replies: str = "",
 ) -> list[dict[str, str]]:
     custom = env.get("CUSTOM_INSTRUCTIONS") or ""
-    if len(custom.encode("utf-8")) > 16_000:
-        raise ActionError("custom_instructions exceeds 16,000 UTF-8 bytes")
     tone = (env.get("ROAST_LEVEL") or "professional").strip().lower()
-    if tone not in {"professional", "playful"}:
-        raise ActionError("roast_level must be professional or playful in v1")
     # persona is reserved and unused; passed through so a later release can read it.
     return build_messages(
         collected,
@@ -860,6 +889,7 @@ def _finish(
     reviewed_sha = _common_lane_sha(lanes) or collected.head_sha
     successful = [lane for lane in lanes if lane.ok]
     slugs = parse_models(env.get("MODELS"))
+    _write_judge_outputs(_judge_needed(env, slugs), parse_judge_model(env.get("JUDGE_MODEL")))
     judge_outcome = _resolve_issues(env, slugs, lanes, successful)
     issues = judge_outcome.issues
     # Judge output bypasses the per-lane anchor gate, so gate the merged
@@ -1009,16 +1039,12 @@ def _finish(
     _set_output("round", str(loop.round_number))
     _set_output("review_url", review_url)
 
-    _set_output("judge_needed", "true" if _judge_needed(env, slugs) else "false")
-    _set_output("judge_model", parse_judge_model(env.get("JUDGE_MODEL")))
-
     if verdict == "error":
         _error("every model lane failed; nothing structured arrived to post")
         return 1
 
+    # Every role passes through _validate_inputs before reaching _finish.
     fail_on = (env.get("FAIL_ON") or "never").strip().lower()
-    if fail_on not in {"never", "bugs", "any"}:
-        raise ActionError("fail_on must be never, bugs, or any")
     if fail_on_should_fail(
         fail_on,
         issues,
@@ -1105,15 +1131,22 @@ def _all_role_deadline_seconds(
     env: dict[str, str], remaining: float | None, judge_reserve: int
 ) -> int:
     """Bound lane collection while preserving the judge/publication window."""
-    configured = (env.get("ALL_ROLE_DEADLINE_SECONDS") or "").strip()
-    if configured:
-        deadline = _int_env(env, "ALL_ROLE_DEADLINE_SECONDS", 1500)
-        if deadline < 1:
-            raise ActionError("all_role_deadline_seconds must be a positive integer")
-        return deadline
+    configured = _configured_all_role_deadline_seconds(env)
+    if configured is not None:
+        return configured
     if remaining is None:
         return 1500
     return max(int(remaining - max(POST_RESERVE_SECONDS, judge_reserve)), 0)
+
+
+def _configured_all_role_deadline_seconds(env: dict[str, str]) -> int | None:
+    raw = (env.get("ALL_ROLE_DEADLINE_SECONDS") or "").strip()
+    if not raw:
+        return None
+    deadline = _int_env(env, "ALL_ROLE_DEADLINE_SECONDS", 1500)
+    if deadline < 1:
+        raise ActionError("all_role_deadline_seconds must be a positive integer")
+    return deadline
 
 
 def _job_budget_seconds(env: dict[str, str]) -> int:
@@ -1216,7 +1249,13 @@ def _env_flag(env: dict[str, str], name: str, default: bool) -> bool:
 
 
 def _maybe_status(env: dict[str, str], pr_number: int, body: str) -> None:
-    if not _env_flag(env, "STATUS_COMMENTS", True):
+    try:
+        enabled = _env_flag(env, "STATUS_COMMENTS", True)
+    except ActionError:
+        # This helper also runs from main's error handler. Invalid input must
+        # not raise a second exception while reporting the first one.
+        return
+    if not enabled:
         return
     try:
         upsert_status_comment(_github(env), pr_number=pr_number, body=body)
@@ -1240,11 +1279,13 @@ def _set_output(name: str, value: str) -> None:
     path = _ACTIVE_ENV.get("GITHUB_OUTPUT") or os.environ.get("GITHUB_OUTPUT")
     if not path:
         return
+    # Every output produced by this CLI is single-line. Refuse accidental
+    # command-file injection instead of maintaining an unnecessary heredoc
+    # protocol with a collision-prone fixed delimiter.
+    if "\r" in value or "\n" in value:
+        raise ActionError(f"GitHub output {name!r} must be a single line")
     with open(path, "a", encoding="utf-8") as handle:
-        if "\n" in value:
-            handle.write(f"{name}<<ORPR_EOF\n{value}\nORPR_EOF\n")
-        else:
-            handle.write(f"{name}={value}\n")
+        handle.write(f"{name}={value}\n")
 
 
 def _error(message: str) -> None:

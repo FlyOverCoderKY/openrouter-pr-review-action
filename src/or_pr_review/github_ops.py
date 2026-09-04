@@ -49,6 +49,10 @@ class GitHub:
 
     def _env(self) -> dict[str, str]:
         env = os.environ.copy()
+        # The GitHub subprocess has no reason to receive the paid-provider
+        # credential. Keep the rest of the runner environment intact while
+        # narrowing this command's secret exposure to its GitHub token.
+        env.pop("OPENROUTER_API_KEY", None)
         env["GH_TOKEN"] = self.token
         env["GITHUB_TOKEN"] = self.token
         env["GH_PROMPT_DISABLED"] = "1"

@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -286,9 +289,9 @@ def test_committed_fixtures_pin_the_production_embed_cap() -> None:
 
 
 def test_capture_default_matches_production_embed_cap() -> None:
-    from or_pr_review.bench import DEFAULT_MAX_DIFF_KB
+    from or_pr_review.collect import DEFAULT_MAX_DIFF_KB
 
-    assert _load_capture().DEFAULT_CAPTURE_MAX_DIFF_KB == DEFAULT_MAX_DIFF_KB
+    assert _load_capture().DEFAULT_MAX_DIFF_KB == DEFAULT_MAX_DIFF_KB
 
 
 def test_bench_run_cli_defaults_follow_production_constants(
@@ -309,10 +312,13 @@ def test_bench_run_cli_defaults_follow_production_constants(
     assert seen["timeout"] == bench_mod.DEFAULT_TIMEOUT
 
 
-def test_capture_legacy_extraction_validates_members_before_extracting(
+def test_capture_modern_extraction_does_not_mask_type_errors(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    extract_archive = _load_capture()._extract_archive
+    capture = _load_capture()
+    monkeypatch.setattr(capture.tarfile, "data_filter", object(), raising=False)
+    extract_archive = capture._extract_archive
 
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -323,29 +329,69 @@ def test_capture_legacy_extraction_validates_members_before_extracting(
 
         def extractall(self, *args: object, **kwargs: object) -> None:
             self.calls.append((args, kwargs))
-            if kwargs:
-                raise TypeError("filter is unsupported")
+            raise TypeError("bug inside modern extraction")
+
+        def getmembers(self) -> list[tarfile.TarInfo]:
+            raise AssertionError("modern extraction must not enter the legacy path")
+
+    tar = FakeTar()
+    with pytest.raises(TypeError, match="bug inside modern extraction"):
+        extract_archive(tar, checkout)
+    assert tar.calls == [((checkout,), {"filter": "data"})]
+
+
+def test_documented_capture_script_starts_without_install(tmp_path: Path) -> None:
+    script = Path(__file__).resolve().parents[1] / "bench" / "capture.py"
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Capture a real PR" in result.stdout
+
+
+def test_capture_legacy_extraction_validates_members_before_extracting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _load_capture()
+    monkeypatch.delattr(capture.tarfile, "data_filter", raising=False)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    class FakeTar:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple, dict]] = []
+
+        def extractall(self, *args: object, **kwargs: object) -> None:
+            self.calls.append((args, kwargs))
 
         def getmembers(self) -> list[tarfile.TarInfo]:
             return [tarfile.TarInfo("safe.txt")]
 
     tar = FakeTar()
-    extract_archive(tar, checkout)
-    assert len(tar.calls) == 2
-    assert "filter" in tar.calls[0][1]
-    assert tar.calls[1][1] == {}
+    capture._extract_archive(tar, checkout)
+    assert tar.calls == [((checkout,), {})]
 
 
-def test_capture_legacy_extraction_rejects_links(tmp_path: Path) -> None:
-    extract_archive = _load_capture()._extract_archive
+def test_capture_legacy_extraction_rejects_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = _load_capture()
+    monkeypatch.delattr(capture.tarfile, "data_filter", raising=False)
 
     checkout = tmp_path / "checkout"
     checkout.mkdir()
 
     class FakeTar:
         def extractall(self, *args: object, **kwargs: object) -> None:
-            if kwargs:
-                raise TypeError("filter is unsupported")
+            raise AssertionError("unsafe archive must not be extracted")
 
         def getmembers(self) -> list[tarfile.TarInfo]:
             link = tarfile.TarInfo("link")
@@ -354,7 +400,7 @@ def test_capture_legacy_extraction_rejects_links(tmp_path: Path) -> None:
             return [link]
 
     with pytest.raises(SystemExit, match="links are not allowed"):
-        extract_archive(FakeTar(), checkout)
+        capture._extract_archive(FakeTar(), checkout)
 
 
 def _load_generator():
@@ -390,6 +436,8 @@ def test_committed_checkouts_match_the_generator() -> None:
 def test_committed_diffs_match_the_generator() -> None:
     # Regenerate each diff with the generator's isolated git and compare
     # byte-for-byte, so a stale diff.patch cannot disagree with the checkout.
+    if shutil.which("git") is None:
+        pytest.skip("git is required to regenerate committed fixture diffs")
     module = _load_generator()
     for name, head in module.FIXTURE_HEADS.items():
         committed = (FIXTURE_DIR.parent / name / "diff.patch").read_bytes()

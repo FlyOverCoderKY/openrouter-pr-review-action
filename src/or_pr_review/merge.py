@@ -146,10 +146,6 @@ def is_environmental_diagnostic(*, title: str, body: str, line: int | None) -> b
 def same_merged_issue(
     left: MergedIssue,
     right: MergedIssue,
-    *,
-    title_similarity: float = 0.8,
-    require_title_noise_only: bool = True,
-    require_evidence_agreement: bool = True,
 ) -> bool:
     """Conservative exact/near duplicate test for already-merged issues.
 
@@ -165,16 +161,14 @@ def same_merged_issue(
     title_left = _normalize(left.title)
     title_right = _normalize(right.title)
     if title_left == title_right:
-        return not require_evidence_agreement or _evidence_agrees(left.body, right.body)
+        return _evidence_agrees(left.body, right.body)
     if not file_left or left.line is None:
         return False
-    if _jaccard(_tokens(left.title), _tokens(right.title)) < title_similarity:
+    if _jaccard(_tokens(left.title), _tokens(right.title)) < 0.8:
         return False
-    if require_title_noise_only and (
-        (_tokens(left.title) ^ _tokens(right.title)) - _DUPLICATE_NOISE_TOKENS
-    ):
+    if (_tokens(left.title) ^ _tokens(right.title)) - _DUPLICATE_NOISE_TOKENS:
         return False
-    return not require_evidence_agreement or _evidence_agrees(left.body, right.body)
+    return _evidence_agrees(left.body, right.body)
 
 
 def _evidence_agrees(left: str, right: str) -> bool:
@@ -210,10 +204,6 @@ def absorb_merged_issue(existing: MergedIssue, incoming: MergedIssue) -> None:
 
 def deduplicate_issues(
     issues: list[MergedIssue],
-    *,
-    title_similarity: float = 0.8,
-    require_title_noise_only: bool = True,
-    require_evidence_agreement: bool = True,
 ) -> tuple[list[MergedIssue], int]:
     """Deterministically suppress exact/conservative-near duplicate issues.
 
@@ -233,13 +223,7 @@ def deduplicate_issues(
             id=issue.id,
         )
         for existing in merged:
-            if same_merged_issue(
-                existing,
-                candidate,
-                title_similarity=title_similarity,
-                require_title_noise_only=require_title_noise_only,
-                require_evidence_agreement=require_evidence_agreement,
-            ):
+            if same_merged_issue(existing, candidate):
                 absorb_merged_issue(existing, candidate)
                 absorbed += 1
                 break

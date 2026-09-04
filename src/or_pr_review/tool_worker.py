@@ -1,10 +1,13 @@
 """Killable subprocess entry point for one inert repository tool call.
 
 The harness launches this module with ``sys.executable -m`` so it uses the
-same Python environment in which ``or_pr_review`` is installed.  Keeping that
-runtime dependency explicit matters for action runners that have multiple
-Python installations: invoking a different interpreter can make the worker
-fail before it can return a model-facing tool observation.
+same Python environment in which ``or_pr_review`` is importable. The composite
+action establishes that contract by adding ``github.action_path/src`` to
+``PYTHONPATH`` for the parent process; child processes inherit it. Installed
+package users get the same contract from their Python environment. Keeping the
+runtime dependency explicit matters on runners with multiple interpreters:
+invoking a different interpreter can make the worker fail before it can return
+a model-facing tool observation.
 """
 
 from __future__ import annotations

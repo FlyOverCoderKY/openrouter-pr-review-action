@@ -41,7 +41,7 @@ def test_lane_clock_preserves_finalize_repair_budget() -> None:
         clock.prepare_request(
             now=50.0,
             tools_active=True,
-            deadline_finalizing=False,
+            deadline_limited=False,
             repair_available=True,
         )
         == 80.0
@@ -51,7 +51,7 @@ def test_lane_clock_preserves_finalize_repair_budget() -> None:
         clock.prepare_request(
             now=80.0,
             tools_active=False,
-            deadline_finalizing=True,
+            deadline_limited=True,
             repair_available=True,
         )
         == 90.0
@@ -60,7 +60,7 @@ def test_lane_clock_preserves_finalize_repair_budget() -> None:
         clock.prepare_request(
             now=90.0,
             tools_active=False,
-            deadline_finalizing=True,
+            deadline_limited=True,
             repair_available=False,
         )
         == 100.0
@@ -82,7 +82,7 @@ def test_loop_state_phase_owns_tool_and_finalize_flags() -> None:
 
     state.enter_finalize("deadline", salvaged=True)
     state.enter_finalize("signature", salvaged=True)
-    assert state.deadline_finalizing
+    assert state.deadline_limited
     assert state.signature_finalizing
 
 
@@ -378,8 +378,8 @@ def test_anchor_gate_respects_snapshot_holes_and_directories(tmp_path: Path) -> 
     )
     # A snapshot hole is NOT a ghost path: anchor kept, line uncheckable so kept.
     assert (out[0].file, out[0].line) == ("package-lock.json", 4021)
-    # A real directory exists; the path anchor survives.
-    assert (out[1].file, out[1].line) == ("pkg", None)
+    # Directories are not valid file anchors and become body-only.
+    assert (out[1].file, out[1].line) == (None, None)
     assert (out[2].file, out[2].line) == (None, None)
 
 
@@ -387,11 +387,11 @@ def test_anchor_gate_counts_lines_like_the_read_tools(tmp_path: Path) -> None:
     from or_pr_review.harness import sanitize_anchors
     from or_pr_review.schema import Finding
 
-    # Three tool-visible lines, but only one \n byte: U+2028 and a bare \r
-    # also split under str.splitlines, which is how read_file/grep number.
+    # GitHub and the read tools see one line because only LF is a boundary;
+    # Unicode separators and bare CR remain part of that line.
     (tmp_path / "odd.py").write_bytes("a b\rc\n".encode())
     finding = Finding(
-        title="cites the tool-visible last line",
+        title="cites beyond the only LF-delimited line",
         body="b",
         severity="risk",
         file="odd.py",
@@ -399,7 +399,74 @@ def test_anchor_gate_counts_lines_like_the_read_tools(tmp_path: Path) -> None:
         model_id="m",
     )
     out = sanitize_anchors([finding], tmp_path)
-    assert (out[0].file, out[0].line) == ("odd.py", 3)
+    assert (out[0].file, out[0].line) == ("odd.py", None)
+
+
+def test_anchor_gate_never_follows_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review.harness import sanitize_anchors
+    from or_pr_review.schema import Finding
+
+    outside = tmp_path.parent / "outside-anchor.py"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = tmp_path / "linked.py"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    finding = Finding(
+        title="symlink citation",
+        body="b",
+        severity="risk",
+        file="linked.py",
+        line=1,
+        model_id="m",
+    )
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args: object, **kwargs: object):
+        if path == link:
+            pytest.fail("anchor gate must not open a symlink")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    out = sanitize_anchors([finding], tmp_path)
+
+    assert (out[0].file, out[0].line) == (None, None)
+
+
+def test_anchor_gate_does_not_read_files_beyond_snapshot_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+    from or_pr_review.schema import Finding
+
+    target = tmp_path / "large.py"
+    target.write_bytes(b"one\ntwo\n")
+    monkeypatch.setattr(harness, "MAX_OVERSIZED_MATERIALIZED_FILE", 4)
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args: object, **kwargs: object):
+        if path == target:
+            pytest.fail("oversized anchor target must not be read")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    finding = Finding(
+        title="large citation",
+        body="b",
+        severity="risk",
+        file="large.py",
+        line=99,
+        model_id="m",
+    )
+
+    out = harness.sanitize_anchors([finding], tmp_path)
+
+    # The file is real, but its line count is intentionally left unverified.
+    assert (out[0].file, out[0].line) == ("large.py", 99)
 
 
 def test_run_lane_applies_the_anchor_gate(tmp_path: Path) -> None:
@@ -1033,6 +1100,60 @@ def test_gemini_signature_salvage_gets_one_json_repair(tmp_path: Path) -> None:
     assert len(payloads) == 4
 
 
+def test_gemini_tool_call_during_signature_finalize_fails_visibly(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        # The first unsigned call enters signature recovery without executing
+        # the tool. A second tool call must not turn that bounded recovery into
+        # another tool loop.
+        return _tool_reply() if len(payloads) == 1 else _gemini_tool_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+
+    assert not result.ok
+    assert result.requests == 2
+    assert result.tool_rounds == 0
+    assert result.thought_signature_recoveries == 1
+    assert "another tool call during thought-signature recovery" in (result.error or "")
+
+
+def test_unsolicited_tool_calls_fail_after_bounded_repair_rounds() -> None:
+    from or_pr_review import harness
+
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        # Copy the history because the lane intentionally mutates its shared
+        # conversation after each request.
+        payloads.append(json.loads(json.dumps(payload)))
+        return _tool_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        chat=chat,
+    )
+
+    assert not result.ok
+    assert result.requests == harness.MAX_REPAIR_ROUNDS + 1
+    assert "kept issuing tool calls after the tool budget was withdrawn" in (result.error or "")
+    assert all("tools" not in payload for payload in payloads)
+    assert all("response_format" in payload for payload in payloads)
+    for payload in payloads:
+        _assert_valid_tool_pairing(payload["messages"])
+
+
 def test_gemini_deadline_finish_replays_signed_tool_protocol_with_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1495,6 +1616,38 @@ def test_openrouter_chat_retries_transient_errors(monkeypatch: pytest.MonkeyPatc
     assert stats["retries"] == 2
 
 
+@pytest.mark.parametrize(
+    ("retry_after", "expected_sleep"),
+    [
+        ("not-a-delay", 2.0),
+        ("999999999999", 30.0),
+    ],
+)
+def test_openrouter_chat_bounds_or_ignores_bad_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+    retry_after: str,
+    expected_sleep: float,
+) -> None:
+    attempts = 0
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _http_error(429, retry_after=retry_after)
+        return _FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+
+    from or_pr_review import harness
+
+    assert harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append) == {
+        "choices": []
+    }
+    assert sleeps == [expected_sleep]
+
+
 def test_openrouter_chat_retries_mid_body_connection_drops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1848,6 +2001,97 @@ def test_repository_tool_timeout_is_killed_and_returned_as_observation(
     assert "exceeded its" in observation["content"]
     assert "deadline" in observation["content"]
     assert harness.time.monotonic() - started < 5
+
+
+def test_repository_tool_rejects_invalid_arguments_without_starting_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+
+    def unexpected_run(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("invalid arguments must not start the tool worker")
+
+    monkeypatch.setattr(harness.subprocess, "run", unexpected_run)
+    observation = harness._run_one_tool(
+        tmp_path,
+        {
+            "id": "tool-invalid",
+            "function": {"name": "read_file", "arguments": "[1, 2]"},
+        },
+    )
+
+    assert observation == {
+        "role": "tool",
+        "tool_call_id": "tool-invalid",
+        "content": "error: invalid tool arguments: arguments must be an object",
+    }
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "expected"),
+    [
+        (7, "", "worker failed", "repository tool process exited 7: worker failed"),
+        (0, "not-json", "", "repository tool returned invalid JSON"),
+    ],
+)
+def test_repository_tool_reports_worker_protocol_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    expected: str,
+) -> None:
+    from or_pr_review import harness
+
+    completed = harness.subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+    monkeypatch.setattr(harness.subprocess, "run", lambda *_args, **_kwargs: completed)
+    observation = harness._run_one_tool(
+        tmp_path,
+        {
+            "id": "tool-worker",
+            "function": {"name": "read_file", "arguments": '{"path":"a.py"}'},
+        },
+    )
+
+    assert observation["role"] == "tool"
+    assert observation["tool_call_id"] == "tool-worker"
+    assert expected in observation["content"]
+
+
+def test_repository_tool_worker_uses_safe_path_against_checkout_shadowing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+
+    untrusted = tmp_path / "untrusted"
+    shadow = untrusted / "or_pr_review"
+    shadow.mkdir(parents=True)
+    marker = tmp_path / "shadow-ran"
+    (shadow / "__init__.py").write_text("", encoding="utf-8")
+    (shadow / "tool_worker.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('owned')\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "safe.txt").write_text("trusted\n", encoding="utf-8")
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    monkeypatch.setenv("PYTHONPATH", str(source_root))
+    monkeypatch.chdir(untrusted)
+
+    observation = harness._run_one_tool(
+        workspace,
+        {
+            "id": "tool-safe-path",
+            "function": {"name": "read_file", "arguments": '{"path":"safe.txt"}'},
+        },
+    )
+
+    assert observation["content"].replace("\r\n", "\n") == "trusted\n"
+    assert not marker.exists()
 
 
 def test_salvage_shrinks_old_observations_on_context_overflow(tmp_path: Path) -> None:

@@ -49,10 +49,10 @@ oversensitivity headline), per-label detection frequency across runs, the
 labels every run missed, and each run's non-label findings tagged with the
 adjudication verdict that fired or `UNADJUDICATED` for triage.
 
-## Label format
-
 Completed `run-N.json` files contain finding bodies and file paths. For real-PR
 fixtures, keep `--out` outside this repository as well as the fixture itself.
+
+## Label format
 
 A label matches a finding when the finding cites the label's `file` (or the
 label has no file) and any `keywords` regex matches the finding's title+body,

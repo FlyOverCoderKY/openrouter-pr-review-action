@@ -10,12 +10,36 @@ import pytest
 from or_pr_review.workspace import (
     MAX_GREP_MATCHES,
     MAX_LIST_ENTRIES,
+    _extract_safe_member,
     _safe_member,
+    _write_safety_metadata,
     dispatch_tool,
     is_blocked_path,
     tool_grep,
     tool_read_file,
 )
+
+
+def test_safe_member_extraction_supports_early_python_311(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import or_pr_review.workspace as ws
+
+    monkeypatch.delattr(ws.tarfile, "data_filter", raising=False)
+    member = tarfile.TarInfo("safe.txt")
+    member.size = 4
+
+    class FakeTar:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, object, dict[str, object]]] = []
+
+        def extract(self, item: object, *, path: object, **kwargs: object) -> None:
+            self.calls.append((item, path, kwargs))
+
+    tar = FakeTar()
+    _extract_safe_member(tar, member, tmp_path)  # type: ignore[arg-type]
+
+    assert tar.calls == [(member, tmp_path, {})]
 
 
 def test_read_and_grep_and_list(tmp_path: Path) -> None:
@@ -77,6 +101,7 @@ def test_nested_and_case_variant_credential_paths_are_blocked(
         ".envrc",
         "nested/.envrc.local",
         "nested/.direnv/token",
+        ".env.example",
     ],
 )
 def test_high_confidence_credential_paths_are_blocked(tmp_path: Path, relative: str) -> None:
@@ -93,6 +118,41 @@ def test_envrc_exported_assignments_are_refused_without_content_heuristics(tmp_p
 
     assert "refusing" in tool_read_file(tmp_path, ".envrc")
     assert ".envrc" not in tool_grep(tmp_path, "OPENROUTER_API_KEY")
+
+
+def test_blocked_looking_host_ancestor_does_not_hide_workspace_files(tmp_path: Path) -> None:
+    workspace = tmp_path / "secrets" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "safe.txt").write_bytes(b"needle\n")
+
+    assert tool_read_file(workspace, "safe.txt") == "needle\n"
+    assert "safe.txt:1:needle" in tool_grep(workspace, "needle")
+
+
+def test_safety_metadata_does_not_read_blocked_file_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    blocked = workspace / ".env"
+    blocked.write_text("TOKEN=secret\n", encoding="utf-8")
+    safe = workspace / "safe.txt"
+    safe.write_text("one\ntwo\n", encoding="utf-8")
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path == blocked:
+            raise AssertionError("blocked credential contents must not be read")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    _write_safety_metadata(workspace, [".env", "safe.txt"])
+
+    metadata = json.loads(
+        (workspace.parent / f"{workspace.name}.safety.json").read_text(encoding="utf-8")
+    )
+    assert metadata["files"][".env"] == {"line_count": 0, "state": "blocked"}
+    assert metadata["files"]["safe.txt"] == {"line_count": 2, "state": "safe"}
 
 
 def test_dotenv_contents_refused(tmp_path: Path) -> None:
@@ -113,6 +173,18 @@ def test_ranged_read_returns_window(tmp_path: Path) -> None:
     assert "line 3" in result and "line 4" in result
     assert "line 5" not in result
     assert "start_line=5" in result  # continuation hint
+
+
+@pytest.mark.parametrize("separator", ["\x0c", "\x85", "\u2028", "\r"])
+def test_non_lf_separators_do_not_create_tool_line_boundaries(
+    tmp_path: Path, separator: str
+) -> None:
+    (tmp_path / "odd.txt").write_bytes(f"first{separator}needle\nlast\n".encode())
+
+    first = tool_read_file(tmp_path, "odd.txt", start_line=1, max_lines=1)
+    assert "needle" in first
+    assert "odd.txt:1:" in tool_grep(tmp_path, "needle")
+    assert "odd.txt:2:last" in tool_grep(tmp_path, "last")
 
 
 def test_unranged_large_file_truncates_with_continuation_hint(tmp_path: Path) -> None:
@@ -357,6 +429,7 @@ def test_materialized_workspace_uses_safety_metadata_instead_of_rescanning(
     monkeypatch.setattr(ws, "looks_like_dotenv", unexpected_scan)
     assert "needle=value" in ws.tool_read_file(dest, "safe.txt")
     assert "needle=value" in ws.tool_grep(dest, "needle")
+    assert "safe.txt:2:second" in ws.tool_grep(dest, "second")
     assert "refusing" in ws.tool_read_file(dest, "dotenv.txt")
     assert "dotenv.txt" not in ws.tool_grep(dest, "FOO")
 

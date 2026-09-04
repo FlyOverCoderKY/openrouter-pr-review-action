@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 1.3.1 — 2026-09-04
+
+- Correct workspace safety classification to inspect repository-relative paths,
+  avoid reading blocked credential contents while indexing, and use LF-only line
+  numbering consistently across ranged reads, grep, and anchor validation.
+- Resolve the reviewed PR head for reusable-workflow dispatches and require the
+  checked-out worktree's `HEAD` to match the reviewed SHA before anchor checks.
+- Make ambiguous Git diff headers share the segmented parser used by packing,
+  recognize binary deletions, and state rename/deletion coverage paths explicitly.
+- Fail cleanly on malformed `status_comments`, validate all-role deadlines before
+  side effects, and avoid duplicate judge setup outputs in all-role runs.
+- Harden redaction for multi-segment secret variable names and keep the OpenRouter
+  key out of GitHub CLI child environments while preserving runner configuration.
+- Centralize the 300 KiB embedded-diff default, make Python 3.11 part of CI, use
+  feature detection for safe tar extraction, and pin the remaining artifact actions.
+- Prevent reviewed repositories from shadowing the action or tool-worker Python
+  package, and make live-checkout anchor validation reject symlinks/non-files and
+  skip line counting for files above the bounded snapshot ceiling.
+- Honor `judge_needed: true` for a single configured lane while retaining the
+  direct-post fail-open path when only one of several lanes succeeds, restore judge
+  outputs for every publishing role, and keep an explicitly selected PR's head and
+  commit range separate from the triggering event.
+
 ## 1.3.0 — 2026-09-04
 
 - Paid benchmark lanes now persist an atomic aggregate-only progress checkpoint
@@ -56,6 +79,20 @@
 - Ledger v1's wider decode-only title and evidence bounds are now named, documented
   compatibility constants with exact boundary tests through the public extraction
   API. Encoder limits and the on-wire ledger version are unchanged.
+- Reusable-workflow judge jobs now check out the reviewed PR head before applying
+  the deterministic anchor gate, preventing multi-lane findings from being checked
+  against the action repository.
+- Public `job_budget_seconds` and `all_role_deadline_seconds` inputs expose the
+  wall-clock budgets previously fixed or environment-only in the harness.
+- Untrusted diffs, prior findings, and agent replies use content-sized Markdown
+  fences so embedded backticks and fake headings remain quoted review data.
+- Redaction now covers quoted JSON assignments, prose API-key forms, bearer tokens,
+  and provider-specific secret environment variables. Literal replacement ignores
+  values shorter than eight characters to avoid redacting ordinary short words.
+- Ruff lint and formatting checks now run in CI with the tool version pinned.
+- Coverage accounting uses the destination path for renames and the old path for
+  deletions; deleted files are dropped rather than advertised as tool-readable
+  stubs when the embedded diff exceeds its budget.
 
 ## 1.2.7 — 2026-08-29
 

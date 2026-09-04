@@ -1,11 +1,71 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 
 import pytest
 
 from or_pr_review.errors import ActionError
 from or_pr_review.github_ops import GitHub
+
+
+def test_run_gh_maps_timeout_to_action_error(monkeypatch) -> None:
+    from or_pr_review import github_ops as github_ops_mod
+
+    def run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(github_ops_mod.subprocess, "run", run)
+
+    with pytest.raises(ActionError, match=r"GitHub CLI timed out after 17s"):
+        github_ops_mod._run_gh(["gh", "api", "user"], env={}, timeout=17)
+
+
+def test_run_gh_maps_os_error_to_action_error(monkeypatch) -> None:
+    from or_pr_review import github_ops as github_ops_mod
+
+    def run(*args, **kwargs):
+        raise FileNotFoundError("gh executable not found")
+
+    monkeypatch.setattr(github_ops_mod.subprocess, "run", run)
+
+    with pytest.raises(ActionError, match=r"failed to run GitHub CLI: gh executable not found"):
+        github_ops_mod._run_gh(["gh", "api", "user"], env={}, timeout=17)
+
+
+def test_run_gh_redacts_failed_command_stderr(monkeypatch) -> None:
+    from or_pr_review import github_ops as github_ops_mod
+
+    secret = "github-token-that-must-not-leak"
+    monkeypatch.setenv("GH_TOKEN", secret)
+    completed = subprocess.CompletedProcess(
+        args=["gh", "api", "user"],
+        returncode=1,
+        stdout=b"",
+        stderr=f"request failed with token={secret}".encode(),
+    )
+    monkeypatch.setattr(github_ops_mod.subprocess, "run", lambda *args, **kwargs: completed)
+
+    with pytest.raises(ActionError) as raised:
+        github_ops_mod._run_gh(["gh", "api", "user"], env={}, timeout=17)
+
+    assert secret not in str(raised.value)
+    assert "token=[redacted]" in str(raised.value)
+
+
+def test_github_env_excludes_openrouter_key_and_preserves_runner_env(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "paid-provider-secret")
+    monkeypatch.setenv("RUNNER_CONTEXT", "preserved")
+
+    env = GitHub(token="github-secret", repository="o/r")._env()
+
+    assert "OPENROUTER_API_KEY" not in env
+    assert env["RUNNER_CONTEXT"] == "preserved"
+    assert env["GH_TOKEN"] == "github-secret"
+    assert env["GITHUB_TOKEN"] == "github-secret"
+    assert env["GH_PROMPT_DISABLED"] == "1"
+    assert env is not os.environ
 
 
 def test_compare_diff_validates_fast_forward_and_fetches_raw() -> None:
@@ -183,6 +243,28 @@ def test_upsert_status_comment_uses_paginated_issue_comments() -> None:
     assert upsert_status_comment(gh, pr_number=1, body="new") == "https://example.test/status"
     assert "--paginate" in calls[0]
     assert "PATCH" in calls[1]
+
+
+def test_upsert_status_comment_creates_when_marker_is_absent() -> None:
+    from or_pr_review.github_ops import STATUS_MARKER, upsert_status_comment
+
+    requests: list[tuple[list[str], str | None]] = []
+
+    def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
+        requests.append((cmd, stdin))
+        if "--paginate" in cmd:
+            return json.dumps([[{"id": 100, "body": "an unrelated comment"}]])
+        return json.dumps({"html_url": "https://example.test/new-status"})
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+
+    assert upsert_status_comment(gh, pr_number=7, body="running") == (
+        "https://example.test/new-status"
+    )
+    assert "--paginate" in requests[0][0]
+    assert requests[1][0][1:3] == ["api", "repos/o/r/issues/7/comments"]
+    assert requests[1][0][-2:] == ["--input", "-"]
+    assert json.loads(requests[1][1] or "{}") == {"body": f"{STATUS_MARKER}\nrunning\n"}
 
 
 def test_list_finding_replies_pairs_marker_threads_by_generation() -> None:

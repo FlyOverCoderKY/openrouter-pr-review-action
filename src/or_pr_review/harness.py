@@ -7,13 +7,14 @@ import hashlib
 import http.client
 import json
 import math
+import stat
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,7 @@ from or_pr_review.schema import (
     valid_review_path,
     validate_coverage,
 )
-from or_pr_review.workspace import READ_ONLY_TOOLS
+from or_pr_review.workspace import MAX_OVERSIZED_MATERIALIZED_FILE, READ_ONLY_TOOLS, tracked_paths
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 HTTP_REFERER = "https://github.com/FlyOverCoderKY/openrouter-pr-review-action"
@@ -106,7 +107,10 @@ class OpenRouterHTTPError(LaneError):
 # tool budget was withdrawn.
 MAX_REPAIR_ROUNDS = 3
 # Repository tools run out-of-process so a pathological regex or filesystem
-# stall cannot pin a review thread past its lane deadline.
+# stall cannot pin a review thread past its lane deadline. The worker package
+# is found through action.yml's PYTHONPATH or through an installed package.
+# Python safe-path mode prevents a package in the reviewed checkout from
+# shadowing that trusted import.
 MAX_TOOL_CALL_SECONDS = 30
 
 
@@ -143,10 +147,6 @@ class _LoopState:
     @property
     def force_tool(self) -> bool:
         return self.phase is _LoopPhase.NUDGE
-
-    @property
-    def deadline_finalizing(self) -> bool:
-        return self.deadline_limited
 
     @property
     def signature_finalizing(self) -> bool:
@@ -188,12 +188,12 @@ class _LaneClock:
         *,
         now: float,
         tools_active: bool,
-        deadline_finalizing: bool,
+        deadline_limited: bool,
         repair_available: bool,
     ) -> float | None:
         if self.deadline is None:
             self.request_deadline = None
-        elif deadline_finalizing and repair_available:
+        elif deadline_limited and repair_available:
             self.request_deadline = now + max(1.0, (self.deadline - now) / 2)
         elif tools_active:
             self.request_deadline = self.deadline - self.reserve_seconds
@@ -287,12 +287,12 @@ def openrouter_chat(
                         provider=provider,
                     ) from exc
                 continue
+            # OpenRouter's zero-completion insurance makes a terminal HTTP
+            # error response non-billable. Any earlier successful requests in
+            # the lane retain their separately reported cost.
             raise OpenRouterHTTPError(
                 f"OpenRouter HTTP {exc.code}: {redact(err_body)}",
                 provider=provider,
-                # OpenRouter's zero-completion insurance makes a terminal
-                # HTTP error response non-billable. Any earlier successful
-                # requests in the lane retain their separately reported cost.
             ) from exc
         except TimeoutError as exc:
             if attempt < MAX_HTTP_ATTEMPTS:
@@ -440,7 +440,7 @@ def run_lane(
         if progress is None:
             return
         snapshot: dict[str, int | float | str] = {
-            "elapsed_ms": _elapsed_ms(started),
+            "elapsed_ms": elapsed_ms(started),
         }
         for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cost_usd"):
             value = usage.get(key)
@@ -514,7 +514,7 @@ def run_lane(
         if gate_root is not None:
             findings = sanitize_anchors(findings, gate_root)
     except LaneError as exc:
-        failed = failed_lane(model, redact(str(exc)), elapsed_ms=_elapsed_ms(started))
+        failed = failed_lane(model, redact(str(exc)), elapsed_ms=elapsed_ms(started))
         _attach_stats(failed, stats, usage)
         failed.provider = meta.get("provider")
         return failed
@@ -525,7 +525,7 @@ def run_lane(
         model=model,
         findings=findings,
         error=None,
-        elapsed_ms=_elapsed_ms(started),
+        elapsed_ms=elapsed_ms(started),
         prompt_tokens=usage.get("prompt_tokens"),
         completion_tokens=usage.get("completion_tokens"),
         provider=meta.get("provider"),
@@ -630,18 +630,31 @@ def _run_loop(
         if stats is not None and sanitized:
             stats["sanitized_tool_turns"] = stats.get("sanitized_tool_turns", 0) + sanitized
 
+    def enter_salvage(
+        reason: str,
+        notice: str,
+        *,
+        signature_recovery: bool = False,
+    ) -> None:
+        """Enter a tool-free finish and record its shared salvage telemetry."""
+        state.enter_finalize(reason, salvaged=True)
+        if stats is not None:
+            stats["salvaged"] = 1
+            if signature_recovery:
+                stats["thought_signature_recoveries"] = (
+                    stats.get("thought_signature_recoveries", 0) + 1
+                )
+        _append_user_notice(conversation, notice)
+
     try:
         while True:
             now = time.monotonic()
             clock.ensure_active(now)
             if (
                 clock.finalize_due(now=now, tools_active=state.tools_active)
-                and not state.deadline_finalizing
+                and not state.deadline_limited
             ):
-                state.enter_finalize("deadline", salvaged=True)
-                if stats is not None:
-                    stats["salvaged"] = 1
-                _append_user_notice(conversation, DEADLINE_FINALIZE_NOTICE)
+                enter_salvage("deadline", DEADLINE_FINALIZE_NOTICE)
 
             # Tool exploration may use only the leading portion of the lane
             # budget.  Preserve the protected tail for a structured finish.
@@ -650,7 +663,7 @@ def _run_loop(
             clock.prepare_request(
                 now=now,
                 tools_active=state.tools_active,
-                deadline_finalizing=state.deadline_finalizing,
+                deadline_limited=state.deadline_limited,
                 repair_available=not state.finalize_retried,
             )
             payload = {
@@ -710,7 +723,7 @@ def _run_loop(
                 if state.use_schema and schema_rejected:
                     state.use_schema = False
                     state.last_error = exc
-                    if state.deadline_finalizing:
+                    if state.deadline_limited:
                         state.finalize_retried = True
                     continue
                 if state.turns > 0 and protocol.is_signature_rejection(lowered):
@@ -719,15 +732,17 @@ def _run_loop(
                     # as attributed plain evidence, and make one no-tools
                     # structured finish rather than replaying poisoned history.
                     if _looks_like_context_overflow(lowered):
+                        # Signature/context recovery converts tool records to
+                        # attributed plain evidence, so discard all oversized
+                        # observations before that conversion. Generic
+                        # transport salvage below can retain the last two.
                         _shrink_tool_history(conversation, keep_last=0)
                     sanitize_gemini_history()
-                    state.enter_finalize("signature", salvaged=True)
-                    if stats is not None:
-                        stats["salvaged"] = 1
-                        stats["thought_signature_recoveries"] = (
-                            stats.get("thought_signature_recoveries", 0) + 1
-                        )
-                    _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
+                    enter_salvage(
+                        "signature",
+                        MISSING_SIGNATURE_FINALIZE_NOTICE,
+                        signature_recovery=True,
+                    )
                     continue
                 deadline_pressure = clock.finalize_due(
                     now=time.monotonic(),
@@ -737,22 +752,16 @@ def _run_loop(
                     # The exploration-stage request budget expired.  This is
                     # expected deadline control, not a failed lane: finalize
                     # from the embedded diff even if no tool round completed.
-                    state.enter_finalize("deadline", salvaged=True)
-                    if stats is not None:
-                        stats["salvaged"] = 1
-                    _append_user_notice(conversation, DEADLINE_FINALIZE_NOTICE)
+                    enter_salvage("deadline", DEADLINE_FINALIZE_NOTICE)
                     continue
                 if state.turns > 0 and not state.salvage_attempted:
                     # Salvage: a mid-loop failure that survived the HTTP
                     # retries must not discard every gathered observation.
                     # Ask for a final JSON answer from the evidence so far.
-                    state.enter_finalize("transport", salvaged=True)
-                    if stats is not None:
-                        stats["salvaged"] = 1
                     if _looks_like_context_overflow(lowered):
                         _shrink_tool_history(conversation)
-                    _append_user_notice(
-                        conversation,
+                    enter_salvage(
+                        "transport",
                         (
                             "The previous request failed and will not be retried. "
                             "Do not call tools. Return your findings NOW as the "
@@ -761,7 +770,7 @@ def _run_loop(
                         ),
                     )
                     continue
-                if state.deadline_finalizing and not state.finalize_retried:
+                if state.deadline_limited and not state.finalize_retried:
                     # A transport/provider failure during the first protected
                     # finalize still gets one bounded retry. The request above
                     # reserved time specifically for this path.
@@ -788,13 +797,11 @@ def _run_loop(
                     # execute the unexpected turn; finish once from attributed
                     # plain evidence without replaying tool protocol.
                     sanitize_gemini_history()
-                    state.enter_finalize("signature", salvaged=True)
-                    if stats is not None:
-                        stats["salvaged"] = 1
-                        stats["thought_signature_recoveries"] = (
-                            stats.get("thought_signature_recoveries", 0) + 1
-                        )
-                    _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
+                    enter_salvage(
+                        "signature",
+                        MISSING_SIGNATURE_FINALIZE_NOTICE,
+                        signature_recovery=True,
+                    )
                     continue
                 if protocol.serial_tool_calls and not _has_round_trippable_gemini_signature(
                     message
@@ -804,14 +811,12 @@ def _run_loop(
                     # request. Never execute a call whose response cannot be
                     # replayed: doing so would both waste local work and poison
                     # every subsequent provider request, including salvage.
-                    state.enter_finalize("signature", salvaged=True)
-                    if stats is not None:
-                        stats["salvaged"] = 1
-                        stats["thought_signature_recoveries"] = (
-                            stats.get("thought_signature_recoveries", 0) + 1
-                        )
                     sanitize_gemini_history()
-                    _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
+                    enter_salvage(
+                        "signature",
+                        MISSING_SIGNATURE_FINALIZE_NOTICE,
+                        signature_recovery=True,
+                    )
                     continue
                 if protocol.serial_tool_calls and stats is not None:
                     stats["thought_signature_tool_turns"] = (
@@ -1159,7 +1164,7 @@ def _run_one_tool(
         return {"role": "tool", "tool_call_id": call_id, "content": result}
     try:
         process = subprocess.run(
-            [sys.executable, "-m", "or_pr_review.tool_worker", str(workspace), name],
+            [sys.executable, "-P", "-m", "or_pr_review.tool_worker", str(workspace), name],
             input=json.dumps(arguments),
             capture_output=True,
             text=True,
@@ -1254,12 +1259,10 @@ def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:
     manifest when one is present (falling back to the filesystem, where a
     directory also counts as existing), and the line check runs only on files
     that were actually materialized, counted the way the read-only tools
-    number lines. Each adjustment is logged.
+    number lines. Live-checkout paths are inspected without following symlink
+    components, and line counting is capped to avoid rereading unbounded files.
+    Each adjustment is logged.
     """
-    from dataclasses import replace
-
-    from or_pr_review.workspace import tracked_paths
-
     manifest = tracked_paths(workspace)
     sanitized: list[Finding] = []
     for finding in findings:
@@ -1278,9 +1281,9 @@ def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:
             sanitized.append(replace(finding, file=None, line=None))
             continue
         target = workspace / finding.file
-        exists = (
-            finding.file in manifest if manifest is not None else target.exists()
-        ) or target.exists()
+        tracked = finding.file in manifest if manifest is not None else None
+        path_state = _anchor_path_state(workspace, finding.file)
+        exists = tracked if tracked is not None else path_state != "missing"
         if not exists:
             _log_redacted_warning(
                 f"anchor gate: `{finding.file}` is not tracked at the reviewed "
@@ -1288,15 +1291,19 @@ def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:
             )
             sanitized.append(replace(finding, file=None, line=None))
             continue
-        if finding.line is not None and target.is_file():
-            line_count: int | None
-            try:
-                with target.open("rb") as handle:
-                    # Count lines exactly the way read_file/grep number them
-                    # (str.splitlines also splits U+2028/NEL/bare \r).
-                    line_count = len(handle.read().decode("utf-8", errors="replace").splitlines())
-            except OSError:
-                line_count = None
+        # A tracked member can be absent from an inert materialization because
+        # it was a link, special file, or too large. Preserve that uncheckable
+        # anchor. A present link/non-regular path, especially in a live checkout,
+        # is never followed or offered as a GitHub file anchor.
+        if path_state == "unsafe":
+            _log_redacted_warning(
+                f"anchor gate: `{finding.file}` is a symlink or non-regular path; "
+                f"finding {finding.title[:60]!r} becomes body-only"
+            )
+            sanitized.append(replace(finding, file=None, line=None))
+            continue
+        if finding.line is not None and path_state == "regular":
+            line_count = _bounded_lf_line_count(target)
             if line_count is not None and finding.line > line_count:
                 _log_redacted_warning(
                     f"anchor gate: line {finding.line} is beyond the end of "
@@ -1309,12 +1316,52 @@ def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:
     return sanitized
 
 
+def _anchor_path_state(workspace: Path, relative: str) -> str:
+    """Return regular, unsafe, or missing without following symlink components."""
+    current = workspace
+    parts = Path(relative).parts
+    try:
+        for index, part in enumerate(parts):
+            current /= part
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                return "unsafe"
+            if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
+                return "unsafe"
+        return "regular" if stat.S_ISREG(info.st_mode) else "unsafe"
+    except (FileNotFoundError, OSError):
+        return "missing"
+
+
+def _bounded_lf_line_count(path: Path) -> int | None:
+    """Count LF-delimited lines without loading files beyond the hard snapshot cap."""
+    total = 0
+    newline_count = 0
+    last_byte: int | None = None
+    try:
+        if path.stat().st_size > MAX_OVERSIZED_MATERIALIZED_FILE:
+            return None
+        with path.open("rb") as handle:
+            while chunk := handle.read(64 * 1024):
+                total += len(chunk)
+                if total > MAX_OVERSIZED_MATERIALIZED_FILE:
+                    return None
+                newline_count += chunk.count(b"\n")
+                last_byte = chunk[-1]
+    except OSError:
+        return None
+    if total == 0:
+        return 0
+    return newline_count + (0 if last_byte == ord("\n") else 1)
+
+
 def _log_redacted_warning(message: str) -> None:
     """Emit the few model-derived diagnostics this module needs safely."""
     print(redact(message), file=sys.stderr, flush=True)
 
 
-def _elapsed_ms(started: float) -> int:
+def elapsed_ms(started: float) -> int:
+    """Return monotonic elapsed milliseconds for lane and benchmark records."""
     return int((time.monotonic() - started) * 1000)
 
 

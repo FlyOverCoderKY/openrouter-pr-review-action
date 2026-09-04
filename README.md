@@ -12,8 +12,8 @@ First production use is a **single Grok 4.6 lane** beside the existing Grok acti
 
 - One invocation = one review. Callers own concurrency and merge gating.
 - `models` is a comma-separated list of OpenRouter slugs. **List length is the lane count** (hard-capped at **4**; the action fails clearly if you ask for more).
-- **One lane:** the judge is skipped. That lane’s structured findings are posted directly. No extra OpenRouter call, no merge/de-dupe, no invented cross-model attribution. The finding can still name the model that produced it.
-- **Two or more lanes:** parallel review lanes (same prompt on every lane in v1), then an OpenRouter **judge** union-merges them into **one** GitHub review when the shared job budget leaves a safe judge window. Every input finding is identity-tracked, the judge must account for every id, only same-file/nearby-line duplicates may merge, and any unaccounted or over-broadly merged finding is deterministically restored verbatim. A judge transport/schema failure or an exhausted judge window posts the validated deterministic union and labels that degradation in the review instead of discarding completed lanes. Attribution looks like:
+- **One lane:** by default the judge is skipped and that lane’s structured findings are posted directly. Set `judge_needed: true` to force the configured judge for a single lane. The finding can still name the model that produced it.
+- **Two or more lanes:** parallel review lanes (same prompt on every lane in v1), then an OpenRouter **judge** union-merges them into **one** GitHub review when the shared job budget leaves a safe judge window. Every input finding is identity-tracked, the judge must account for every id, only same-file/nearby-line duplicates may merge, and any unaccounted or over-broadly merged finding is deterministically restored verbatim before the shared 80-finding publishing cap is applied. A judge transport/schema failure or an exhausted judge window posts the validated deterministic union and labels that degradation in the review instead of discarding completed lanes. If a repaired or fallback union exceeds the cap, its visible mode reports how many lower-severity findings were omitted. Attribution looks like:
 
   ```text
   #### 🔴 Issue 1 — Missing auth check
@@ -24,7 +24,7 @@ First production use is a **single Grok 4.6 lane** beside the existing Grok acti
   then the issue body (severity emoji: 🔴 bug / 🟠 risk / 🔵 nit).
 
 - Prefer a **setup → matrix lanes → judge** workflow so wall clock is roughly the slowest lane + judge, not the sum. GitHub **bills the minutes in parallel**. A single-job `role: all` run can still fan lanes in-process; that job is billed as one runner.
-- If a **lane** fails, that lane fail-opens and the judge (or the single-lane poster) continues on whatever structured results arrived. A lane that reports only temporary checkout/tool-access failures produces a visible **partial** review, never an unmarked clean pass. Action-wide collection, input, artifact, and posting errors still fail the job; judge transport/schema errors preserve validated lane recall via a visibly labeled deterministic union.
+- If a **lane** fails, that lane fail-opens and the judge (or the single-lane poster) continues on whatever structured results arrived. A lane that reports only temporary checkout/tool-access failures produces a visible **partial** review, never an unmarked clean pass. Action-wide collection, input, artifact, and posting errors still fail the job; judge transport/schema errors preserve validated lane findings via a visibly labeled deterministic union, subject to the documented publishing cap.
 
 Persona lanes are **out of v1** (path-scoped guidance is available via `path_profiles`). The `persona` input is a reserved unused hook so a later persona feature does not require a rewrite. A future **single-persona** run should skip the judge the same way (one reviewer = no judge).
 
@@ -156,7 +156,7 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-Two or more slugs schedule a judge. The default judge is `openai/gpt-5.6-luna`, selected by the repeatable synthetic judge benchmark after it retained 50/50 expected findings with 100% precision, zero duplicates, correct verdicts, and no repair/fallback across five runs per fixture. It is a recall-safe **union-merge** of already-structured findings plus JSON schema — not a second reviewer and not a filter: identity-tracked coverage plus a same-location merge-legality check restore anything the judge drops or over-merges, so judged output cannot lose a lane's findings. Thinking/reasoning is pinned to `minimal`. In single-job `role: all`, lane deadlines reserve a meaningful judge window; if the lanes or caller's job deadline consume that window, the posted review explicitly uses the deterministic union. Give `role: all` callers at least a 25-minute job timeout (the reusable matrix workflow uses separate jobs and is not constrained by this shared envelope).
+Two or more slugs schedule a judge; `judge_needed: true` can also force it for one configured lane. The default judge is `openai/gpt-5.6-luna`, selected by the repeatable synthetic judge benchmark after it retained 50/50 expected findings with 100% precision, zero duplicates, correct verdicts, and no repair/fallback across five runs per fixture. It is a coverage-checked **union-merge** of already-structured findings plus JSON schema — not a second reviewer and not a filter: identity-tracked coverage plus a same-location merge-legality check restore anything the judge drops or over-merges. Judged output preserves validated lane findings up to the shared 80-finding publishing cap; if a repaired or fallback union exceeds that cap, it retains the strongest severities and reports the omitted count in the visible judge mode. If only one of several configured lanes succeeds, that survivor posts directly because there is nothing to merge. Thinking/reasoning is pinned to `minimal`. In single-job `role: all`, lane deadlines reserve a meaningful judge window; if the lanes or caller's job deadline consume that window, the posted review explicitly uses the deterministic union. Give `role: all` callers at least a 25-minute job timeout (the reusable matrix workflow uses separate jobs and is not constrained by this shared envelope).
 
 Alternatives (do not change the default unless you mean to):
 
@@ -165,7 +165,7 @@ Alternatives (do not change the default unless you mean to):
 | `google/gemini-3.1-flash-lite` | Lower-latency legacy default; the decision benchmark found lower recall and precision |
 | `anthropic/claude-haiku-4.5` | An unbenchmarked cross-vendor override |
 
-A judge schema or transport failure is labeled on the posted review and falls back to the deterministic recall-safe union. Invalid lane artifacts or action-wide contract errors still fail closed.
+A judge schema or transport failure is labeled on the posted review and falls back to the deterministic coverage-preserving union, subject to the same visible 80-finding publishing cap. Invalid lane artifacts or action-wide contract errors still fail closed.
 
 ## Recommended caller concurrency
 
@@ -179,8 +179,8 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | --- | --- | --- |
 | `role` | `all` | `all` (collect + lanes + optional judge + post) \| `setup` (parse matrix) \| `lane` \| `judge` |
 | `models` | `x-ai/grok-4.6` | Comma-separated OpenRouter slugs. Length = lane count. Cap 4. |
-| `judge_model` | `openai/gpt-5.6-luna` | Independent of `models`. Used only when two or more lanes are configured. |
-| `judge_needed` | _empty_ | `true` / `false` override. Empty infers from `models` length. |
+| `judge_model` | `openai/gpt-5.6-luna` | Independent of `models`. Used whenever judging is enabled. |
+| `judge_needed` | _empty_ | `true` enables the judge (and forces it for one configured lane); `false` skips it. Empty infers from `models`. A sole survivor from a multi-lane run posts directly. |
 | `github_token` | `${{ github.token }}` | Needs `pull-requests: write` to post the review. |
 | `github_timeout_seconds` | `120` | Per-operation `gh` or fallback local-git timeout; 1–600. |
 | `job_budget_seconds` | `1320` | Total action budget measured from Python startup. Keep this below the enclosing job timeout so publication and cleanup retain time. |
@@ -201,6 +201,7 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `lane_index` | `0` | Zero-based matrix index used by `role=lane` artifact naming. Normally supplied by the reusable workflow. |
 | `lane_model` | _empty_ | Optional validated model override for `role=lane`. Normally supplied through matrix plumbing. |
 | `lane_results_dir` | _empty_ | Lane artifact output/input directory used by `role=lane` and `role=judge`. Normally supplied by orchestration. |
+| `head_sha` | _empty_ | Full reviewed commit SHA resolved by reusable-workflow setup. Internal lane/judge plumbing; pull-request runs use the event head by default. |
 | `bot_login` | `github-actions[bot]` | Identity the action posts reviews as. Review-loop ledger state is only trusted from this login. Change it when `github_token` is a PAT or App token. |
 | `persona` | _empty_ | **Reserved, unused in v1.** Future single-persona runs should skip the judge. |
 
@@ -216,8 +217,8 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `models_json` | Parsed slug array (`setup` / `all`) |
 | `matrix` | `[{index, model}, …]` for a GitHub Actions matrix |
 | `lane_count` | Number of lanes |
-| `judge_needed` | `true` when two or more lanes require the judge |
-| `judge_model` | Judge slug (ignored on a single lane) |
+| `judge_needed` | Whether the judge is enabled for the configured lanes |
+| `judge_model` | Judge slug used when judging is enabled |
 | `lane_file` | Written lane JSON (`role=lane`) |
 | `lane_ok` | `true` when `role=lane` produced a valid structured artifact |
 

@@ -27,34 +27,37 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+# Keep the documented ``python bench/capture.py`` command usable from a fresh
+# checkout without requiring an editable installation. This path is derived
+# from the trusted script itself, not the repository being captured.
+_SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(_SOURCE_ROOT))
+
+from or_pr_review.collect import DEFAULT_MAX_DIFF_KB  # noqa: E402
+
 TIMEOUT = 600
-# Keep captures representative of the action's public production default.
-# Repositories with an explicit override can reproduce it via --max-diff-kb.
-DEFAULT_CAPTURE_MAX_DIFF_KB = 300
 
 
 def _extract_archive(tar: tarfile.TarFile, checkout: Path) -> None:
     """Extract a git archive safely on Python versions without ``filter``."""
-    try:
+    if hasattr(tarfile, "data_filter"):
         tar.extractall(checkout, filter="data")
         return
-    except TypeError:
-        # ``filter=`` was added in Python 3.11.4/3.12. Validate every member
-        # before using the legacy API so an older supported interpreter keeps
-        # the same traversal/link protections.
-        root = checkout.resolve()
-        members = tar.getmembers()
-        for member in members:
-            target = (checkout / member.name).resolve()
-            if target != root and root not in target.parents:
-                raise SystemExit(f"archive member escapes checkout: {member.name!r}") from None
-            if member.issym() or member.islnk():
-                raise SystemExit(f"archive links are not allowed: {member.name!r}") from None
-            if not (member.isdir() or member.isfile()):
-                raise SystemExit(
-                    f"archive special files are not allowed: {member.name!r}"
-                ) from None
-        tar.extractall(checkout)
+
+    # ``filter=`` was added in Python 3.11.4/3.12. Validate every member
+    # before using the legacy API so an older supported interpreter keeps
+    # the same traversal/link protections.
+    root = checkout.resolve()
+    members = tar.getmembers()
+    for member in members:
+        target = (checkout / member.name).resolve()
+        if target != root and root not in target.parents:
+            raise SystemExit(f"archive member escapes checkout: {member.name!r}") from None
+        if member.issym() or member.islnk():
+            raise SystemExit(f"archive links are not allowed: {member.name!r}") from None
+        if not (member.isdir() or member.isfile()):
+            raise SystemExit(f"archive special files are not allowed: {member.name!r}") from None
+    tar.extractall(checkout)
 
 
 def run(*argv: str, cwd: Path | None = None) -> str:
@@ -106,7 +109,7 @@ def main() -> int:
     parser.add_argument(
         "--max-diff-kb",
         type=int,
-        default=DEFAULT_CAPTURE_MAX_DIFF_KB,
+        default=DEFAULT_MAX_DIFF_KB,
         help="recorded in fixture.json; the bench applies the same embed cap as the workflow",
     )
     parser.add_argument(

@@ -14,7 +14,7 @@ _SECRET_ENV_NAMES = (
 
 _KEY_ASSIGN_RE = re.compile(
     r"(?ix)"
-    r"(?P<prefix>\b(?:[A-Z][A-Z0-9]*(?:_API_KEY|_TOKEN|_SECRET)|"
+    r"(?P<prefix>\b(?:[A-Z][A-Z0-9_]*(?:_API_KEY|_TOKEN|_SECRET)|"
     r"OPENROUTER_API_KEY|GITHUB_TOKEN|GH_TOKEN|XAI_API_KEY|"
     r"api\s*[_-]?\s*key|token|secret|password|authorization)\b"
     r"[\"']?\s*[:=]\s*)"

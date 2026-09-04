@@ -217,7 +217,7 @@ def apply_round(
         numbered.append(replace(issue, id=f"r{state.round_number}-{len(numbered) + 1}"))
     carried.extend(
         LedgerFinding(
-            id=issue.id or "",
+            id=issue.id,
             severity=issue.severity,
             file=issue.file,
             line=issue.line,

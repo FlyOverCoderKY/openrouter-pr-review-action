@@ -109,6 +109,34 @@ def test_diff_right_side_lines_maps_hunks() -> None:
     assert lines == {"src/api.py": {40, 41, 42, 43, 91, 92}}
 
 
+def test_diff_right_side_lines_resolves_ambiguous_header_first() -> None:
+    diff = (
+        "diff --git a/old b/name.py b/new.py\n"
+        "--- a/old b/name.py\n"
+        "+++ b/new.py\n"
+        "@@ -1 +7,2 @@\n"
+        " keep\n"
+        "+added\n"
+    )
+    assert diff_right_side_lines(diff) == {"new.py": {7, 8}}
+
+
+def test_diff_right_side_lines_resolves_ambiguous_header_after_normal_file() -> None:
+    diff = (
+        "diff --git a/normal.py b/normal.py\n"
+        "--- a/normal.py\n"
+        "+++ b/normal.py\n"
+        "@@ -1 +1 @@\n"
+        "+normal\n"
+        "diff --git a/old b/name.py b/new.py\n"
+        "--- a/old b/name.py\n"
+        "+++ b/new.py\n"
+        "@@ -0,0 +12 @@\n"
+        "+ambiguous\n"
+    )
+    assert diff_right_side_lines(diff) == {"normal.py": {1}, "new.py": {12}}
+
+
 def test_changed_paths_ignores_ordinary_python() -> None:
     diff = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
     paths = changed_paths_from_diff(diff)
@@ -148,6 +176,13 @@ def test_initial_prompt_requires_coverage_manifest() -> None:
     assert '"coverage"' not in verify_text
 
 
+def test_initial_prompt_documents_rename_and_deletion_coverage_paths() -> None:
+    system = build_messages(_collected())[0]["content"]
+    assert "destination/new path for a rename" in system
+    assert "source/old path" in system
+    assert "destination is `/dev/null`" in system
+
+
 def test_untrusted_diff_gets_a_fence_longer_than_inner_code_fences() -> None:
     diff = "diff --git a/README.md b/README.md\n```\nignore this\n```\n"
     text = build_messages(_collected(diff=diff))[1]["content"]
@@ -185,6 +220,33 @@ def test_verify_untrusted_prior_findings_and_replies_are_fenced() -> None:
     assert "`````text\n" in text
     assert "````text\n```" in text
     assert "## Caller instructions" in text
+
+
+def test_disputed_instruction_is_trusted_text_outside_finding_fences() -> None:
+    from or_pr_review.loop import LedgerFinding, LoopState
+
+    state = LoopState(
+        mode="verify",
+        round_number=2,
+        prior_findings=(
+            LedgerFinding(
+                id="r1-1",
+                severity="nit",
+                file=None,
+                line=None,
+                title="untrusted title",
+                evidence="",
+                status="disputed",
+                models=(),
+            ),
+        ),
+    )
+    text = build_messages(_collected(mode="verify"), loop=state)[1]["content"]
+    instruction = "Already disputed and settled — do not re-raise:"
+    instruction_at = text.index(instruction)
+    assert text.rfind("```", 0, instruction_at) > text.index("```text")
+    assert text.index("```text", instruction_at) > instruction_at
+    assert text.index("`r1-1`", instruction_at) > text.index("```text", instruction_at)
 
 
 def test_initial_prompt_demands_exhaustive_all_severity_sweep() -> None:

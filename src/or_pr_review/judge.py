@@ -1,4 +1,4 @@
-"""OpenRouter judge: recall-safe union-merge of structured lane findings.
+"""OpenRouter judge: coverage-checked union-merge of structured lane findings.
 
 The judge is not a second reviewer and not a filter. It is skipped when only
 one review lane is configured. Recall safety is enforced by IDENTITY, not
@@ -6,7 +6,10 @@ counts: every input finding carries a source id, every output issue must
 name the source ids it merged, and verification repairs any input finding
 the judge failed to account for by appending it verbatim. A judge output
 whose accounting cannot be trusted (unknown ids, missing sources) is
-replaced wholesale by a deterministic union that cannot lose a finding.
+replaced wholesale by a deterministic union. Both repair and fallback preserve
+validated lane findings up to the shared ``MAX_FINDINGS`` publishing cap; if
+the union exceeds that cap, the strongest severities are retained and the
+drop count is surfaced in logs and the judge mode.
 Judge transport or structural schema failures are caught by the orchestrator
 and produce a visibly labeled deterministic union; invalid lane artifacts and
 other action-wide contract failures remain fail-closed.
@@ -43,6 +46,7 @@ from or_pr_review.schema import (
     Finding,
     extract_json_object,
     normalize_review_path,
+    parse_finding,
 )
 
 # Keep the judge clerical and low-latency. Luna's adoption benchmark used this setting.
@@ -129,16 +133,13 @@ def partition_reviewable_lanes(
         if lane.get("ok") is False:
             continue
         model = str(lane.get("model") or "")
-        findings = []
-        for finding in lane.get("findings") or []:
-            if not isinstance(finding, dict):
-                continue
-            title = str(finding.get("title") or "").strip()
-            body = str(finding.get("body") or "").strip()
-            line = finding.get("line")
-            line_n = line if isinstance(line, int) and not isinstance(line, bool) else None
-            if is_environmental_diagnostic(title=title, body=body, line=line_n):
-                diagnostics.append((model, title))
+        findings: list[dict[str, Any]] = []
+        for raw_finding in lane.get("findings") or []:
+            finding = parse_finding(raw_finding, model).to_dict()
+            if is_environmental_diagnostic(
+                title=finding["title"], body=finding["body"], line=finding["line"]
+            ):
+                diagnostics.append((model, finding["title"]))
                 continue
             findings.append(finding)
         reviewable.append({**lane, "findings": findings})
@@ -331,12 +332,14 @@ def _capped(issues: list[MergedIssue], context: str) -> tuple[list[MergedIssue],
 def deterministic_union_with_cap(
     lanes: list[dict[str, Any]],
 ) -> tuple[list[MergedIssue], int]:
-    """Recall-safe fallback merge: concatenate every lane's findings, merging
+    """Coverage-preserving fallback merge up to the publishing cap.
+
+    Concatenate every lane's findings, merging
     only duplicates whose location, title, and evidence agree. A merged
     duplicate keeps the STRONGEST severity and the longer body, matching the
-    LLM contract. Noisier than a good LLM merge, but it cannot lose distinct
-    same-title findings; if the result exceeds the publishing cap, the
-    strongest severities are kept."""
+    LLM contract. Noisier than a good LLM merge, and it preserves distinct
+    same-title findings until the result exceeds ``MAX_FINDINGS``; above the
+    publishing cap, the strongest severities are kept and the drop is surfaced."""
     union: list[MergedIssue] = []
     reviewable, _diagnostics = partition_reviewable_lanes(lanes)
     for lane in reviewable:
@@ -532,7 +535,9 @@ def run_llm_judge(
     ``union-fallback`` when the judge's accounting could not be trusted, or
     ``skipped-diagnostics`` when no code finding remained after temporary
     review-environment failures were separated. ``cost`` is the judge request's
-    OpenRouter credit cost (USD), or None when unreported/not called.
+    OpenRouter credit cost (USD), or None when unreported/not called. Repair
+    and fallback results are capped at ``MAX_FINDINGS``; a ``(capped+N)``
+    suffix reports how many lower-severity findings were omitted.
     """
     lanes, diagnostics = partition_reviewable_lanes(lanes)
     for lane_model, title in diagnostics:

@@ -362,8 +362,14 @@ class DiffSegment:
     @property
     def is_deleted(self) -> bool:
         """Whether the reviewed-head checkout cannot supply this file."""
-        return self.new_path in {"/dev/null", "dev/null"} or any(
-            line == "+++ /dev/null" for line in self.lines
+        return (
+            self.new_path in {"/dev/null", "dev/null"}
+            or any(line == "+++ /dev/null" for line in self.lines)
+            or any(line.startswith("deleted file mode ") for line in self.lines)
+            or any(
+                line.startswith("Binary files ") and line.endswith(" and /dev/null differ")
+                for line in self.lines
+            )
         )
 
     def counts(self) -> tuple[int, int]:

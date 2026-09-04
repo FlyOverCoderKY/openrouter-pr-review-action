@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import tarfile
 from dataclasses import dataclass
 from itertools import islice
@@ -112,7 +113,7 @@ def materialize_commit(
                     tracked.append(member.name)
                 if not _safe_member(member, oversized_ok):
                     continue
-                tar.extract(member, path=dest, filter="data")
+                _extract_safe_member(tar, member, dest)
                 materialized.append(PurePosixPath(member.name.replace("\\", "/")).as_posix())
     except (tarfile.TarError, OSError) as exc:
         raise ActionError(f"failed to materialize reviewed commit {sha[:12]}: {exc}") from exc
@@ -141,12 +142,14 @@ def _write_safety_metadata(workspace: Path, materialized: list[str]) -> None:
     files: dict[str, dict[str, str | int]] = {}
     for rel in materialized:
         path = workspace.joinpath(*PurePosixPath(rel).parts)
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if is_blocked_path(path):
-            state = "blocked"
-        else:
-            state = "dotenv" if "=" in text and looks_like_dotenv(text) else "safe"
-        files[rel] = {"state": state, "line_count": _textio_line_count(text)}
+        if is_blocked_path(path, root=workspace):
+            # A blocked file is never readable, so avoid loading credential
+            # contents merely to populate metadata that cannot be observed.
+            files[rel] = {"state": "blocked", "line_count": 0}
+            continue
+        text = path.read_bytes().decode("utf-8", errors="replace")
+        state = "dotenv" if "=" in text and looks_like_dotenv(text) else "safe"
+        files[rel] = {"state": state, "line_count": text_line_count(text)}
     _safety_path(workspace).write_text(
         json.dumps(
             {"version": _SAFETY_METADATA_VERSION, "files": files},
@@ -206,11 +209,30 @@ def _safety_record(root: Path, path: Path, metadata: dict[str, _SafetyRecord]) -
     return record
 
 
-def _textio_line_count(text: str) -> int:
-    """Count lines exactly as TextIOWrapper iteration used by ranged reads."""
+def text_line_count(text: str) -> int:
+    """Count Git/GitHub-style lines, treating only LF as a line boundary."""
     if not text:
         return 0
     return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _lf_line_chunks(text: str) -> list[str]:
+    """Split text at LF only while preserving each LF in the returned chunks."""
+    if not text:
+        return []
+    parts = text.split("\n")
+    terminated = text.endswith("\n")
+    if terminated:
+        parts.pop()
+    return [
+        part + "\n" if index < len(parts) - 1 or terminated else part
+        for index, part in enumerate(parts)
+    ]
+
+
+def _lf_lines(text: str) -> list[str]:
+    """Split text at LF only, dropping delimiters and a terminal empty line."""
+    return [chunk[:-1] if chunk.endswith("\n") else chunk for chunk in _lf_line_chunks(text)]
 
 
 def _format_read_window(window: list[str], *, start: int, total: int) -> str:
@@ -253,8 +275,6 @@ def tracked_paths(workspace: Path) -> set[str] | None:
 
 
 def _git_archive(repo: Path, sha: str) -> bytes:
-    import subprocess
-
     try:
         proc = subprocess.run(
             ["git", "-C", str(repo), "archive", "--format=tar", sha],
@@ -290,6 +310,16 @@ def _safe_member(
     return True
 
 
+def _extract_safe_member(tar: tarfile.TarFile, member: tarfile.TarInfo, dest: Path) -> None:
+    """Extract a prevalidated regular member across all supported Python 3.11 releases."""
+    if hasattr(tarfile, "data_filter"):
+        tar.extract(member, path=dest, filter="data")
+        return
+    # ``filter=`` arrived in Python 3.11.4. _safe_member has already rejected
+    # absolute/traversing paths, links, special files, and oversized members.
+    tar.extract(member, path=dest)
+
+
 def resolve_inside(root: Path, rel: str) -> Path:
     if not rel or rel.strip() in {".", "./"}:
         return root
@@ -317,10 +347,17 @@ def resolve_inside(root: Path, rel: str) -> Path:
     return candidate
 
 
-def is_blocked_path(path: Path) -> bool:
+def is_blocked_path(path: Path, *, root: Path | None = None) -> bool:
     # Check all components, case-insensitively, so nested or case-variant
-    # credential paths cannot be reached by the read-only tools.
-    for part in path.parts:
+    # credential paths cannot be reached by the read-only tools. When a
+    # workspace root is known, ignore host-controlled ancestor names.
+    candidate = path
+    if root is not None:
+        try:
+            candidate = path.resolve().relative_to(root.resolve())
+        except ValueError:
+            return True
+    for part in candidate.parts:
         name = part.casefold()
         if name in _BLOCKED_NAMES or name.startswith((".env.", ".envrc.")):
             return True
@@ -338,7 +375,7 @@ def tool_read_file(
     path = resolve_inside(root, rel)
     if path.is_symlink() or not path.is_file():
         return f"error: not a file: {rel}"
-    if is_blocked_path(path):
+    if is_blocked_path(path, root=root):
         return "error: refusing to read a secret-like path"
     try:
         safety = _load_safety_metadata(root)
@@ -357,7 +394,7 @@ def tool_read_file(
                 f"error: start_line {start} is past the end of the file ({record.line_count} lines)"
             )
         try:
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
+            with path.open("r", encoding="utf-8", errors="replace", newline="\n") as handle:
                 window = list(islice(handle, start - 1, start - 1 + count))
         except OSError as exc:
             return f"error: {exc}"
@@ -381,7 +418,7 @@ def tool_read_file(
                 f"call read_file again with start_line={next_line} to keep reading]"
             )
         return text
-    lines = text.splitlines(keepends=True)
+    lines = _lf_line_chunks(text)
     total = len(lines)
     if total and start > total:
         return f"error: start_line {start} is past the end of the file ({total} lines)"
@@ -427,7 +464,7 @@ def tool_grep(root: Path, pattern: str, rel: str = ".") -> str:
     matches: list[str] = []
     files = [start] if start.is_file() and not start.is_symlink() else _walk_files(start)
     for path in files:
-        if is_blocked_path(path):
+        if is_blocked_path(path, root=root):
             continue
         try:
             if path.stat().st_size > MAX_GREP_FILE:
@@ -436,7 +473,7 @@ def tool_grep(root: Path, pattern: str, rel: str = ".") -> str:
                 record = _safety_record(root, path, safety)
                 if record.state != "safe":
                     continue
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = path.read_bytes().decode("utf-8", errors="replace")
         except LaneError as exc:
             return f"error: refusing to search files: {exc}"
         except OSError:
@@ -444,7 +481,7 @@ def tool_grep(root: Path, pattern: str, rel: str = ".") -> str:
         if safety is None and "=" in text and looks_like_dotenv(text):
             continue
         rel_path = path.relative_to(root.resolve()).as_posix()
-        for lineno, line in enumerate(text.splitlines(), start=1):
+        for lineno, line in enumerate(_lf_lines(text), start=1):
             if regex.search(line):
                 matches.append(f"{rel_path}:{lineno}:{line[:400]}")
                 if len(matches) >= MAX_GREP_MATCHES:

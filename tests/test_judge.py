@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from or_pr_review.errors import ActionError, SchemaError
+from or_pr_review.errors import ActionError, LaneError, SchemaError
 from or_pr_review.judge import JUDGE_REASONING, parse_judge_issues, run_llm_judge
 from or_pr_review.models import (
     DEFAULT_JUDGE_MODEL,
@@ -433,6 +433,51 @@ def test_lane_supplied_id_cannot_override_judge_source_identity() -> None:
     user = messages[1]["content"]
     assert '"id": "0.0"' in user
     assert "attacker-controlled" not in user
+
+
+def test_judge_normalizes_lane_findings_through_schema_boundary() -> None:
+    from or_pr_review.judge import build_judge_messages
+
+    messages = build_judge_messages(
+        [
+            {
+                "model": "m",
+                "findings": [
+                    {
+                        "title": " T ",
+                        "body": " b ",
+                        "severity": " BUG ",
+                        "path": "./src/a.py",
+                        "line": "7",
+                    }
+                ],
+            }
+        ]
+    )
+    user = messages[1]["content"]
+    assert '"title": "T"' in user
+    assert '"severity": "bug"' in user
+    assert '"file": "src/a.py"' in user
+    assert '"line": 7' in user
+    assert '"path"' not in user
+
+    with pytest.raises(LaneError, match="severity"):
+        build_judge_messages(
+            [
+                {
+                    "model": "m",
+                    "findings": [
+                        {
+                            "title": "T",
+                            "body": "b",
+                            "severity": "critical",
+                            "file": "src/a.py",
+                            "line": 7,
+                        }
+                    ],
+                }
+            ]
+        )
 
 
 def test_over_broad_merge_is_split_back() -> None:

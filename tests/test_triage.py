@@ -157,6 +157,33 @@ def test_deleted_file_is_never_stubbed_as_tool_readable() -> None:
     assert truncation.forces_partial
 
 
+def test_binary_deleted_file_is_never_stubbed_as_tool_readable() -> None:
+    deleted = (
+        "diff --git a/gone.lock b/gone.lock\n"
+        "deleted file mode 100644\n"
+        "index 0123456..0000000\n"
+        "GIT binary patch\n"
+        "literal 2000\n" + "z" * 2000 + "\n"
+    )
+    parsed = split_diff(deleted)
+    assert parsed is not None
+    assert parsed[1][0].is_deleted
+    truncation = pack_diff(deleted, 1)
+    assert "gone.lock" not in truncation.stubbed_files
+    assert truncation.dropped_files == ("gone.lock",)
+    assert truncation.forces_partial
+
+
+def test_binary_dev_null_marker_alone_identifies_deletion() -> None:
+    diff = (
+        "diff --git a/path and name.bin b/path and name.bin\n"
+        "Binary files a/path and name.bin and /dev/null differ\n"
+    )
+    parsed = split_diff(diff)
+    assert parsed is not None
+    assert parsed[1][0].is_deleted
+
+
 def test_renamed_file_accounts_only_under_new_path() -> None:
     diff = (
         "diff --git a/old.py b/new.py\n"

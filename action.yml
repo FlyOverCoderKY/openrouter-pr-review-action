@@ -20,20 +20,21 @@ inputs:
     description: >-
       Comma-separated OpenRouter model slugs. List length is the lane count
       (hard-capped at 4). Default is today's Grok 4.6 slug on OpenRouter.
-      One model = one lane and the judge is skipped.
+      One model = one lane; the judge is skipped unless judge_needed is true.
     required: false
     default: "x-ai/grok-4.6"
   judge_model:
     description: >-
       OpenRouter slug for the merge/de-dupe judge (independent of models).
-      Used only when two or more review lanes are configured. Default is
-      openai/gpt-5.6-luna. See README for the measured selection rationale.
+      Used whenever judging is enabled. Default is openai/gpt-5.6-luna. See
+      README for the measured selection rationale.
     required: false
     default: "openai/gpt-5.6-luna"
   judge_needed:
     description: >-
-      true forces the judge; false skips it. Empty infers from models list
-      length (skip when there is one review lane).
+      true enables the judge and forces it for one configured lane; false skips
+      it. Empty infers from models length. If only one of several lanes succeeds,
+      that surviving lane posts directly because there is nothing to merge.
     required: false
     default: ""
   github_token:
@@ -139,6 +140,12 @@ inputs:
     description: "Directory of lane-N.json artifacts (role=judge) or write target (role=lane)."
     required: false
     default: ""
+  head_sha:
+    description: >-
+      Full reviewed commit SHA resolved by reusable-workflow setup. Internal
+      lane/judge plumbing; pull_request runs default to the event head SHA.
+    required: false
+    default: ""
   bot_login:
     description: >-
       GitHub login this action posts reviews as. Review-loop ledger state is
@@ -183,10 +190,10 @@ outputs:
     description: "Number of model lanes after parsing."
     value: ${{ steps.run.outputs.lane_count }}
   judge_needed:
-    description: "true when two or more review lanes require the OpenRouter judge."
+    description: "Whether the OpenRouter judge is enabled for the configured lanes."
     value: ${{ steps.run.outputs.judge_needed }}
   judge_model:
-    description: "OpenRouter slug the judge would use (ignored on a single lane)."
+    description: "OpenRouter slug used when judging is enabled."
     value: ${{ steps.run.outputs.judge_model }}
   lane_file:
     description: "Path of the written lane JSON (role=lane)."
@@ -242,12 +249,16 @@ runs:
         WORK: ${{ steps.dirs.outputs.work }}
         ALL_LANE_RESULTS_DIR: ${{ steps.dirs.outputs.all_lane_results_dir }}
         SOURCE_WORKSPACE: ${{ github.workspace }}
-        EVENT_BEFORE: ${{ github.event.before }}
-        EVENT_AFTER: ${{ github.event.after }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        EVENT_ACTION: ${{ github.event.action }}
+        # Preserve event context when pr_number is omitted or explicitly names
+        # the triggering PR. A different PR must not inherit its head/range/mode.
+        EVENT_BEFORE: ${{ (inputs.pr_number == '' || inputs.pr_number == format('{0}', github.event.pull_request.number)) && github.event.before || '' }}
+        EVENT_AFTER: ${{ (inputs.pr_number == '' || inputs.pr_number == format('{0}', github.event.pull_request.number)) && github.event.after || '' }}
+        HEAD_SHA: ${{ inputs.head_sha || ((inputs.pr_number == '' || inputs.pr_number == format('{0}', github.event.pull_request.number)) && github.event.pull_request.head.sha) || '' }}
+        EVENT_ACTION: ${{ (inputs.pr_number == '' || inputs.pr_number == format('{0}', github.event.pull_request.number)) && github.event.action || '' }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      run: python3 -u -m or_pr_review
+      # -P prevents the untrusted reviewed checkout from shadowing the action's
+      # Python package ahead of the trusted PYTHONPATH entry above.
+      run: python3 -P -u -m or_pr_review
 
     - name: Preserve completed all-role lanes
       if: ${{ always() && inputs.role == 'all' }}

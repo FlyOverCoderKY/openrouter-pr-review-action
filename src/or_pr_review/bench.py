@@ -56,13 +56,19 @@ from pathlib import Path
 from typing import Any
 
 from or_pr_review import __version__
-from or_pr_review.collect import CollectedReview, DiffPlan, pack_diff, truncate_diff
+from or_pr_review.collect import (
+    DEFAULT_MAX_DIFF_KB,
+    CollectedReview,
+    DiffPlan,
+    pack_diff,
+    truncate_diff,
+)
 from or_pr_review.errors import ActionError
 from or_pr_review.harness import (
     DEFAULT_LANE_TIMEOUT_SECONDS,
     DEFAULT_MAX_TOOL_TURNS,
     DEFAULT_TIMEOUT,
-    _elapsed_ms,
+    elapsed_ms,
     openrouter_chat,
     run_lane,
 )
@@ -85,9 +91,6 @@ JUDGE_VERDICTS = ("clean", "issues")
 JUDGE_LINE_TOLERANCE = 5
 JUDGE_MAX_RUNS = 20
 JUDGE_MAX_MODELS = 8
-# action.yml's production default. Capture uses the same value unless its
-# explicit --max-diff-kb option records a repository-specific override.
-DEFAULT_MAX_DIFF_KB = 300
 
 
 @dataclass(frozen=True)
@@ -1077,7 +1080,7 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
             record = {
                 **base_record,
                 "ok": True,
-                "elapsed_ms": _elapsed_ms(started),
+                "elapsed_ms": elapsed_ms(started),
                 "mode": mode,
                 "cost_usd": cost,
                 "routing": "openrouter-zdr-data-collection-deny",
@@ -1094,7 +1097,7 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
             record = {
                 **base_record,
                 "ok": False,
-                "elapsed_ms": _elapsed_ms(started),
+                "elapsed_ms": elapsed_ms(started),
                 "error": safe_error,
                 "issues": [],
             }

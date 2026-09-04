@@ -183,11 +183,13 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `judge_needed` | _empty_ | `true` / `false` override. Empty infers from `models` length. |
 | `github_token` | `${{ github.token }}` | Needs `pull-requests: write` to post the review. |
 | `github_timeout_seconds` | `120` | Per-operation `gh` or fallback local-git timeout; 1–600. |
+| `job_budget_seconds` | `1320` | Total action budget measured from Python startup. Keep this below the enclosing job timeout so publication and cleanup retain time. |
+| `all_role_deadline_seconds` | _empty_ | Optional cap for concurrent lanes in `role=all`. Empty derives the cap from `job_budget_seconds` after judge and publication reserves. |
 | `pr_number` | PR that triggered the workflow | Required for `workflow_dispatch`. |
 | `fail_on` | `never` | Finding policy: `never` \| `bugs` \| `any`. Operational/schema errors always fail. |
 | `roast_level` | `professional` | `professional` \| `playful`. |
 | `custom_instructions` | _empty_ | Extra prompt text, max 16,000 UTF-8 bytes. Never put secrets here. |
-| `path_profiles` | _empty_ | Caller-owned additive review profiles: JSON `[{name?, paths: [globs], instructions}]`, applied only when a changed path matches (`*`/`?` stay within a path segment, `**` crosses). Sharpen attention; never narrow the review. Trusted workflow config only — never interpolate PR content, never put secrets here. Max 16,000 UTF-8 bytes. |
+| `path_profiles` | _empty_ | Caller-owned additive review profiles: JSON `[{name?, paths: [globs], instructions}]`, applied only when a changed path matches (`*`/`?` stay within a path segment, `**` crosses). Sharpen attention; never narrow the review. Trusted workflow config only — never interpolate PR content, never put secrets here. Max 20 profiles and 16,000 UTF-8 bytes. |
 | `status_comments` | `true` | Live status comment on the PR. |
 | `max_diff_kb` | `300` | Embedded diff cap. Over-budget diffs go through **diff-budget triage**: generated/vendored/lock-class files (the reviewed commit's `.gitattributes` `linguist-generated`/`linguist-vendored`, lockfile heuristics, large committed JSON snapshots, `generated_paths`) demote to stubs first, then the largest hand-written files, so hand-written hunks keep the budget. A stubbed file stays in the embedded diff (header + counts + first-hunk reference), is materialized into the inert checkout for the tools even past the normal 1 MB cap (up to 8 MB), and still requires a coverage entry — so a fully stubbed-or-embedded diff keeps its real verdict and review-loop continuity. `.gitattributes` is repository content (PR-author-controlled); honoring it only shifts packing priority — a demoted file keeps its stub, coverage obligation, and tool access, which is strictly safer than the raw byte cut it replaces (where tail files vanished entirely). Files dropped entirely, an unparseable diff's raw byte cut, or stubs with tools disabled (`max_tool_turns: 0`) ⇒ `partial`, never clean. |
 | `generated_paths` | _empty_ | Extra globs (JSON array of strings) classified as generated/vendored during diff-budget triage. Demotion only shifts packing priority — never excludes a file from review. Trusted workflow config only — never interpolate PR content. Max 8,000 UTF-8 bytes, 200 globs. |
@@ -195,6 +197,10 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `review_mode` | `auto` | `auto` (opened = initial, synchronize = verify) \| `initial` \| `verify`. |
 | `effort` | _empty_ | Optional OpenRouter reasoning effort for **review lanes**. |
 | `max_tool_turns` | `50` | Read-only tool rounds against the inert checkout. `0` disables tools. First-pass default matches the sibling Grok `max_turns`. Follow-up jobs may pass `30`. |
+| `openrouter_timeout_seconds` | `180` | Per-request OpenRouter timeout; 1–600 seconds. |
+| `lane_index` | `0` | Zero-based matrix index used by `role=lane` artifact naming. Normally supplied by the reusable workflow. |
+| `lane_model` | _empty_ | Optional validated model override for `role=lane`. Normally supplied through matrix plumbing. |
+| `lane_results_dir` | _empty_ | Lane artifact output/input directory used by `role=lane` and `role=judge`. Normally supplied by orchestration. |
 | `bot_login` | `github-actions[bot]` | Identity the action posts reviews as. Review-loop ledger state is only trusted from this login. Change it when `github_token` is a PAT or App token. |
 | `persona` | _empty_ | **Reserved, unused in v1.** Future single-persona runs should skip the judge. |
 
@@ -213,6 +219,7 @@ Use **separate first-pass and follow-up jobs**, or distinct concurrency groups, 
 | `judge_needed` | `true` when two or more lanes require the judge |
 | `judge_model` | Judge slug (ignored on a single lane) |
 | `lane_file` | Written lane JSON (`role=lane`) |
+| `lane_ok` | `true` when `role=lane` produced a valid structured artifact |
 
 ## Local tests
 
@@ -224,6 +231,7 @@ spend tokens and needs `OPENROUTER_API_KEY`), see the offline bench in
 
 ```bash
 python3 -m pip install -e '.[dev]'
+ruff check src tests bench
 pytest
 ```
 

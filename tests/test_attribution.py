@@ -11,9 +11,7 @@ def test_identified_by_one_two_and_many() -> None:
     )
     assert identified_by(
         ["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6", "google/gemini-2.5-pro"]
-    ) == (
-        "identified by x-ai/grok-4.6, anthropic/claude-sonnet-4.6, and google/gemini-2.5-pro"
-    )
+    ) == ("identified by x-ai/grok-4.6, anthropic/claude-sonnet-4.6, and google/gemini-2.5-pro")
 
 
 def test_heading_and_body_format() -> None:
@@ -28,8 +26,7 @@ def test_heading_and_body_format() -> None:
     block = format_issue_block(1, issue)
     assert block.startswith("#### \U0001f534 Issue 1 — Missing auth check\n")
     assert (
-        "`src/api.py:42` · `bug` · identified by x-ai/grok-4.6 "
-        "and anthropic/claude-sonnet-4.6"
+        "`src/api.py:42` · `bug` · identified by x-ai/grok-4.6 and anthropic/claude-sonnet-4.6"
     ) in block
     assert "The handler accepts unauthenticated POSTs." in block
 

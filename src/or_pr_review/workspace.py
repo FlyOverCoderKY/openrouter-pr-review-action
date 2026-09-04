@@ -9,9 +9,8 @@ from __future__ import annotations
 import io
 import os
 import re
-import stat
 import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.redaction import looks_like_dotenv
@@ -33,6 +32,7 @@ DEFAULT_RANGE_LINES = 400
 MAX_GREP_MATCHES = 100
 MAX_LIST_ENTRIES = 200
 MAX_TOOL_OUTPUT = 40_000
+MAX_GREP_FILES = 5_000
 
 _BLOCKED_NAMES = {
     ".env",
@@ -46,6 +46,7 @@ _BLOCKED_NAMES = {
     "service-account.json",
 }
 _BLOCKED_SUFFIXES = (".pem", ".p12", ".pfx", ".key")
+_BLOCKED_DIRECTORY_NAMES = frozenset({"credentials", "credential", "secrets", "secret"})
 
 
 def materialize_commit(
@@ -96,9 +97,7 @@ def tracked_paths(workspace: Path) -> set[str] | None:
     if not manifest.is_file():
         return None
     return {
-        line.strip()
-        for line in manifest.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        line.strip() for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()
     }
 
 
@@ -126,33 +125,40 @@ def _git_archive(repo: Path, sha: str) -> bytes:
 def _safe_member(
     member: tarfile.TarInfo, oversized_ok: frozenset[str] | set[str] = frozenset()
 ) -> bool:
-    if not member.isfile():
-        return False
-    limit = (
-        MAX_OVERSIZED_MATERIALIZED_FILE
-        if member.name.replace("\\", "/") in oversized_ok
-        else MAX_MATERIALIZED_FILE
-    )
-    if member.size > limit:
+    # Never materialize links: tarfile extraction otherwise follows link
+    # targets, defeating the inert snapshot boundary.
+    if not member.isfile() or member.issym() or member.islnk():
         return False
     name = member.name.replace("\\", "/")
-    parts = Path(name).parts
-    if not parts or parts[0] in {"..", "/"} or ".." in parts:
+    path = PurePosixPath(name)
+    if not name or name in {".", "./"} or path.is_absolute() or ".." in path.parts:
         return False
-    if name.startswith("/") or name.startswith("../"):
+    limit = MAX_OVERSIZED_MATERIALIZED_FILE if name in oversized_ok else MAX_MATERIALIZED_FILE
+    if member.size > limit:
         return False
-    mode = member.mode or 0
-    if mode & stat.S_IXUSR:
-        # Keep the file (reviewers may need to read scripts) but never execute.
-        pass
     return True
 
 
 def resolve_inside(root: Path, rel: str) -> Path:
     if not rel or rel.strip() in {".", "./"}:
         return root
-    candidate = (root / rel).resolve()
     root_resolved = root.resolve()
+    raw_candidate = root / rel
+    # Check links before resolving.  Otherwise an in-tree symlink would be
+    # turned into its ordinary target and become readable by the tools.
+    try:
+        relative = raw_candidate.relative_to(root)
+    except ValueError as exc:
+        raise LaneError("path escapes the inert review workspace") from exc
+    probe = root
+    for part in relative.parts:
+        probe /= part
+        try:
+            if probe.is_symlink():
+                raise LaneError("symlink paths are not available in the inert review workspace")
+        except OSError as exc:
+            raise LaneError(f"could not inspect workspace path: {exc}") from exc
+    candidate = raw_candidate.resolve()
     try:
         candidate.relative_to(root_resolved)
     except ValueError as exc:
@@ -161,10 +167,15 @@ def resolve_inside(root: Path, rel: str) -> Path:
 
 
 def is_blocked_path(path: Path) -> bool:
-    name = path.name
-    if name in _BLOCKED_NAMES or name.startswith(".env."):
-        return True
-    return name.endswith(_BLOCKED_SUFFIXES)
+    # Check all components, case-insensitively, so nested or case-variant
+    # credential paths cannot be reached by the read-only tools.
+    for part in path.parts:
+        name = part.casefold()
+        if name in _BLOCKED_NAMES or name.startswith(".env."):
+            return True
+        if name in _BLOCKED_DIRECTORY_NAMES or name.endswith(_BLOCKED_SUFFIXES):
+            return True
+    return False
 
 
 def tool_read_file(
@@ -174,7 +185,7 @@ def tool_read_file(
     max_lines: int | None = None,
 ) -> str:
     path = resolve_inside(root, rel)
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         return f"error: not a file: {rel}"
     if is_blocked_path(path):
         return "error: refusing to read a secret-like path"
@@ -183,7 +194,10 @@ def tool_read_file(
     except OSError as exc:
         return f"error: {exc}"
     text = data.decode("utf-8", errors="replace")
-    if looks_like_dotenv(text):
+    # Every dotenv candidate needs an equals sign.  The cheap pre-check keeps
+    # the redaction heuristic from scanning ordinary source files that cannot
+    # match, while still doing the complete heuristic scan for candidates.
+    if "=" in text and looks_like_dotenv(text):
         return "error: refusing to return .env-style KEY=value contents"
     if start_line is None and max_lines is None:
         if len(data) > MAX_READ_BYTES:
@@ -240,6 +254,10 @@ def tool_list_dir(root: Path, rel: str) -> str:
     except OSError as exc:
         return f"error: {exc}"
     lines: list[str] = []
+    # Symlinks are intentionally invisible to all workspace tools.  In
+    # particular, do not call is_dir() first because it follows directory
+    # links.
+    entries = [entry for entry in entries if not entry.is_symlink()]
     for entry in entries[:MAX_LIST_ENTRIES]:
         suffix = "/" if entry.is_dir() else ""
         lines.append(f"{entry.name}{suffix}")
@@ -259,7 +277,7 @@ def tool_grep(root: Path, pattern: str, rel: str = ".") -> str:
     if not start.exists():
         return f"error: path not found: {rel}"
     matches: list[str] = []
-    files = [start] if start.is_file() else _walk_files(start)
+    files = [start] if start.is_file() and not start.is_symlink() else _walk_files(start)
     for path in files:
         if is_blocked_path(path):
             continue
@@ -269,7 +287,7 @@ def tool_grep(root: Path, pattern: str, rel: str = ".") -> str:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if looks_like_dotenv(text):
+        if "=" in text and looks_like_dotenv(text):
             continue
         rel_path = path.relative_to(root.resolve()).as_posix()
         for lineno, line in enumerate(text.splitlines(), start=1):
@@ -284,11 +302,18 @@ def tool_grep(root: Path, pattern: str, rel: str = ".") -> str:
 def _walk_files(start: Path) -> list[Path]:
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(start):
-        dirnames[:] = [name for name in dirnames if name not in {".git", ".hg"}]
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in {".git", ".hg"} and not (Path(dirpath) / name).is_symlink()
+        ]
         for name in filenames:
-            out.append(Path(dirpath) / name)
-            if len(out) > 5_000:
+            candidate = Path(dirpath) / name
+            if candidate.is_symlink():
+                continue
+            if len(out) >= MAX_GREP_FILES:
                 return out
+            out.append(candidate)
     return out
 
 

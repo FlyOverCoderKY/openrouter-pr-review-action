@@ -28,6 +28,33 @@ import tempfile
 from pathlib import Path
 
 TIMEOUT = 600
+# Keep captures representative of the action's public production default.
+# Repositories with an explicit override can reproduce it via --max-diff-kb.
+DEFAULT_CAPTURE_MAX_DIFF_KB = 300
+
+
+def _extract_archive(tar: tarfile.TarFile, checkout: Path) -> None:
+    """Extract a git archive safely on Python versions without ``filter``."""
+    try:
+        tar.extractall(checkout, filter="data")
+        return
+    except TypeError:
+        # ``filter=`` was added in Python 3.11.4/3.12. Validate every member
+        # before using the legacy API so an older supported interpreter keeps
+        # the same traversal/link protections.
+        root = checkout.resolve()
+        members = tar.getmembers()
+        for member in members:
+            target = (checkout / member.name).resolve()
+            if target != root and root not in target.parents:
+                raise SystemExit(f"archive member escapes checkout: {member.name!r}") from None
+            if member.issym() or member.islnk():
+                raise SystemExit(f"archive links are not allowed: {member.name!r}") from None
+            if not (member.isdir() or member.isfile()):
+                raise SystemExit(
+                    f"archive special files are not allowed: {member.name!r}"
+                ) from None
+        tar.extractall(checkout)
 
 
 def run(*argv: str, cwd: Path | None = None) -> str:
@@ -50,7 +77,7 @@ def run(*argv: str, cwd: Path | None = None) -> str:
             env=env,
         )
     except subprocess.TimeoutExpired:
-        raise SystemExit(f"command timed out after {TIMEOUT}s: {' '.join(argv)}")
+        raise SystemExit(f"command timed out after {TIMEOUT}s: {' '.join(argv)}") from None
     if result.returncode != 0:
         raise SystemExit(f"command failed: {' '.join(argv)}\n{result.stderr.strip()}")
     return result.stdout
@@ -58,8 +85,14 @@ def run(*argv: str, cwd: Path | None = None) -> str:
 
 def pr_meta(repo: str, pr: int) -> dict:
     raw = run(
-        "gh", "pr", "view", str(pr), "--repo", repo,
-        "--json", "title,body,headRefOid,baseRefName,headRefName",
+        "gh",
+        "pr",
+        "view",
+        str(pr),
+        "--repo",
+        repo,
+        "--json",
+        "title,body,headRefOid,baseRefName,headRefName",
     )
     return json.loads(raw)
 
@@ -73,7 +106,7 @@ def main() -> int:
     parser.add_argument(
         "--max-diff-kb",
         type=int,
-        default=600,
+        default=DEFAULT_CAPTURE_MAX_DIFF_KB,
         help="recorded in fixture.json; the bench applies the same embed cap as the workflow",
     )
     parser.add_argument(
@@ -104,8 +137,11 @@ def main() -> int:
     head_sha = meta["headRefOid"]
 
     diff = run(
-        "gh", "api", f"repos/{args.repo}/pulls/{args.pr}",
-        "-H", "Accept: application/vnd.github.diff",
+        "gh",
+        "api",
+        f"repos/{args.repo}/pulls/{args.pr}",
+        "-H",
+        "Accept: application/vnd.github.diff",
     )
 
     # The diff endpoint always describes the CURRENT head. If the PR advanced
@@ -131,7 +167,7 @@ def main() -> int:
         tar_path = Path(tmp) / "head.tar"
         run("git", "archive", "-o", str(tar_path), head_sha, cwd=clone)
         with tarfile.open(tar_path) as tar:
-            tar.extractall(checkout, filter="data")
+            _extract_archive(tar, checkout)
         (stage / "diff.patch").write_text(diff, encoding="utf-8", newline="\n")
         (stage / "fixture.json").write_text(
             json.dumps(

@@ -60,6 +60,46 @@ def test_run_lane_captures_provider_and_pins_routing(tmp_path: Path) -> None:
     assert parse_lane_artifact(result.to_dict()).provider == "Baseten"
 
 
+def test_run_lane_reuses_its_validated_final_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful response should not be parsed once in the loop and again at exit."""
+    from or_pr_review import harness
+    from or_pr_review.schema import Finding, Resolution
+
+    original = harness.parse_lane_payload
+    calls = 0
+
+    def count_parse(
+        payload: object,
+        model_id: str,
+        *,
+        expect_coverage: bool = False,
+        expect_resolutions: bool = False,
+    ) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
+        nonlocal calls
+        calls += 1
+        return original(
+            payload,
+            model_id,
+            expect_coverage=expect_coverage,
+            expect_resolutions=expect_resolutions,
+        )
+
+    monkeypatch.setattr(harness, "parse_lane_payload", count_parse)
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        chat=lambda _payload: _findings_reply(),
+    )
+
+    assert result.ok
+    assert calls == 1
+
+
 def test_run_lane_enforces_explicit_benchmark_data_policy(tmp_path: Path) -> None:
     payloads: list[dict] = []
 
@@ -230,6 +270,31 @@ def test_anchor_gate_nulls_impossible_locations(tmp_path: Path) -> None:
     assert (out[3].file, out[3].line) == (None, None)
 
 
+def test_anchor_gate_rejects_programmatic_traversal_before_filesystem_lookup(
+    tmp_path: Path,
+) -> None:
+    """The public gate also protects Finding objects that bypass parsing."""
+    from or_pr_review.harness import sanitize_anchors
+    from or_pr_review.schema import Finding
+
+    # This file is deliberately reachable from tmp_path via ``..``. The
+    # anchor still must be removed rather than probing outside the checkout.
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("secret = 'not review context'\n", encoding="utf-8")
+    finding = Finding(
+        title="unsafe direct finding",
+        body="b",
+        severity="risk",
+        file="../outside.py",
+        line=1,
+        model_id="m",
+    )
+
+    out = sanitize_anchors([finding], tmp_path)
+
+    assert (out[0].file, out[0].line) == (None, None)
+
+
 def test_anchor_gate_respects_snapshot_holes_and_directories(tmp_path: Path) -> None:
     from or_pr_review.harness import sanitize_anchors
     from or_pr_review.schema import Finding
@@ -269,8 +334,12 @@ def test_anchor_gate_counts_lines_like_the_read_tools(tmp_path: Path) -> None:
     # also split under str.splitlines, which is how read_file/grep number.
     (tmp_path / "odd.py").write_bytes("a b\rc\n".encode())
     finding = Finding(
-        title="cites the tool-visible last line", body="b", severity="risk",
-        file="odd.py", line=3, model_id="m",
+        title="cites the tool-visible last line",
+        body="b",
+        severity="risk",
+        file="odd.py",
+        line=3,
+        model_id="m",
     )
     out = sanitize_anchors([finding], tmp_path)
     assert (out[0].file, out[0].line) == ("odd.py", 3)
@@ -535,9 +604,7 @@ def test_zero_tool_finish_is_nudged_then_required(tmp_path: Path) -> None:
         if len(payloads) == 1:
             return _findings_reply()
         if len(payloads) == 2:
-            assert any(
-                item.get("content") == BLAST_RADIUS_NUDGE for item in payload["messages"]
-            )
+            assert any(item.get("content") == BLAST_RADIUS_NUDGE for item in payload["messages"])
             assert payload.get("tool_choice") == "required"
             assert "response_format" not in payload
             return _tool_reply()
@@ -696,19 +763,15 @@ def test_gemini_missing_signature_finalizes_without_executing_bad_call(
         assert "tools" not in payload
         assert "response_format" in payload
         assert payload["messages"][-1]["role"] == "user"
-        assert payload["messages"][-1]["content"].endswith(
-            MISSING_SIGNATURE_FINALIZE_NOTICE
-        )
+        assert payload["messages"][-1]["content"].endswith(MISSING_SIGNATURE_FINALIZE_NOTICE)
         assert not any(
             left.get("role") == right.get("role") == "user"
-            for left, right in zip(
-                payload["messages"], payload["messages"][1:], strict=False
-            )
+            for left, right in zip(payload["messages"], payload["messages"][1:], strict=False)
         )
         assert not any(message.get("tool_calls") for message in payload["messages"])
         assert not any(message.get("role") == "tool" for message in payload["messages"])
         assert any(
-            "Tool: read_file\nArguments: {\"path\": \"a.py\"}\nResult:\n"
+            'Tool: read_file\nArguments: {"path": "a.py"}\nResult:\n'
             in str(message.get("content", ""))
             for message in payload["messages"]
         )
@@ -761,9 +824,9 @@ def test_gemini_signed_fifty_turn_chain_round_trips(tmp_path: Path) -> None:
     final_history = payloads[-1]["messages"]
     signed_turns = [message for message in final_history if message.get("tool_calls")]
     assert len(signed_turns) == 50
-    assert [
-        message["reasoning_details"][0]["data"] for message in signed_turns
-    ] == [f"opaque-signature-{index}" for index in range(1, 51)]
+    assert [message["reasoning_details"][0]["data"] for message in signed_turns] == [
+        f"opaque-signature-{index}" for index in range(1, 51)
+    ]
 
 
 def test_gemini_provider_400_after_tools_uses_sanitized_salvage(tmp_path: Path) -> None:
@@ -781,7 +844,7 @@ def test_gemini_provider_400_after_tools_uses_sanitized_salvage(tmp_path: Path) 
         assert not any(message.get("tool_calls") for message in payload["messages"])
         assert not any(message.get("role") == "tool" for message in payload["messages"])
         assert any(
-            "Tool: read_file\nArguments: {\"path\": \"a.py\"}\nResult:\n"
+            'Tool: read_file\nArguments: {"path": "a.py"}\nResult:\n'
             in str(message.get("content", ""))
             for message in payload["messages"]
         )
@@ -826,7 +889,7 @@ def test_gemini_generic_invalid_argument_after_tools_uses_sanitized_salvage(
         assert not any(message.get("tool_calls") for message in payload["messages"])
         assert not any(message.get("role") == "tool" for message in payload["messages"])
         assert any(
-            "Tool: read_file\nArguments: {\"path\": \"a.py\"}\nResult:\n"
+            'Tool: read_file\nArguments: {"path": "a.py"}\nResult:\n'
             in str(message.get("content", ""))
             for message in payload["messages"]
         )
@@ -859,13 +922,10 @@ def test_gemini_invalid_argument_context_overflow_shrinks_before_salvage(
         if len(payloads) == 1:
             return _gemini_tool_reply()
         if len(payloads) == 2:
-            raise LaneError(
-                "OpenRouter HTTP 400: INVALID_ARGUMENT context length exceeded"
-            )
+            raise LaneError("OpenRouter HTTP 400: INVALID_ARGUMENT context length exceeded")
         messages = payload["messages"]
         assert any(
-            "observation truncated after a context overflow"
-            in str(message.get("content", ""))
+            "observation truncated after a context overflow" in str(message.get("content", ""))
             for message in messages
         )
         assert not any(
@@ -974,15 +1034,14 @@ def test_gemini_deadline_signature_rejection_sanitizes_before_retry(
             assert payload.get("tools")
             assert payload.get("tool_choice") == "none"
             raise LaneError(
-                "OpenRouter HTTP 400: INVALID_ARGUMENT function call has invalid "
-                "thought_signature"
+                "OpenRouter HTTP 400: INVALID_ARGUMENT function call has invalid thought_signature"
             )
         assert "tools" not in payload
         assert "response_format" in payload
         assert not any(message.get("tool_calls") for message in payload["messages"])
         assert not any(message.get("role") == "tool" for message in payload["messages"])
         assert any(
-            "Tool: read_file\nArguments: {\"path\": \"a.py\"}\nResult:\n"
+            'Tool: read_file\nArguments: {"path": "a.py"}\nResult:\n'
             in str(message.get("content", ""))
             for message in payload["messages"]
         )
@@ -1122,6 +1181,35 @@ def test_gemini_3_disables_parallel_tool_calls_only_while_tools_are_active(
     assert result.sanitized_tool_turns is None
 
 
+def test_newer_gemini_models_do_not_inherit_gemini_3_tool_protocol(tmp_path: Path) -> None:
+    """Only the observed Gemini 3 signature workaround is provider-specific."""
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            # An unsigned generic tool reply remains serviceable for a model
+            # that has no empirically established signature contract.
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-4.0-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=1,
+    )
+
+    assert result.ok
+    assert result.tool_rounds == 1
+    assert result.thought_signature_tool_turns is None
+    assert "parallel_tool_calls" not in payloads[0]
+    assert "tools" not in payloads[1]
+
+
 def test_non_gemini_tool_calls_keep_provider_default_parallelism(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     payloads: list[dict] = []
@@ -1157,9 +1245,7 @@ def test_empty_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None:
             return {"choices": [{"message": {"content": ""}}]}
         assert "response_format" in payload
         assert "tools" not in payload
-        assert "previous assistant message was empty" in payload["messages"][-1][
-            "content"
-        ]
+        assert "previous assistant message was empty" in payload["messages"][-1]["content"]
         return _findings_reply()
 
     result = run_lane(
@@ -1405,14 +1491,11 @@ def test_openrouter_chat_rate_limit_retries_longer_with_stable_jitter(
         )
 
     assert raised.value.provider == "Google"
-    assert raised.value.zero_cost is True
     assert len(sleeps) == harness.MAX_RATE_LIMIT_ATTEMPTS - 1
     assert sleeps == [
         min(
             harness._retry_delay(index, None)
-            + harness._stable_rate_limit_jitter(
-                b'{"model": "google/gemini-3.8-flash"}', index
-            ),
+            + harness._stable_rate_limit_jitter(b'{"model": "google/gemini-3.8-flash"}', index),
             harness.MAX_RETRY_AFTER_SECONDS,
         )
         for index in range(1, harness.MAX_RATE_LIMIT_ATTEMPTS)
@@ -1420,13 +1503,11 @@ def test_openrouter_chat_rate_limit_retries_longer_with_stable_jitter(
     assert max(sleeps) <= harness.MAX_RETRY_AFTER_SECONDS
 
 
-def test_lane_preserves_terminal_http_provider_and_zero_cost() -> None:
+def test_lane_preserves_terminal_http_provider_and_nonbillable_cost() -> None:
     from or_pr_review import harness
 
     def chat(_payload: dict) -> dict:
-        raise harness.OpenRouterHTTPError(
-            "OpenRouter HTTP 429: rate limited", provider="Google", zero_cost=True
-        )
+        raise harness.OpenRouterHTTPError("OpenRouter HTTP 429: rate limited", provider="Google")
 
     result = run_lane(
         model="google/gemini-3.8-flash",
@@ -1453,9 +1534,7 @@ def test_terminal_http_error_does_not_hide_prior_unknown_cost(tmp_path: Path) ->
         calls += 1
         if calls == 1:
             return _tool_reply()
-        raise harness.OpenRouterHTTPError(
-            "OpenRouter HTTP 429: rate limited", provider="Google", zero_cost=True
-        )
+        raise harness.OpenRouterHTTPError("OpenRouter HTTP 429: rate limited", provider="Google")
 
     result = run_lane(
         model="example/model",
@@ -1495,7 +1574,7 @@ def test_http_error_provider_is_parsed_beyond_display_truncation(
     assert raised.value.provider == "Google"
 
 
-def test_rate_limit_deadline_preserves_provider_and_zero_cost(
+def test_rate_limit_deadline_preserves_provider_and_nonbillable_cost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from or_pr_review import harness
@@ -1516,7 +1595,6 @@ def test_rate_limit_deadline_preserves_provider_and_zero_cost(
         )
 
     assert raised.value.provider == "Google"
-    assert raised.value.zero_cost is True
     assert "budget exhausted" in str(raised.value)
 
 
@@ -1633,9 +1711,7 @@ def test_deadline_finalize_transport_failure_keeps_one_repair_turn(
         assert "protected finalize request failed" in payload["messages"][-1]["content"]
         assert not any(
             left.get("role") == right.get("role") == "user"
-            for left, right in zip(
-                payload["messages"], payload["messages"][1:], strict=False
-            )
+            for left, right in zip(payload["messages"], payload["messages"][1:], strict=False)
         )
         now["value"] = 9.0
         return _findings_reply()
@@ -1689,9 +1765,7 @@ def test_repository_tool_timeout_is_killed_and_returned_as_observation(
 ) -> None:
     from or_pr_review import harness
 
-    (tmp_path / "pathological.txt").write_text(
-        "a" * 30_000 + "!\n", encoding="utf-8"
-    )
+    (tmp_path / "pathological.txt").write_text("a" * 30_000 + "!\n", encoding="utf-8")
     call = {
         "id": "tool-1",
         "function": {
@@ -1700,9 +1774,7 @@ def test_repository_tool_timeout_is_killed_and_returned_as_observation(
         },
     }
     started = harness.time.monotonic()
-    observation = harness._run_one_tool(
-        tmp_path, call, deadline=started + 0.25
-    )
+    observation = harness._run_one_tool(tmp_path, call, deadline=started + 0.25)
     assert observation["tool_call_id"] == "tool-1"
     assert "exceeded its" in observation["content"]
     assert "deadline" in observation["content"]
@@ -1720,9 +1792,7 @@ def test_salvage_shrinks_old_observations_on_context_overflow(tmp_path: Path) ->
         if len(payloads) == 4:
             raise LaneError("OpenRouter HTTP 400: maximum context length exceeded")
         tool_texts = [
-            message["content"]
-            for message in payload["messages"]
-            if message.get("role") == "tool"
+            message["content"] for message in payload["messages"] if message.get("role") == "tool"
         ]
         assert any("[observation truncated" in text for text in tool_texts)
         assert all("[observation truncated" not in text for text in tool_texts[-2:])
@@ -1925,11 +1995,7 @@ def test_verify_lane_requires_complete_resolutions() -> None:
     def chat(payload: dict) -> dict:
         payloads.append(payload)
         if len(payloads) == 1:
-            return {
-                "choices": [
-                    {"message": {"content": '{"findings": [], "resolutions": []}'}}
-                ]
-            }
+            return {"choices": [{"message": {"content": '{"findings": [], "resolutions": []}'}}]}
         assert "missing entries" in payload["messages"][-1]["content"]
         return {
             "choices": [

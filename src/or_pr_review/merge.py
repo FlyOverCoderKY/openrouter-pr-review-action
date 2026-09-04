@@ -5,10 +5,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from or_pr_review.schema import Finding, LaneResult
+from or_pr_review.schema import SEVERITY_RANK, Finding, LaneResult
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
-_SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}
 _REVIEW_ENVIRONMENT_RE = re.compile(
     r"\b(?:review|provided|temporary|inert)\s+"
     r"(?:checkout|workspace|environment|snapshot)\b"
@@ -88,6 +87,23 @@ def format_issue_block(number: int, issue: MergedIssue) -> str:
     return "\n".join(parts).rstrip() + "\n"
 
 
+def merged_issue_from_finding(finding: Finding, *, fallback_model: str = "") -> MergedIssue:
+    """Convert the validated lane domain object to a publishable issue.
+
+    Keeping this boundary here makes the local fallback and judge repairs use
+    exactly the same Finding-to-MergedIssue representation and attribution.
+    """
+    model = finding.model_id or fallback_model
+    return MergedIssue(
+        title=finding.title,
+        body=finding.body,
+        severity=finding.severity,
+        file=finding.file,
+        line=finding.line,
+        models=[model] if model else [],
+    )
+
+
 def issues_from_single_lane(lane: LaneResult) -> list[MergedIssue]:
     """Post one lane as-is, except for review-environment diagnostics.
 
@@ -107,87 +123,9 @@ def issues_from_single_lane(lane: LaneResult) -> list[MergedIssue]:
                 f"{finding.title} (not published as a code finding)"
             )
             continue
-        issues.append(
-            MergedIssue(
-                title=finding.title,
-                body=finding.body,
-                severity=finding.severity,
-                file=finding.file,
-                line=finding.line,
-                models=[finding.model_id or lane.model],
-            )
-        )
+        issues.append(merged_issue_from_finding(finding, fallback_model=lane.model))
     issues.sort(key=_sort_key)
     return issues
-
-
-def merge_lanes(lanes: list[LaneResult]) -> list[MergedIssue]:
-    """Local de-dupe used by tests and as a last-resort helper. The multi-lane
-    product path calls the OpenRouter judge instead.
-    """
-    merged: list[MergedIssue] = []
-    for lane in lanes:
-        if not lane.ok:
-            continue
-        for finding in lane.findings:
-            if is_environmental_diagnostic(
-                title=finding.title,
-                body=finding.body,
-                line=finding.line,
-            ):
-                print(
-                    f"lane diagnostic from {finding.model_id or lane.model}: "
-                    f"{finding.title} (not published as a code finding)"
-                )
-                continue
-            _absorb(merged, finding)
-    merged.sort(key=_sort_key)
-    return merged
-
-
-def _absorb(merged: list[MergedIssue], finding: Finding) -> None:
-    for existing in merged:
-        if _same_issue(existing, finding):
-            if finding.model_id not in existing.models:
-                existing.models.append(finding.model_id)
-            if _SEVERITY_RANK.get(finding.severity, 0) > _SEVERITY_RANK.get(existing.severity, 0):
-                existing.severity = finding.severity
-            if len(finding.body) > len(existing.body):
-                existing.body = finding.body
-            if existing.line is None and finding.line is not None:
-                existing.line = finding.line
-            if existing.file is None and finding.file:
-                existing.file = finding.file
-            return
-    merged.append(
-        MergedIssue(
-            title=finding.title,
-            body=finding.body,
-            severity=finding.severity,
-            file=finding.file,
-            line=finding.line,
-            models=[finding.model_id],
-        )
-    )
-
-
-def _same_issue(existing: MergedIssue, finding: Finding) -> bool:
-    title_a = _normalize(existing.title)
-    title_b = _normalize(finding.title)
-    file_a = (existing.file or "").strip()
-    file_b = (finding.file or "").strip()
-    if title_a == title_b and file_a == file_b:
-        return True
-    if (
-        file_a
-        and file_b
-        and file_a == file_b
-        and _jaccard(_tokens(existing.title), _tokens(finding.title)) >= 0.7
-    ):
-        return True
-    if title_a == title_b and (not file_a or not file_b):
-        return True
-    return False
 
 
 def is_environmental_diagnostic(*, title: str, body: str, line: int | None) -> bool:
@@ -205,7 +143,14 @@ def is_environmental_diagnostic(*, title: str, body: str, line: int | None) -> b
     return bool(_REVIEW_ENVIRONMENT_RE.search(text) and _ACCESS_FAILURE_RE.search(text))
 
 
-def same_merged_issue(left: MergedIssue, right: MergedIssue) -> bool:
+def same_merged_issue(
+    left: MergedIssue,
+    right: MergedIssue,
+    *,
+    title_similarity: float = 0.8,
+    require_title_noise_only: bool = True,
+    require_evidence_agreement: bool = True,
+) -> bool:
     """Conservative exact/near duplicate test for already-merged issues.
 
     Near matches require the same anchored location plus strong agreement in
@@ -220,14 +165,16 @@ def same_merged_issue(left: MergedIssue, right: MergedIssue) -> bool:
     title_left = _normalize(left.title)
     title_right = _normalize(right.title)
     if title_left == title_right:
-        return _evidence_agrees(left.body, right.body)
+        return not require_evidence_agreement or _evidence_agrees(left.body, right.body)
     if not file_left or left.line is None:
         return False
-    if _jaccard(_tokens(left.title), _tokens(right.title)) < 0.8:
+    if _jaccard(_tokens(left.title), _tokens(right.title)) < title_similarity:
         return False
-    if (_tokens(left.title) ^ _tokens(right.title)) - _DUPLICATE_NOISE_TOKENS:
+    if require_title_noise_only and (
+        (_tokens(left.title) ^ _tokens(right.title)) - _DUPLICATE_NOISE_TOKENS
+    ):
         return False
-    return _evidence_agrees(left.body, right.body)
+    return not require_evidence_agreement or _evidence_agrees(left.body, right.body)
 
 
 def _evidence_agrees(left: str, right: str) -> bool:
@@ -251,7 +198,7 @@ def absorb_merged_issue(existing: MergedIssue, incoming: MergedIssue) -> None:
     for model in incoming.models:
         if model and model not in existing.models:
             existing.models.append(model)
-    if _SEVERITY_RANK.get(incoming.severity, 0) > _SEVERITY_RANK.get(existing.severity, 0):
+    if SEVERITY_RANK.get(incoming.severity, 0) > SEVERITY_RANK.get(existing.severity, 0):
         existing.severity = incoming.severity
     if len(incoming.body) > len(existing.body):
         existing.body = incoming.body
@@ -261,7 +208,13 @@ def absorb_merged_issue(existing: MergedIssue, incoming: MergedIssue) -> None:
         existing.file = incoming.file
 
 
-def deduplicate_issues(issues: list[MergedIssue]) -> tuple[list[MergedIssue], int]:
+def deduplicate_issues(
+    issues: list[MergedIssue],
+    *,
+    title_similarity: float = 0.8,
+    require_title_noise_only: bool = True,
+    require_evidence_agreement: bool = True,
+) -> tuple[list[MergedIssue], int]:
     """Deterministically suppress exact/conservative-near duplicate issues.
 
     Returns fresh issue objects and the number of duplicate rows absorbed so
@@ -280,7 +233,13 @@ def deduplicate_issues(issues: list[MergedIssue]) -> tuple[list[MergedIssue], in
             id=issue.id,
         )
         for existing in merged:
-            if same_merged_issue(existing, candidate):
+            if same_merged_issue(
+                existing,
+                candidate,
+                title_similarity=title_similarity,
+                require_title_noise_only=require_title_noise_only,
+                require_evidence_agreement=require_evidence_agreement,
+            ):
                 absorb_merged_issue(existing, candidate)
                 absorbed += 1
                 break
@@ -314,4 +273,4 @@ def _unique(items: list[str]) -> list[str]:
 
 
 def _sort_key(issue: MergedIssue) -> tuple[int, str, str]:
-    return (-_SEVERITY_RANK.get(issue.severity, 0), issue.file or "", issue.title.lower())
+    return (-SEVERITY_RANK.get(issue.severity, 0), issue.file or "", issue.title.lower())

@@ -72,9 +72,13 @@ def test_pr_diff_falls_back_to_local_git_on_github_line_limit(
         git_calls.append((cmd, timeout, cwd))
         return "complete-local-diff"
 
-    monkeypatch.setenv("SOURCE_WORKSPACE", "/checkout")
     gh = GitHub(
-        token="t", repository="o/r", timeout=45, runner=runner, git_runner=git_runner
+        token="t",
+        repository="o/r",
+        timeout=45,
+        runner=runner,
+        git_runner=git_runner,
+        source_workspace="/checkout",
     )
     assert gh.pr_diff(7, base_sha=base, head_sha=head) == "complete-local-diff"
     assert len(gh_calls) == 1
@@ -146,6 +150,41 @@ def test_create_review_falls_back_without_comments() -> None:
     assert "comments" not in calls[1]
 
 
+def test_create_review_does_not_retry_after_transport_failure() -> None:
+    calls: list[dict] = []
+
+    def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
+        calls.append(json.loads(stdin or "{}"))
+        raise ActionError("GitHub CLI timed out after 120s")
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+    with pytest.raises(ActionError, match="timed out"):
+        gh.create_review(
+            1,
+            "body",
+            "c" * 40,
+            comments=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+        )
+    assert len(calls) == 1
+
+
+def test_upsert_status_comment_uses_paginated_issue_comments() -> None:
+    from or_pr_review.github_ops import STATUS_MARKER, upsert_status_comment
+
+    calls: list[list[str]] = []
+
+    def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
+        calls.append(cmd)
+        if "--paginate" in cmd:
+            return json.dumps([[{"id": 101, "body": f"{STATUS_MARKER}\nold"}]])
+        return json.dumps({"html_url": "https://example.test/status"})
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+    assert upsert_status_comment(gh, pr_number=1, body="new") == "https://example.test/status"
+    assert "--paginate" in calls[0]
+    assert "PATCH" in calls[1]
+
+
 def test_list_finding_replies_pairs_marker_threads_by_generation() -> None:
     generation = "1234567890ab"
     other_generation = "feedfeedfeed"
@@ -178,16 +217,18 @@ def test_list_finding_replies_pairs_marker_threads_by_generation() -> None:
     gh = GitHub(token="t", repository="o/r", runner=runner)
     # Only the current generation's thread pairs; the pre-reset thread with a
     # reused finding id is ignored, and an empty generation harvests nothing.
-    assert gh.list_finding_replies(1, generation=generation) == [
-        ("r1-1", "dev", "fixed in abc123")
-    ]
+    assert gh.list_finding_replies(1, generation=generation) == [("r1-1", "dev", "fixed in abc123")]
     assert gh.list_finding_replies(1, generation="") == []
 
 
 def test_recent_issue_comments_exclude_bot_review_bodies() -> None:
     comments = [
         [
-            {"id": 1, "body": "## OpenRouter pull-request review — continued\n...", "user": {"login": "b"}},
+            {
+                "id": 1,
+                "body": "## OpenRouter pull-request review — continued\n...",
+                "user": {"login": "b"},
+            },
             {"id": 2, "body": "## OpenRouter review incomplete\n...", "user": {"login": "b"}},
             {"id": 3, "body": "I pushed a fix for r1-1", "user": {"login": "dev"}},
         ]

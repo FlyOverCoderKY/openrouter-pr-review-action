@@ -14,6 +14,22 @@ on:
       github_token:
         type: string
         default: ${{ github.token }}
+      github_timeout_seconds:
+        description: Timeout in seconds for GitHub CLI and local-git diff operations (1-600).
+        type: string
+        default: "120"
+      openrouter_timeout_seconds:
+        description: Timeout in seconds for each OpenRouter request (1-600).
+        type: string
+        default: "180"
+      job_budget_seconds:
+        description: Total action budget in seconds, measured from Python startup.
+        type: string
+        default: "1320"
+      all_role_deadline_seconds:
+        description: Optional wall-clock cap for concurrent role=all lanes; empty derives it.
+        type: string
+        default: ""
       pr_number:
         type: string
         default: ""
@@ -91,6 +107,10 @@ jobs:
           role: setup
           models: ${{ inputs.models }}
           judge_model: ${{ inputs.judge_model }}
+          github_timeout_seconds: ${{ inputs.github_timeout_seconds }}
+          openrouter_timeout_seconds: ${{ inputs.openrouter_timeout_seconds }}
+          job_budget_seconds: ${{ inputs.job_budget_seconds }}
+          all_role_deadline_seconds: ${{ inputs.all_role_deadline_seconds }}
           fail_on: ${{ inputs.fail_on }}
           roast_level: ${{ inputs.roast_level }}
           review_scope: ${{ inputs.review_scope }}
@@ -134,6 +154,10 @@ jobs:
           judge_needed: ${{ needs.setup.outputs.judge_needed }}
           judge_model: ${{ inputs.judge_model }}
           github_token: ${{ inputs.github_token }}
+          github_timeout_seconds: ${{ inputs.github_timeout_seconds }}
+          openrouter_timeout_seconds: ${{ inputs.openrouter_timeout_seconds }}
+          job_budget_seconds: ${{ inputs.job_budget_seconds }}
+          all_role_deadline_seconds: ${{ inputs.all_role_deadline_seconds }}
           pr_number: ${{ inputs.pr_number }}
           fail_on: ${{ inputs.fail_on }}
           roast_level: ${{ inputs.roast_level }}
@@ -165,11 +189,18 @@ jobs:
       contents: read
       pull-requests: write
     steps:
+      - name: Checkout reviewed repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Checkout action
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: FlyOverCoderKY/openrouter-pr-review-action
           ref: ${{ github.job_workflow_sha }}
+          path: .or-pr-review-action
           persist-credentials: false
       - name: Download lane artifacts
         uses: actions/download-artifact@v4
@@ -177,7 +208,7 @@ jobs:
           path: ${{ runner.temp }}/or-pr-review-lanes
           pattern: lane-*
           merge-multiple: true
-      - uses: ./
+      - uses: ./.or-pr-review-action
         with:
           role: judge
           models: ${{ inputs.models }}
@@ -185,6 +216,10 @@ jobs:
           judge_needed: "true"
           lane_results_dir: ${{ runner.temp }}/or-pr-review-lanes
           github_token: ${{ inputs.github_token }}
+          github_timeout_seconds: ${{ inputs.github_timeout_seconds }}
+          openrouter_timeout_seconds: ${{ inputs.openrouter_timeout_seconds }}
+          job_budget_seconds: ${{ inputs.job_budget_seconds }}
+          all_role_deadline_seconds: ${{ inputs.all_role_deadline_seconds }}
           pr_number: ${{ inputs.pr_number }}
           fail_on: ${{ inputs.fail_on }}
           roast_level: ${{ inputs.roast_level }}

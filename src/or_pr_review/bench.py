@@ -51,20 +51,28 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from or_pr_review import __version__
 from or_pr_review.collect import CollectedReview, DiffPlan, pack_diff, truncate_diff
 from or_pr_review.errors import ActionError
-from or_pr_review.harness import DEFAULT_LANE_TIMEOUT_SECONDS, openrouter_chat, run_lane
+from or_pr_review.harness import (
+    DEFAULT_LANE_TIMEOUT_SECONDS,
+    DEFAULT_MAX_TOOL_TURNS,
+    DEFAULT_TIMEOUT,
+    _elapsed_ms,
+    openrouter_chat,
+    run_lane,
+)
 from or_pr_review.judge import (
     JUDGE_REASONING,
     build_judge_messages,
     judge_json_schema,
     run_llm_judge,
 )
-from or_pr_review.models import DEFAULT_JUDGE_MODEL, parse_slug
+from or_pr_review.models import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL, parse_slug
 from or_pr_review.prompt import build_messages, changed_paths_from_diff, parse_path_profiles
 from or_pr_review.redaction import redact
 from or_pr_review.schema import MAX_COVERAGE_ENTRIES, SEVERITIES
@@ -76,6 +84,10 @@ JUDGE_RUN_SCHEMA_VERSION = 1
 JUDGE_VERDICTS = ("clean", "issues")
 JUDGE_LINE_TOLERANCE = 5
 JUDGE_MAX_RUNS = 20
+JUDGE_MAX_MODELS = 8
+# action.yml's production default. Capture uses the same value unless its
+# explicit --max-diff-kb option records a repository-specific override.
+DEFAULT_MAX_DIFF_KB = 300
 
 
 @dataclass(frozen=True)
@@ -158,9 +170,7 @@ class RunScore:
     def severity_agreement(self, labels: tuple[Label, ...]) -> tuple[int, int]:
         """Of the labels matched, how many were hit at the label's own severity."""
         hit_labels = [label for label in labels if self.matched.get(label.id)]
-        agree = sum(
-            1 for label in hit_labels if label.severity in self.matched[label.id]
-        )
+        agree = sum(1 for label in hit_labels if label.severity in self.matched[label.id])
         return agree, len(hit_labels)
 
     def precision(self) -> tuple[int, int]:
@@ -305,6 +315,30 @@ def load_fixture(fixture_dir: Path) -> Fixture:
     )
 
 
+def _parse_keywords(
+    owner: str,
+    raw_keywords: object,
+    *,
+    empty_detail: str | None = None,
+    collection_name: str = "list",
+) -> tuple[str, ...]:
+    """Validate and compile the regex keywords used by bench records."""
+    if not isinstance(raw_keywords, list) or not raw_keywords:
+        # A bare string would silently explode into one regex per character.
+        raise ActionError(f"{owner} keywords must be a non-empty {collection_name}")
+    keywords: list[str] = []
+    for keyword in raw_keywords:
+        if not isinstance(keyword, str) or not keyword.strip():
+            detail = f" {empty_detail}" if empty_detail else ""
+            raise ActionError(f"{owner} has an empty keyword{detail}")
+        try:
+            re.compile(keyword)
+        except re.error as exc:
+            raise ActionError(f"{owner} keyword {keyword!r} is not a valid regex: {exc}") from exc
+        keywords.append(keyword)
+    return tuple(keywords)
+
+
 def _parse_label(item: object) -> Label:
     if not isinstance(item, dict):
         raise ActionError("each label must be a JSON object")
@@ -313,31 +347,17 @@ def _parse_label(item: object) -> Label:
     severity = item.get("severity", "")
     if severity not in SEVERITIES:
         raise ActionError(f"label {item.get('id')!r} severity must be one of {SEVERITIES}")
-    raw_keywords = item.get("keywords")
-    if not isinstance(raw_keywords, list) or not raw_keywords:
-        # A bare string would silently explode into one regex per character.
-        raise ActionError(f"label {item.get('id')!r} keywords must be a non-empty list")
-    keywords: list[str] = []
-    for keyword in raw_keywords:
-        if not isinstance(keyword, str) or not keyword.strip():
-            raise ActionError(
-                f"label {item.get('id')!r} has an empty keyword, which would match "
-                "every finding"
-            )
-        try:
-            re.compile(keyword)
-        except re.error as exc:
-            raise ActionError(
-                f"label {item.get('id')!r} keyword {keyword!r} is not a valid regex: {exc}"
-            ) from exc
-        keywords.append(keyword)
+    label_name = f"label {item.get('id')!r}"
+    keywords = _parse_keywords(
+        label_name,
+        item.get("keywords"),
+        empty_detail="which would match every finding",
+    )
     context = item.get("context")
     if context not in LABEL_CONTEXTS:
         # Explicit, not defaulted: silently bucketing unannotated labels as
         # "diff" would make the strata line claim tracking that isn't there.
-        raise ActionError(
-            f"label {item.get('id')!r} context must be one of {LABEL_CONTEXTS}"
-        )
+        raise ActionError(f"label {item.get('id')!r} context must be one of {LABEL_CONTEXTS}")
     return Label(
         id=str(item["id"]),
         severity=severity,
@@ -358,34 +378,21 @@ def _parse_adjudication(item: object) -> Adjudication:
         raise ActionError(
             f"adjudication {item.get('id')!r} verdict must be one of {ADJUDICATION_VERDICTS}"
         )
-    raw_keywords = item.get("keywords")
-    if not isinstance(raw_keywords, list) or not raw_keywords:
-        raise ActionError(f"adjudication {item.get('id')!r} keywords must be a non-empty list")
-    for keyword in raw_keywords:
-        if not isinstance(keyword, str) or not keyword.strip():
-            raise ActionError(f"adjudication {item.get('id')!r} has an empty keyword")
-        try:
-            re.compile(keyword)
-        except re.error as exc:
-            raise ActionError(
-                f"adjudication {item.get('id')!r} keyword {keyword!r} is not a valid "
-                f"regex: {exc}"
-            ) from exc
+    adjudication_name = f"adjudication {item.get('id')!r}"
+    raw_keywords = _parse_keywords(adjudication_name, item.get("keywords"))
     return Adjudication(
         id=str(item["id"]),
         verdict=verdict,
         file=item.get("file"),
-        keywords=tuple(raw_keywords),
+        keywords=raw_keywords,
         note=item.get("note", ""),
     )
 
 
-def collected_from_fixture(
-    fixture: Fixture, *, legacy_truncation: bool = False
-) -> CollectedReview:
+def collected_from_fixture(fixture: Fixture, *, legacy_truncation: bool = False) -> CollectedReview:
     """Apply the production embed cap; `legacy_truncation` replays the
     pre-triage raw byte cut for A/B baselines."""
-    max_diff_kb = fixture.max_diff_kb or 1024
+    max_diff_kb = fixture.max_diff_kb or DEFAULT_MAX_DIFF_KB
     if legacy_truncation:
         truncation = truncate_diff(fixture.diff, max_diff_kb)
     else:
@@ -412,13 +419,23 @@ def collected_from_fixture(
     )
 
 
+def _file_matches(candidate: object, expected: str | None) -> bool:
+    if expected is None:
+        return True
+    return isinstance(candidate, str) and (
+        candidate == expected or candidate.endswith("/" + expected)
+    )
+
+
+def _keywords_match(item: dict[str, Any], keywords: tuple[str, ...]) -> bool:
+    haystack = f"{item.get('title', '')}\n{item.get('body', '')}"
+    return any(re.search(keyword, haystack, re.IGNORECASE) for keyword in keywords)
+
+
 def match_finding(finding: dict, label: Label | Adjudication) -> bool:
-    if label.file is not None:
-        file_value = finding.get("file") or ""
-        if not (file_value == label.file or file_value.endswith("/" + label.file)):
-            return False
-    haystack = f"{finding.get('title', '')}\n{finding.get('body', '')}"
-    return any(re.search(keyword, haystack, re.IGNORECASE) for keyword in label.keywords)
+    return _file_matches(finding.get("file"), label.file) and _keywords_match(
+        finding, label.keywords
+    )
 
 
 def score_run(
@@ -435,9 +452,7 @@ def score_run(
                 hit_any = True
         if hit_any:
             continue
-        adjudication = next(
-            (a for a in adjudications if match_finding(finding, a)), None
-        )
+        adjudication = next((a for a in adjudications if match_finding(finding, a)), None)
         if adjudication is None:
             score.unadjudicated.append(finding)
         elif adjudication.verdict == "true_positive_unlabeled":
@@ -445,6 +460,22 @@ def score_run(
         else:
             score.adjudicated_fp.append((finding, adjudication.id))
     return score
+
+
+def _write_progress(
+    progress_path: Path,
+    model: str,
+    payload: dict[str, int | float | str],
+) -> None:
+    """Atomically save aggregate-only progress for one paid lane."""
+    record: dict[str, Any] = {
+        "schema": "or-pr-review/bench-progress/1",
+        "model": model,
+        **payload,
+    }
+    pending = progress_path.with_suffix(".tmp")
+    pending.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    os.replace(pending, progress_path)
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -455,9 +486,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raw_lane_timeout = os.environ.get("OR_PR_REVIEW_BENCH_LANE_TIMEOUT_SECONDS", "")
         try:
             lane_timeout = (
-                int(raw_lane_timeout)
-                if raw_lane_timeout
-                else DEFAULT_LANE_TIMEOUT_SECONDS
+                int(raw_lane_timeout) if raw_lane_timeout else DEFAULT_LANE_TIMEOUT_SECONDS
             )
         except ValueError as exc:
             raise ActionError("benchmark lane timeout must be a positive integer") from exc
@@ -467,9 +496,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         raise ActionError("OPENROUTER_API_KEY is not set; `bench run` spends real tokens")
-    collected = collected_from_fixture(
-        fixture, legacy_truncation=args.legacy_truncation
-    )
+    collected = collected_from_fixture(fixture, legacy_truncation=args.legacy_truncation)
     if collected.truncation.truncated:
         print(
             f"embed cap applied: {collected.truncation.embedded_bytes / 1024:.1f} KB "
@@ -508,18 +535,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"bench run {index + 1}/{args.runs}: model={args.model}", flush=True)
         progress_path = out_dir / f"progress-{index}.json"
 
-        def checkpoint(
-            payload: dict[str, int | float | str], progress_path: Path = progress_path
-        ) -> None:
-            record: dict[str, Any] = {
-                "schema": "or-pr-review/bench-progress/1",
-                "model": args.model,
-                **payload,
-            }
-            pending = progress_path.with_suffix(".tmp")
-            pending.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-            os.replace(pending, progress_path)
-
         lane = run_lane(
             model=args.model,
             messages=[dict(message) for message in messages],
@@ -538,7 +553,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             provider_zdr=args.provider_zdr,
             expect_coverage=True,
             expected_paths=expected_paths,
-            progress=checkpoint,
+            progress=partial(_write_progress, progress_path, args.model),
         )
         payload = lane.to_dict()
         out_path = out_dir / f"run-{index}.json"
@@ -687,9 +702,7 @@ def load_judge_fixture(path: Path) -> JudgeFixture:
     if not isinstance(payload, dict):
         raise ActionError("judge fixture must be a JSON object")
     if payload.get("schema_version") != JUDGE_FIXTURE_SCHEMA_VERSION:
-        raise ActionError(
-            f"judge fixture schema_version must be {JUDGE_FIXTURE_SCHEMA_VERSION}"
-        )
+        raise ActionError(f"judge fixture schema_version must be {JUDGE_FIXTURE_SCHEMA_VERSION}")
     name = payload.get("name")
     if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
         raise ActionError("judge fixture name must be a lowercase kebab-case string")
@@ -719,9 +732,7 @@ def load_judge_fixture(path: Path) -> JudgeFixture:
         lane_models.add(model)
         findings = lane.get("findings")
         if not isinstance(findings, list):
-            raise ActionError(
-                f"judge fixture {name!r} lane {lane_index} findings must be an array"
-            )
+            raise ActionError(f"judge fixture {name!r} lane {lane_index} findings must be an array")
         for finding_index, finding in enumerate(findings):
             _validate_synthetic_finding(name, lane_index, finding_index, finding)
         lanes.append({"model": model, "findings": findings})
@@ -763,9 +774,7 @@ def _validate_synthetic_finding(
     if file_value is not None and not isinstance(file_value, str):
         raise ActionError(f"{prefix} file must be a string or null")
     line = finding.get("line")
-    if line is not None and (
-        isinstance(line, bool) or not isinstance(line, int) or line <= 0
-    ):
+    if line is not None and (isinstance(line, bool) or not isinstance(line, int) or line <= 0):
         raise ActionError(f"{prefix} line must be a positive integer or null")
 
 
@@ -784,24 +793,13 @@ def _parse_judge_expectation(fixture_name: str, item: object) -> JudgeExpectatio
     if file_value is not None and not isinstance(file_value, str):
         raise ActionError(f"expected issue {issue_id!r} file must be a string or null")
     line = item.get("line")
-    if line is not None and (
-        isinstance(line, bool) or not isinstance(line, int) or line <= 0
-    ):
+    if line is not None and (isinstance(line, bool) or not isinstance(line, int) or line <= 0):
         raise ActionError(f"expected issue {issue_id!r} line must be a positive integer or null")
-    raw_keywords = item.get("keywords")
-    if not isinstance(raw_keywords, list) or not raw_keywords:
-        raise ActionError(f"expected issue {issue_id!r} keywords must be a non-empty array")
-    keywords: list[str] = []
-    for keyword in raw_keywords:
-        if not isinstance(keyword, str) or not keyword.strip():
-            raise ActionError(f"expected issue {issue_id!r} has an empty keyword")
-        try:
-            re.compile(keyword)
-        except re.error as exc:
-            raise ActionError(
-                f"expected issue {issue_id!r} keyword {keyword!r} is invalid: {exc}"
-            ) from exc
-        keywords.append(keyword)
+    keywords = _parse_keywords(
+        f"expected issue {issue_id!r}",
+        item.get("keywords"),
+        collection_name="array",
+    )
     recall_critical = item.get("recall_critical", False)
     if not isinstance(recall_critical, bool):
         raise ActionError(f"expected issue {issue_id!r} recall_critical must be boolean")
@@ -810,18 +808,14 @@ def _parse_judge_expectation(fixture_name: str, item: object) -> JudgeExpectatio
         title=title.strip(),
         file=file_value,
         line=line,
-        keywords=tuple(keywords),
+        keywords=keywords,
         recall_critical=recall_critical,
     )
 
 
 def _judge_issue_matches(issue: dict[str, Any], expected: JudgeExpectation) -> bool:
-    if expected.file is not None:
-        issue_file = issue.get("file")
-        if not isinstance(issue_file, str) or not (
-            issue_file == expected.file or issue_file.endswith("/" + expected.file)
-        ):
-            return False
+    if not _file_matches(issue.get("file"), expected.file):
+        return False
     if expected.line is not None:
         issue_line = issue.get("line")
         if (
@@ -830,13 +824,10 @@ def _judge_issue_matches(issue: dict[str, Any], expected: JudgeExpectation) -> b
             or abs(issue_line - expected.line) > JUDGE_LINE_TOLERANCE
         ):
             return False
-    haystack = f"{issue.get('title', '')}\n{issue.get('body', '')}"
-    return any(re.search(pattern, haystack, re.IGNORECASE) for pattern in expected.keywords)
+    return _keywords_match(issue, expected.keywords)
 
 
-def score_judge_output(
-    issues: list[dict[str, Any]], fixture: JudgeFixture
-) -> JudgeScore:
+def score_judge_output(issues: list[dict[str, Any]], fixture: JudgeFixture) -> JudgeScore:
     """Score issues with a maximum one-to-one output-to-ground-truth match.
 
     One broad output cannot earn recall for several expected issues. Extra
@@ -886,9 +877,7 @@ def score_judge_output(
         if index not in matched_outputs and not candidates[index]
     )
     critical = [
-        index
-        for index, expected in enumerate(fixture.expected_issues)
-        if expected.recall_critical
+        index for index, expected in enumerate(fixture.expected_issues) if expected.recall_critical
     ]
     actual_verdict = "issues" if issues else "clean"
     return JudgeScore(
@@ -912,8 +901,8 @@ def _parse_judge_models(raw: str) -> list[str]:
     parsed = [parse_slug(model, what="judge benchmark model") for model in models]
     if len(parsed) != len(set(parsed)):
         raise ActionError("--models contains duplicate slugs")
-    if len(parsed) > 8:
-        raise ActionError("--models is capped at 8 candidates per experiment")
+    if len(parsed) > JUDGE_MAX_MODELS:
+        raise ActionError(f"--models is capped at {JUDGE_MAX_MODELS} candidates per experiment")
     return parsed
 
 
@@ -933,9 +922,7 @@ def _merged_issue_dict(issue: object) -> dict[str, Any]:
     }
 
 
-def _capturing_judge_chat(
-    api_key: str, timeout: int, response_meta: dict[str, Any]
-):
+def _capturing_judge_chat(api_key: str, timeout: int, response_meta: dict[str, Any]):
     """Create a live chat callback that retains only safe repeatability metadata."""
 
     def send(payload: dict[str, Any]) -> dict[str, Any]:
@@ -953,8 +940,7 @@ def _capturing_judge_chat(
                     "total_tokens",
                     "cached_tokens",
                 )
-                if isinstance(usage.get(key), (int, float))
-                and not isinstance(usage.get(key), bool)
+                if isinstance(usage.get(key), (int, float)) and not isinstance(usage.get(key), bool)
             }
         return response
 
@@ -1023,10 +1009,19 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
         response_meta: dict[str, Any] = {}
         capturing_chat = _capturing_judge_chat(api_key, args.timeout, response_meta)
 
-        print(
-            f"judge live run {run_index + 1}/{args.runs}: "
-            f"fixture={fixture.name}, model={model}"
-        )
+        print(f"judge live run {run_index + 1}/{args.runs}: fixture={fixture.name}, model={model}")
+        base_record: dict[str, Any] = {
+            "schema_version": JUDGE_RUN_SCHEMA_VERSION,
+            "kind": "judge-benchmark-run",
+            "fixture": fixture.name,
+            "fixture_sha256": fixture.sha256,
+            "prompt_sha256": prompt_sha256,
+            "model": model,
+            "run": run_index,
+            "started_at": started_at,
+            "harness_version": __version__,
+            "production_default_judge": DEFAULT_JUDGE_MODEL,
+        }
         try:
             issues, mode, cost = run_llm_judge(
                 model=model,
@@ -1037,19 +1032,10 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
                 provider_data_collection="deny",
                 provider_zdr=True,
             )
-            record: dict[str, Any] = {
-                "schema_version": JUDGE_RUN_SCHEMA_VERSION,
-                "kind": "judge-benchmark-run",
+            record = {
+                **base_record,
                 "ok": True,
-                "fixture": fixture.name,
-                "fixture_sha256": fixture.sha256,
-                "prompt_sha256": prompt_sha256,
-                "model": model,
-                "run": run_index,
-                "started_at": started_at,
-                "elapsed_ms": round((time.monotonic() - started) * 1000),
-                "harness_version": __version__,
-                "production_default_judge": DEFAULT_JUDGE_MODEL,
+                "elapsed_ms": _elapsed_ms(started),
                 "mode": mode,
                 "cost_usd": cost,
                 "routing": "openrouter-zdr-data-collection-deny",
@@ -1064,18 +1050,9 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
             failures += 1
             safe_error = redact(str(exc), extra=[api_key])
             record = {
-                "schema_version": JUDGE_RUN_SCHEMA_VERSION,
-                "kind": "judge-benchmark-run",
+                **base_record,
                 "ok": False,
-                "fixture": fixture.name,
-                "fixture_sha256": fixture.sha256,
-                "prompt_sha256": prompt_sha256,
-                "model": model,
-                "run": run_index,
-                "started_at": started_at,
-                "elapsed_ms": round((time.monotonic() - started) * 1000),
-                "harness_version": __version__,
-                "production_default_judge": DEFAULT_JUDGE_MODEL,
+                "elapsed_ms": _elapsed_ms(started),
                 "error": safe_error,
                 "issues": [],
             }
@@ -1112,9 +1089,7 @@ def _cmd_judge_score(args: argparse.Namespace) -> int:
             continue
         recorded_fixture_sha = payload.get("fixture_sha256")
         if recorded_fixture_sha is not None and recorded_fixture_sha != fixture.sha256:
-            raise ActionError(
-                f"{result_file.name} was produced from a different fixture revision"
-            )
+            raise ActionError(f"{result_file.name} was produced from a different fixture revision")
         issues = payload.get("issues")
         if not isinstance(issues, list) or not all(isinstance(issue, dict) for issue in issues):
             raise ActionError(f"{result_file.name} issues must be an array of objects")
@@ -1128,9 +1103,7 @@ def _cmd_judge_score(args: argparse.Namespace) -> int:
     print("run | model | recall | precision | duplicates | critical | verdict | mode | ms | cost")
     for name, payload, score in rows:
         critical = (
-            _fraction(score.critical_hit, score.critical_total)
-            if score.critical_total
-            else "-"
+            _fraction(score.critical_hit, score.critical_total) if score.critical_total else "-"
         )
         verdict = (
             f"yes ({score.actual_verdict})"
@@ -1176,18 +1149,18 @@ def main(argv: list[str] | None = None) -> int:
 
     run_parser = sub.add_parser("run", help="replay a fixture through the lane (spends tokens)")
     run_parser.add_argument("fixture")
-    run_parser.add_argument("--model", default="x-ai/grok-4.6")
+    run_parser.add_argument("--model", default=DEFAULT_MODEL)
     run_parser.add_argument(
         "--runs", type=int, default=3, help="lanes are nondeterministic; compare means of 3+"
     )
     run_parser.add_argument("--out", required=True)
-    run_parser.add_argument("--max-tool-turns", type=int, default=50)
+    run_parser.add_argument("--max-tool-turns", type=int, default=DEFAULT_MAX_TOOL_TURNS)
     run_parser.add_argument(
         "--effort",
         default="",
         help="reasoning effort; empty matches the action's default (no effort field)",
     )
-    run_parser.add_argument("--timeout", type=int, default=180)
+    run_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     run_parser.add_argument(
         "--lane-timeout",
         type=int,
@@ -1210,8 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
         "--provider-data-collection",
         choices=("allow", "deny"),
         default="deny",
-        help="set OpenRouter's provider.data_collection policy per request "
-        "(default: deny)",
+        help="set OpenRouter's provider.data_collection policy per request (default: deny)",
     )
     run_parser.add_argument(
         "--provider-zdr",
@@ -1241,7 +1213,7 @@ def main(argv: list[str] | None = None) -> int:
         "--runs", type=int, default=3, help="judge calls are nondeterministic; compare 3+"
     )
     judge_run_parser.add_argument("--out", required=True)
-    judge_run_parser.add_argument("--timeout", type=int, default=180)
+    judge_run_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     judge_run_parser.add_argument(
         "--allow-spend",
         action="store_true",

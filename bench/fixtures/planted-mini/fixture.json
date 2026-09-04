@@ -6,6 +6,7 @@
   "base_ref": "main",
   "head_ref": "hsa-2027-cap",
   "custom_instructions": "",
+  "max_diff_kb": 300,
   "diff_file": "diff.patch",
   "checkout_dir": "checkout",
   "labels_file": "labels.json"

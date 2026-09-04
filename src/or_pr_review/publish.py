@@ -148,11 +148,7 @@ def render_review_parts(
                 extra += f", {_fmt_cost(lane.cost_usd)}"
             lane_lines.append(f"- `{lane.model}`: ok ({extra})")
         else:
-            spent = (
-                f" ({_fmt_cost(lane.cost_usd)} spent)"
-                if lane.cost_usd is not None
-                else ""
-            )
+            spent = f" ({_fmt_cost(lane.cost_usd)} spent)" if lane.cost_usd is not None else ""
             recovery = ""
             if lane.thought_signature_recoveries:
                 recovery = (
@@ -252,9 +248,7 @@ def _fmt_cost(value: float, precision: int | None = None) -> str:
     return f"${value:.{precision}f}"
 
 
-def _cost_note(
-    lanes: list[LaneResult], judge_cost: float | None, judge_ran: bool = False
-) -> str:
+def _cost_note(lanes: list[LaneResult], judge_cost: float | None, judge_ran: bool = False) -> str:
     lane_costs = [lane.cost_usd for lane in lanes if lane.cost_usd is not None]
     if not lane_costs and judge_cost is None:
         return ""
@@ -319,9 +313,7 @@ def inline_review_comments(
             continue
         if issue.line not in allowed_lines.get(issue.file, set()):
             continue
-        marker = (
-            f"{finding_marker(issue.id, generation)}\n" if issue.id and generation else ""
-        )
+        marker = f"{finding_marker(issue.id, generation)}\n" if issue.id and generation else ""
         comments.append(
             {
                 "path": issue.file,

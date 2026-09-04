@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import subprocess
 import sys
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +24,8 @@ from or_pr_review.collect import (
     parse_scope,
     resolve_mode,
 )
-from or_pr_review.errors import ActionError, LaneError, SchemaError
-from or_pr_review.github_ops import GitHub, upsert_status_comment
+from or_pr_review.errors import ActionError, SchemaError
+from or_pr_review.github_ops import GitHub, require_full_sha, upsert_status_comment
 from or_pr_review.harness import (
     DEFAULT_LANE_TIMEOUT_SECONDS,
     MAX_RATE_LIMIT_ATTEMPTS,
@@ -35,7 +36,7 @@ from or_pr_review.harness import (
     sanitize_anchors,
 )
 from or_pr_review.judge import (
-    deterministic_union,
+    deterministic_union_with_cap,
     partition_reviewable_lanes,
     run_llm_judge,
 )
@@ -59,6 +60,7 @@ from or_pr_review.models import (
     models_json,
     parse_judge_model,
     parse_models,
+    parse_slug,
 )
 from or_pr_review.prompt import (
     build_messages,
@@ -96,15 +98,34 @@ MIN_JUDGE_ATTEMPT_SECONDS = 30
 _JOB_DEADLINE_KEY = "_OR_PR_REVIEW_JOB_DEADLINE_MONOTONIC"
 
 
+@dataclass(frozen=True)
+class JudgeOutcome:
+    """The merge decision and its publication metadata.
+
+    Keeping the diagnostics beside the issues prevents a later caller from
+    re-filtering a different lane set while constructing the final verdict.
+    """
+
+    issues: list[MergedIssue]
+    note: str
+    cost: float | None
+    ran: bool
+    environment_diagnostics: list[tuple[str, str]]
+
+    def __iter__(self):
+        """Compatibility for callers that previously unpacked the 4-tuple."""
+        yield from (self.issues, self.note, self.cost, self.ran)
+
+
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> int:
     global _ACTIVE_ENV
     args = list(sys.argv[1:] if argv is None else argv)
     environ = dict(env) if env is not None else dict(os.environ)
     role = (args[0] if args else environ.get("ROLE") or "all").strip().lower()
-    if role in {"all", "lane", "judge"}:
-        environ[_JOB_DEADLINE_KEY] = str(time.monotonic() + JOB_BUDGET_SECONDS)
     _ACTIVE_ENV = environ
     try:
+        if role in {"all", "lane", "judge"}:
+            environ[_JOB_DEADLINE_KEY] = str(time.monotonic() + _job_budget_seconds(environ))
         if role == "setup":
             return _role_setup(environ)
         if role == "lane":
@@ -123,19 +144,15 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         return 1
     except Exception as exc:  # noqa: BLE001 — unexpected bugs are operational failures
         _error(f"unexpected action error: {redact(str(exc))}")
-        traceback.print_exc()
+        print(redact(traceback.format_exc()), file=sys.stderr)
         return 1
 
 
 def _role_setup(env: dict[str, str]) -> int:
     slugs = _validate_inputs(env)
-    needed = judge_is_needed(slugs)
+    needed = _judge_needed(env, slugs)
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
-    _set_output("models_json", models_json(slugs))
-    _set_output("matrix", matrix_json(slugs))
-    _set_output("lane_count", str(len(slugs)))
-    _set_output("judge_needed", "true" if needed else "false")
-    _set_output("judge_model", judge_model)
+    _write_setup_outputs(slugs, needed, judge_model)
     print(f"parsed {len(slugs)} model lane(s) (cap {LANE_CAP}): {', '.join(slugs)}")
     if needed:
         print(f"judge will run with `{judge_model}`")
@@ -144,14 +161,22 @@ def _role_setup(env: dict[str, str]) -> int:
     return 0
 
 
+def _write_setup_outputs(slugs: list[str], needed: bool, judge_model: str) -> None:
+    _set_output("models_json", models_json(slugs))
+    _set_output("matrix", matrix_json(slugs))
+    _set_output("lane_count", str(len(slugs)))
+    _set_output("judge_needed", "true" if needed else "false")
+    _set_output("judge_model", judge_model)
+
+
 def _role_lane(env: dict[str, str]) -> int:
-    slugs = parse_models(env.get("MODELS"))
+    slugs = _validate_inputs(env)
     index = _int_env(env, "LANE_INDEX", 0)
     if index < 0:
         raise ActionError(f"LANE_INDEX {index} is invalid")
     override = (env.get("LANE_MODEL") or "").strip()
     if override:
-        model = override
+        model = parse_slug(override, what="lane_model")
     elif index < len(slugs):
         model = slugs[index]
     elif len(slugs) == 1:
@@ -174,7 +199,7 @@ def _role_lane(env: dict[str, str]) -> int:
 
 
 def _role_judge(env: dict[str, str]) -> int:
-    expected = parse_models(env.get("MODELS"))
+    expected = _validate_inputs(env)
     directory = Path(env.get("LANE_RESULTS_DIR") or "")
     if not directory.is_dir():
         raise ActionError("LANE_RESULTS_DIR is missing or not a directory")
@@ -184,6 +209,9 @@ def _role_judge(env: dict[str, str]) -> int:
 
 def _validate_inputs(env: dict[str, str]) -> list[str]:
     slugs = parse_models(env.get("MODELS"))
+    _job_budget_seconds(env)
+    _env_flag(env, "JUDGE_NEEDED", judge_is_needed(slugs))
+    _env_flag(env, "STATUS_COMMENTS", True)
     parse_judge_model(env.get("JUDGE_MODEL"))
     parse_scope(env.get("REVIEW_SCOPE") or "full-pr")
     parse_mode(env.get("REVIEW_MODE") or "auto")
@@ -197,6 +225,12 @@ def _validate_inputs(env: dict[str, str]) -> list[str]:
     if max_diff <= 0:
         raise ActionError("max_diff_kb must be a positive integer")
     parse_max_tool_turns(env.get("MAX_TOOL_TURNS"))
+    openrouter_timeout = _int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180)
+    if openrouter_timeout < 1 or openrouter_timeout > 600:
+        raise ActionError("openrouter_timeout_seconds must be an integer from 1 through 600")
+    override = (env.get("LANE_MODEL") or "").strip()
+    if override:
+        parse_slug(override, what="lane_model")
     _bot_login(env)
     custom = env.get("CUSTOM_INSTRUCTIONS") or ""
     if len(custom.encode("utf-8")) > 16_000:
@@ -207,12 +241,8 @@ def _validate_inputs(env: dict[str, str]) -> list[str]:
 
 
 def _judge_needed(env: dict[str, str], slugs: list[str] | None = None) -> bool:
-    flag = (env.get("JUDGE_NEEDED") or "").strip().lower()
-    if flag in {"true", "1", "yes"}:
-        return True
-    if flag in {"false", "0", "no"}:
-        return False
-    return judge_is_needed(slugs if slugs is not None else parse_models(env.get("MODELS")))
+    inferred = judge_is_needed(slugs if slugs is not None else parse_models(env.get("MODELS")))
+    return _env_flag(env, "JUDGE_NEEDED", inferred)
 
 
 def _resolve_issues(
@@ -220,9 +250,11 @@ def _resolve_issues(
     slugs: list[str],
     lanes: list[LaneResult],
     successful: list[LaneResult],
-) -> tuple[list[MergedIssue], str, float | None, bool]:
+) -> JudgeOutcome:
+    lane_payloads = [lane.to_dict() for lane in successful]
     if not successful:
-        return [], "skipped (no successful lanes)", None, False
+        return JudgeOutcome([], "skipped (no successful lanes)", None, False, [])
+    reviewable_payloads, diagnostics = partition_reviewable_lanes(lane_payloads)
     if len(successful) == 1:
         print("judge skipped: one successful lane; posting that lane directly")
         reason = (
@@ -230,44 +262,43 @@ def _resolve_issues(
             if len(lanes) == 1
             else "skipped (one successful review lane; no merge needed)"
         )
-        return (
-            issues_from_single_lane(successful[0]),
-            reason,
-            None,
-            False,
+        return JudgeOutcome(
+            issues_from_single_lane(successful[0]), reason, None, False, diagnostics
         )
     if not _judge_needed(env, slugs):
         # Defensive only: model validation currently makes multiple lanes
         # imply a judge unless the caller explicitly overrides judge_needed.
-        return (
-            deterministic_union([lane.to_dict() for lane in successful]),
-            "skipped by configuration (deterministic union)",
+        issues, note = _capped_union_note(
+            lane_payloads, "skipped by configuration (deterministic union)"
+        )
+        return JudgeOutcome(
+            issues,
+            note,
             None,
             False,
+            diagnostics,
         )
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
-    lane_payloads = [lane.to_dict() for lane in lanes]
-    reviewable_payloads, diagnostics = partition_reviewable_lanes(lane_payloads)
     if diagnostics and not any(lane.get("findings") for lane in reviewable_payloads):
         print("judge skipped: successful lanes contained only review-environment diagnostics")
-        return (
-            [],
-            "skipped (review environment unavailable)",
-            None,
-            False,
+        return JudgeOutcome(
+            [], "skipped (review environment unavailable)", None, False, diagnostics
         )
     judge_timeout = _judge_request_timeout(env)
     if judge_timeout is None:
         print(
-            "judge skipped near the job deadline; using the deterministic "
-            "recall-safe union",
+            "judge skipped near the job deadline; using the deterministic recall-safe union",
             flush=True,
         )
-        return (
-            deterministic_union(lane_payloads),
-            f"`{judge_model}` (deadline fallback: deterministic union)",
+        issues, note = _capped_union_note(
+            lane_payloads, f"`{judge_model}` (deadline fallback: deterministic union)"
+        )
+        return JudgeOutcome(
+            issues,
+            note,
             None,
             False,
+            diagnostics,
         )
     key = require_openrouter_key(env)
     print(
@@ -291,11 +322,15 @@ def _resolve_issues(
             "deterministic recall-safe union",
             flush=True,
         )
-        return (
-            deterministic_union(lane_payloads),
-            f"`{judge_model}` (schema fallback: deterministic union)",
+        issues, note = _capped_union_note(
+            lane_payloads, f"`{judge_model}` (schema fallback: deterministic union)"
+        )
+        return JudgeOutcome(
+            issues,
+            note,
             None,
             False,
+            diagnostics,
         )
     except ActionError as exc:
         # Review lanes are the source of recall; a judge transport failure
@@ -306,45 +341,52 @@ def _resolve_issues(
             "deterministic recall-safe union",
             flush=True,
         )
-        return (
-            deterministic_union(lane_payloads),
-            f"`{judge_model}` (transport fallback: deterministic union)",
+        issues, note = _capped_union_note(
+            lane_payloads, f"`{judge_model}` (transport fallback: deterministic union)"
+        )
+        return JudgeOutcome(
+            issues,
+            note,
             None,
             False,
+            diagnostics,
         )
     # Recall-safety outcomes are visible on the posted review, not only in
     # the job log: readers must be able to tell a clean merge from a
     # repaired or fallback (chattier, exact-dedup union) post.
     if mode == "merged":
-        return issues, f"`{judge_model}`", judge_cost, True
-    return issues, f"`{judge_model}` ({mode}: recall-safe coverage enforced)", judge_cost, True
+        return JudgeOutcome(issues, f"`{judge_model}`", judge_cost, True, diagnostics)
+    return JudgeOutcome(
+        issues,
+        f"`{judge_model}` ({mode}: recall-safe coverage enforced)",
+        judge_cost,
+        True,
+        diagnostics,
+    )
+
+
+def _capped_union_note(lanes: list[dict[str, Any]], note: str) -> tuple[list[MergedIssue], str]:
+    """Use the judge's cap-aware union and disclose any omitted findings."""
+    issues, dropped = deterministic_union_with_cap(lanes)
+    suffix = f" (capped+{dropped})" if dropped else ""
+    return issues, f"{note}{suffix}"
 
 
 def _role_all(env: dict[str, str]) -> int:
     slugs = _validate_inputs(env)
-    needed = judge_is_needed(slugs)
-    _set_output("models_json", models_json(slugs))
-    _set_output("matrix", matrix_json(slugs))
-    _set_output("lane_count", str(len(slugs)))
-    _set_output("judge_needed", "true" if needed else "false")
-    _set_output("judge_model", parse_judge_model(env.get("JUDGE_MODEL")))
+    needed = _judge_needed(env, slugs)
+    _write_setup_outputs(slugs, needed, parse_judge_model(env.get("JUDGE_MODEL")))
     collected, state, agent_replies = _collect_with_loop(env)
     _maybe_status(
         env,
         collected.pr_number,
         f"Reviewing with OpenRouter ({len(slugs)} lane(s): {', '.join(f'`{s}`' for s in slugs)}).",
     )
-    work = (
-        Path(env.get("WORK") or "").resolve()
-        if env.get("WORK")
-        else Path(env.get("RUNNER_TEMP") or "/tmp")
-    )
+    work = _work_dir(env)
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected, state, agent_replies)
     expect_coverage, expected_paths = _coverage_expectations(state, collected)
-    expected_ids = (
-        {finding.id for finding in state.open_prior} if state.mode == "verify" else None
-    )
+    expected_ids = {finding.id for finding in state.open_prior} if state.mode == "verify" else None
     remaining = _remaining_job_seconds(env)
     lane_timeout = DEFAULT_LANE_TIMEOUT_SECONDS
     judge_reserve = 0
@@ -411,14 +453,8 @@ def _role_all(env: dict[str, str]) -> int:
                         lane = future.result()
                     except Exception as exc:  # noqa: BLE001
                         lane = failed_lane(model, redact(str(exc)))
-                    lane.head_sha = collected.head_sha
                     by_index[i] = lane
-                    _persist_lane_artifact(lane_dir, i, lane)
-                    print(
-                        f"lane {i} `{model}` persisted "
-                        f"({'ok' if lane.ok else 'failed-open'})",
-                        flush=True,
-                    )
+                    _persist_and_log_lane(lane_dir, i, model, lane, collected.head_sha)
             except FutureTimeoutError:
                 timed_out = True
                 completed = len(by_index)
@@ -436,25 +472,17 @@ def _role_all(env: dict[str, str]) -> int:
                             "role=all deadline reached before every lane finished; "
                             f"salvaging {completed}/{len(slugs)} completed lane(s)",
                         )
-                    lane.head_sha = collected.head_sha
                     by_index[i] = lane
-                    _persist_lane_artifact(lane_dir, i, lane)
-                    print(
-                        f"lane {i} `{slugs[i]}` persisted "
-                        f"({'ok' if lane.ok else 'failed-open'})",
-                        flush=True,
-                    )
+                    _persist_and_log_lane(lane_dir, i, slugs[i], lane, collected.head_sha)
         finally:
             pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
         lanes = [by_index[i] for i in range(len(slugs))]
     return _finish(env, lanes, collected=collected, loop=state)
 
 
-def _run_one_lane(
-    env: dict[str, str], model: str
-) -> tuple[LaneResult, CollectedReview, LoopState]:
+def _run_one_lane(env: dict[str, str], model: str) -> tuple[LaneResult, CollectedReview, LoopState]:
     collected, state, agent_replies = _collect_with_loop(env)
-    work = Path(env.get("WORK") or env.get("RUNNER_TEMP") or "/tmp")
+    work = _work_dir(env)
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected, state, agent_replies)
     _maybe_status(env, collected.pr_number, f"Lane `{model}` is reviewing via OpenRouter.")
@@ -462,11 +490,7 @@ def _run_one_lane(
     remaining = _remaining_job_seconds(env)
     lane_timeout = DEFAULT_LANE_TIMEOUT_SECONDS
     if remaining is not None:
-        reserve = (
-            0
-            if _judge_needed(env, parse_models(env.get("MODELS")))
-            else POST_RESERVE_SECONDS
-        )
+        reserve = 0 if _judge_needed(env, parse_models(env.get("MODELS"))) else POST_RESERVE_SECONDS
         lane_timeout = max(
             1,
             min(DEFAULT_LANE_TIMEOUT_SECONDS, int(remaining - reserve)),
@@ -480,9 +504,7 @@ def _run_one_lane(
         expect_resolutions=state.mode == "verify",
         expected_paths=expected_paths,
         expected_resolution_ids=(
-            {finding.id for finding in state.open_prior}
-            if state.mode == "verify"
-            else None
+            {finding.id for finding in state.open_prior} if state.mode == "verify" else None
         ),
         lane_timeout=lane_timeout,
     )
@@ -526,8 +548,6 @@ def _invoke_lane(
         )
     except ActionError:
         raise
-    except LaneError as exc:
-        return failed_lane(model, redact(str(exc)))
     except Exception as exc:  # noqa: BLE001
         return failed_lane(model, redact(str(exc)))
 
@@ -661,9 +681,7 @@ def _collect_with_loop(
             agent_replies = render_agent_context(
                 [
                     reply
-                    for reply in github.list_finding_replies(
-                        pr_number, generation=state.generation
-                    )
+                    for reply in github.list_finding_replies(pr_number, generation=state.generation)
                     if reply[0] in carried_ids
                 ],
                 github.list_recent_issue_comments(pr_number),
@@ -699,11 +717,9 @@ def _collect(env: dict[str, str]) -> CollectedReview:
 def _gitattributes_text(env: dict[str, str]) -> str:
     """Best-effort .gitattributes AT THE REVIEWED COMMIT, for triage.
 
-    `git show <head>:.gitattributes` against the workflow checkout's object
+    `git show <head>:.gitattributes` against the reviewed checkout's object
     store pins the read to the reviewed commit and fails soft (empty string,
-    heuristics-only packing) in any checkout that does not contain that
-    commit — e.g. the reusable workflow's judge job, which checks out only
-    this action's repository and must not parse a foreign .gitattributes.
+    heuristics-only packing) when that checkout does not contain the commit.
 
     Trust note: .gitattributes is repository content, so on a PR it is
     contributor-controlled. Honoring linguist-generated is still strictly
@@ -713,11 +729,13 @@ def _gitattributes_text(env: dict[str, str]) -> str:
     (no stub, no coverage, permanent partial). Demotion can never remove a
     file from review.
     """
-    import subprocess
-
     root = _source_root(env)
     head = (env.get("HEAD_SHA") or env.get("EVENT_AFTER") or "").strip()
     if root is None or not head:
+        return ""
+    try:
+        head = require_full_sha(head, "head")
+    except ActionError:
         return ""
     try:
         proc = subprocess.run(
@@ -733,7 +751,7 @@ def _gitattributes_text(env: dict[str, str]) -> str:
 
 
 def _source_root(env: dict[str, str]) -> Path | None:
-    """The workflow's own checkout, for anchor checks only (never tool use)."""
+    """The reviewed repository checkout, if the caller supplied one."""
     raw = (env.get("SOURCE_WORKSPACE") or env.get("GITHUB_WORKSPACE") or "").strip()
     if not raw:
         return None
@@ -741,10 +759,49 @@ def _source_root(env: dict[str, str]) -> Path | None:
     return root if root.is_dir() else None
 
 
+def _work_dir(env: dict[str, str]) -> Path:
+    """The action-owned temporary work directory, consistently resolved."""
+    return Path(env.get("WORK") or env.get("RUNNER_TEMP") or "/tmp").resolve()
+
+
+def _checkout_has_commit(root: Path | None, sha: str) -> bool:
+    """Whether ``root`` is the reviewed checkout represented by ``sha``.
+
+    A directory existing is insufficient in a reusable judge job: that job
+    also has an action checkout.  This deliberately verifies only object
+    availability, not a branch/ref relationship, because lane artifacts are
+    the authority for the reviewed SHA.
+    """
+    if root is None:
+        return False
+    try:
+        checked = require_full_sha(sha, "reviewed")
+    except ActionError:
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "-e", f"{checked}^{{commit}}"],
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        print(
+            "notice: reviewed checkout does not contain the lane commit; "
+            "leaving judge anchors body-only"
+        )
+        return False
+    return True
+
+
 def _prepare_workspace(env: dict[str, str], collected: CollectedReview, work: Path) -> Path | None:
     if parse_max_tool_turns(env.get("MAX_TOOL_TURNS")) == 0:
         return None
-    source = Path(env.get("SOURCE_WORKSPACE") or env.get("GITHUB_WORKSPACE") or ".").resolve()
+    source = _source_root(env)
+    if source is None:
+        raise ActionError("SOURCE_WORKSPACE is missing; cannot materialize the reviewed checkout")
     dest = work / "inert-checkout"
     if dest.exists() and any(dest.iterdir()):
         return dest
@@ -803,17 +860,15 @@ def _finish(
     reviewed_sha = _common_lane_sha(lanes) or collected.head_sha
     successful = [lane for lane in lanes if lane.ok]
     slugs = parse_models(env.get("MODELS"))
-    issues, judge_note, judge_cost, judge_ran = _resolve_issues(env, slugs, lanes, successful)
-    _reviewable_payloads, environment_diagnostics = partition_reviewable_lanes(
-        [lane.to_dict() for lane in successful]
-    )
+    judge_outcome = _resolve_issues(env, slugs, lanes, successful)
+    issues = judge_outcome.issues
     # Judge output bypasses the per-lane anchor gate, so gate the merged
-    # issues too when a checkout of the reviewed head is available (the
-    # judge job checks out the same head ref). MergedIssue duck-types the
+    # issues too when a checkout demonstrably contains the reviewed head.
+    # MergedIssue duck-types the
     # file/line/title fields the gate touches; single-lane issues were
     # already gated in run_lane and pass through unchanged.
     finish_root = _source_root(env)
-    if finish_root is not None:
+    if _checkout_has_commit(finish_root, reviewed_sha):
         issues = sanitize_anchors(issues, finish_root)  # type: ignore[arg-type]
 
     prior_ids = {finding.id for finding in loop.open_prior}
@@ -833,9 +888,10 @@ def _finish(
     notices: list[str] = []
     if stale_notice:
         notices.append(stale_notice)
-    if environment_diagnostics:
+    if judge_outcome.environment_diagnostics:
         affected = ", ".join(
-            f"`{model or 'unknown'}` ({title})" for model, title in environment_diagnostics
+            f"`{model or 'unknown'}` ({title})"
+            for model, title in judge_outcome.environment_diagnostics
         )
         notices.append(
             "One or more lanes reported that the supplied review environment "
@@ -846,9 +902,7 @@ def _finish(
         diff_path_set = set(changed_paths_from_diff(collected.diff))
         for lane in lanes:
             if lane.ok and lane.coverage:
-                for note in coverage_count_mismatches(
-                    lane.findings, lane.coverage, diff_path_set
-                ):
+                for note in coverage_count_mismatches(lane.findings, lane.coverage, diff_path_set):
                     notices.append(f"`{lane.model}`: {note}")
     # Diff-budget triage: stub-only truncation (every changed file embedded
     # or stubbed) does not force partial — only dropped files or a raw byte
@@ -867,7 +921,7 @@ def _finish(
         )
     verdict = decide_verdict(
         issues=issues,
-        truncated=truncation_partial or bool(environment_diagnostics),
+        truncated=truncation_partial or bool(judge_outcome.environment_diagnostics),
         successful_lanes=len(successful),
         fallback=collected.plan.fallback_notice is not None,
         stale=stale_notice is not None,
@@ -879,11 +933,7 @@ def _finish(
     # The generation token scopes inline finding markers to this loop
     # generation; a reset mints a new one so old threads can never pair with
     # new same-numbered findings.
-    generation = (
-        loop.generation
-        if loop.mode == "verify" and loop.generation
-        else _new_generation()
-    )
+    generation = loop.generation if loop.mode == "verify" and loop.generation else _new_generation()
     hidden_marker: str | None = None
     if verdict in {"clean", "issues"}:
         # A partial or error run never publishes authoritative loop state;
@@ -901,9 +951,9 @@ def _finish(
         issues=issues,
         verdict=verdict,
         run_url=env.get("RUN_URL") or "",
-        judge_note=judge_note,
-        judge_cost=judge_cost,
-        judge_ran=judge_ran,
+        judge_note=judge_outcome.note,
+        judge_cost=judge_outcome.cost,
+        judge_ran=judge_outcome.ran,
         reviewed_sha=reviewed_sha,
         extra_notices=notices or None,
         hidden_marker=hidden_marker,
@@ -963,9 +1013,8 @@ def _finish(
     _set_output("judge_model", parse_judge_model(env.get("JUDGE_MODEL")))
 
     if verdict == "error":
-        raise ActionError(
-            "every model lane failed; nothing structured arrived to post"
-        )
+        _error("every model lane failed; nothing structured arrived to post")
+        return 1
 
     fail_on = (env.get("FAIL_ON") or "never").strip().lower()
     if fail_on not in {"never", "bugs", "any"}:
@@ -1049,10 +1098,7 @@ def _write_lane_file(env: dict[str, str], index: int, result: LaneResult) -> Pat
         directory = Path(explicit)
     else:
         directory = Path(env.get("RUNNER_TEMP") or "/tmp") / "or-pr-review-lanes"
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"lane-{index}.json"
-    path.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
-    return path
+    return _persist_lane_artifact(directory, index, result)
 
 
 def _all_role_deadline_seconds(
@@ -1061,10 +1107,20 @@ def _all_role_deadline_seconds(
     """Bound lane collection while preserving the judge/publication window."""
     configured = (env.get("ALL_ROLE_DEADLINE_SECONDS") or "").strip()
     if configured:
-        return max(_int_env(env, "ALL_ROLE_DEADLINE_SECONDS", 1500), 0)
+        deadline = _int_env(env, "ALL_ROLE_DEADLINE_SECONDS", 1500)
+        if deadline < 1:
+            raise ActionError("all_role_deadline_seconds must be a positive integer")
+        return deadline
     if remaining is None:
         return 1500
     return max(int(remaining - max(POST_RESERVE_SECONDS, judge_reserve)), 0)
+
+
+def _job_budget_seconds(env: dict[str, str]) -> int:
+    budget = _int_env(env, "JOB_BUDGET_SECONDS", JOB_BUDGET_SECONDS)
+    if budget < 1:
+        raise ActionError("job_budget_seconds must be a positive integer")
+    return budget
 
 
 def _persist_lane_artifact(directory: Path, index: int, result: LaneResult) -> Path:
@@ -1073,6 +1129,17 @@ def _persist_lane_artifact(directory: Path, index: int, result: LaneResult) -> P
     path = directory / f"lane-{index}.json"
     path.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def _persist_and_log_lane(
+    directory: Path, index: int, model: str, lane: LaneResult, head_sha: str
+) -> None:
+    lane.head_sha = head_sha
+    _persist_lane_artifact(directory, index, lane)
+    print(
+        f"lane {index} `{model}` persisted ({'ok' if lane.ok else 'failed-open'})",
+        flush=True,
+    )
 
 
 def _remaining_job_seconds(env: dict[str, str]) -> float | None:
@@ -1104,7 +1171,13 @@ def _github(env: dict[str, str]) -> GitHub:
     token = (env.get("GITHUB_TOKEN") or env.get("GH_TOKEN") or "").strip()
     repository = (env.get("GITHUB_REPOSITORY") or "").strip()
     timeout = _int_env(env, "GITHUB_TIMEOUT_SECONDS", 120)
-    return GitHub(token=token, repository=repository, timeout=timeout)
+    source = _source_root(env)
+    return GitHub(
+        token=token,
+        repository=repository,
+        timeout=timeout,
+        source_workspace=str(source) if source is not None else None,
+    )
 
 
 def _pr_number(env: dict[str, str]) -> int:
@@ -1130,12 +1203,23 @@ def _int_env(env: dict[str, str], name: str, default: int) -> int:
         raise ActionError(f"{name} must be an integer") from exc
 
 
+def _env_flag(env: dict[str, str], name: str, default: bool) -> bool:
+    """Parse the action's documented yes/no spellings, preserving defaults."""
+    raw = (env.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"true", "1", "yes"}:
+        return True
+    if raw in {"false", "0", "no"}:
+        return False
+    raise ActionError(f"{name.lower()} must be true or false")
+
+
 def _maybe_status(env: dict[str, str], pr_number: int, body: str) -> None:
-    flag = (env.get("STATUS_COMMENTS") or "true").strip().lower()
-    if flag not in {"true", "1", "yes"}:
+    if not _env_flag(env, "STATUS_COMMENTS", True):
         return
     try:
-        upsert_status_comment(_github(env), pr_number=pr_number, body=body, enabled=True)
+        upsert_status_comment(_github(env), pr_number=pr_number, body=body)
     except ActionError as exc:
         print(f"warning: status comment failed: {redact(str(exc))}")
 

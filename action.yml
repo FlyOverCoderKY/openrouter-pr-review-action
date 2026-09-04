@@ -44,6 +44,18 @@ inputs:
     description: "Timeout for each GitHub CLI or fallback local-git operation (1-600 seconds)."
     required: false
     default: "120"
+  job_budget_seconds:
+    description: >-
+      Total action budget in seconds, measured from Python startup. Default
+      1320 leaves time for review publication before a 25-minute job timeout.
+    required: false
+    default: "1320"
+  all_role_deadline_seconds:
+    description: >-
+      Optional wall-clock cap for concurrent lanes in role=all. Empty derives
+      from job_budget_seconds after publication and judge reserves.
+    required: false
+    default: ""
   pr_number:
     description: "PR number to review. Defaults to the PR that triggered the workflow."
     required: false
@@ -61,7 +73,7 @@ inputs:
     required: false
     default: ""
   path_profiles:
-    description: "Caller-owned additive review profiles as a JSON array of {name?, paths: [globs], instructions} — applied only when a changed path matches (path-glob semantics: * and ? stay within a segment, ** crosses); never narrows the review (max 16,000 UTF-8 bytes). TRUSTED workflow configuration only: never interpolate PR content or repository files into this input, and do not include secrets."
+    description: "Caller-owned additive review profiles as a JSON array of {name?, paths: [globs], instructions} — applied only when a changed path matches (path-glob semantics: * and ? stay within a segment, ** crosses); never narrows the review (max 20 profiles and 16,000 UTF-8 bytes). TRUSTED workflow configuration only: never interpolate PR content or repository files into this input, and do not include secrets."
     required: false
     default: ""
   status_comments:
@@ -85,6 +97,7 @@ inputs:
       over-budget diff — demoted files stay stubbed, tool-readable, and
       coverage-accounted, never excluded. TRUSTED workflow configuration
       only: never interpolate PR content or repository files into this input.
+      Maximum 8,000 UTF-8 bytes and 200 globs.
     required: false
     default: ""
   review_scope:
@@ -111,7 +124,7 @@ inputs:
     required: false
     default: "50"
   openrouter_timeout_seconds:
-    description: "Timeout in seconds for each OpenRouter HTTP request."
+    description: "Timeout in seconds for each OpenRouter HTTP request (1-600)."
     required: false
     default: "180"
   lane_index:
@@ -206,6 +219,8 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github_token }}
         GH_TOKEN: ${{ inputs.github_token }}
         GITHUB_TIMEOUT_SECONDS: ${{ inputs.github_timeout_seconds }}
+        JOB_BUDGET_SECONDS: ${{ inputs.job_budget_seconds }}
+        ALL_ROLE_DEADLINE_SECONDS: ${{ inputs.all_role_deadline_seconds }}
         PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
         FAIL_ON: ${{ inputs.fail_on }}
         ROAST_LEVEL: ${{ inputs.roast_level }}

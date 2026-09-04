@@ -157,6 +157,28 @@ def test_unsafe_finding_paths_are_dropped_not_fatal() -> None:
     assert ok.file == "src/app.py"
 
 
+def test_review_paths_are_canonicalized_without_accepting_traversal() -> None:
+    from or_pr_review.schema import normalize_review_path, valid_review_path
+
+    assert normalize_review_path(" src//nested/app.py ") == "src/nested/app.py"
+    assert valid_review_path("src/app.py")
+    assert not valid_review_path("src/../secret.py")
+
+
+def test_lane_artifact_numeric_errors_name_the_bad_field() -> None:
+    with pytest.raises(SchemaError, match="elapsed_ms"):
+        parse_lane_artifact(
+            {
+                "schema_version": 1,
+                "ok": True,
+                "model": "x-ai/grok-4.6",
+                "findings": [],
+                "error": None,
+                "elapsed_ms": "soon",
+            }
+        )
+
+
 def test_coverage_schema_flags() -> None:
     from or_pr_review.schema import findings_json_schema
 
@@ -228,9 +250,7 @@ def test_oversized_coverage_truncates_when_not_required() -> None:
     from or_pr_review.errors import LaneError
     from or_pr_review.schema import MAX_COVERAGE_ENTRIES, parse_lane_payload
 
-    entries = [
-        {"path": f"f{n}.txt", "findings": 0} for n in range(MAX_COVERAGE_ENTRIES + 10)
-    ]
+    entries = [{"path": f"f{n}.txt", "findings": 0} for n in range(MAX_COVERAGE_ENTRIES + 10)]
     text = _json.dumps({"findings": [], "coverage": entries})
     _findings, _resolutions, coverage = parse_lane_payload(text, "m")
     assert len(coverage) == MAX_COVERAGE_ENTRIES  # advisory extras dropped
@@ -313,9 +333,7 @@ def test_resolution_note_keeps_evidence_that_agrees_with_status() -> None:
         '{"id": "r1-1", "status": "fixed", '
         '"note": "Fixed correctly by using the required enum value."}]}'
     )
-    _findings, resolutions, _coverage = parse_lane_payload(
-        text, "m", expect_resolutions=True
-    )
+    _findings, resolutions, _coverage = parse_lane_payload(text, "m", expect_resolutions=True)
     assert resolutions[0].note == "Fixed correctly by using the required enum value."
 
 
@@ -333,9 +351,7 @@ def test_resolution_note_does_not_infer_status_from_leading_evidence_verb() -> N
                 "resolutions": [{"id": "r1-1", "status": status, "note": note}],
             }
         )
-        _findings, resolutions, _coverage = parse_lane_payload(
-            text, "m", expect_resolutions=True
-        )
+        _findings, resolutions, _coverage = parse_lane_payload(text, "m", expect_resolutions=True)
         assert resolutions[0].status == status
         assert resolutions[0].note == note
 
@@ -355,9 +371,7 @@ def test_validate_coverage_and_mismatches() -> None:
 
     assert validate_coverage([("a.py", 1)], {"a.py"}) is None
     assert "does not account" in validate_coverage([("a.py", 1)], {"a.py", "b.py"})
-    assert "not in the embedded diff" in validate_coverage(
-        [("a.py", 1), ("zz.py", 0)], {"a.py"}
-    )
+    assert "not in the embedded diff" in validate_coverage([("a.py", 1), ("zz.py", 0)], {"a.py"})
     findings = [Finding("t", "b", "bug", "a.py", 1, "m")]
     notes = coverage_count_mismatches(findings, [("a.py", 3)], {"a.py"})
     assert notes and "claims 3" in notes[0]

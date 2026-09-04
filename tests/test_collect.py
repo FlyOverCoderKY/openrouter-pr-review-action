@@ -5,6 +5,7 @@ import pytest
 from or_pr_review.collect import (
     COMPARE_FAILED_NOTICE,
     MISSING_BEFORE_NOTICE,
+    _cut_at_boundary,
     collect_review,
     fetch_scoped_diff,
     plan_diff,
@@ -116,6 +117,22 @@ def test_truncated_diff_is_partial_and_not_clean() -> None:
     assert truncation.notice is not None
     assert "must not be treated as clean" in truncation.notice
     assert truncation.embedded_bytes <= 1024
+
+
+def test_cut_at_diff_boundary_when_boundary_is_past_midpoint() -> None:
+    data = b"x" * 30 + b"\ndiff --git a/a.py b/a.py\n" + b"y" * 100
+    limit = 60
+    boundary = data[:limit].rfind(b"\ndiff --git ")
+    assert boundary + 1 > limit // 2
+    assert _cut_at_boundary(data, limit) == data[: boundary + 1]
+
+
+def test_normalize_sha_rejects_zero_and_short_values() -> None:
+    from or_pr_review.collect import normalize_sha
+
+    assert normalize_sha("0" * 40) is None
+    assert normalize_sha("abc123") is None
+    assert normalize_sha("ABCDEF1234567") == "abcdef1234567"
 
 
 def test_auto_mode_maps_events() -> None:

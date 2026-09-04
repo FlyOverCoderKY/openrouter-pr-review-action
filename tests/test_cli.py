@@ -48,6 +48,27 @@ def test_setup_one_lane_skips_judge(tmp_path: Path) -> None:
     assert "judge_needed=false" in text
 
 
+def test_setup_honors_explicit_judge_override_once(tmp_path: Path) -> None:
+    env = _base_env(
+        tmp_path,
+        MODELS="x-ai/grok-4.6,anthropic/claude-sonnet-4.6",
+        JUDGE_NEEDED="false",
+    )
+    assert main(["setup"], env) == 0
+    text = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert text.count("judge_needed=") == 1
+    assert "judge_needed=false" in text
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("LANE_MODEL", "not-a-slug"), ("OPENROUTER_TIMEOUT_SECONDS", "0")],
+)
+def test_lane_rejects_invalid_model_and_timeout(tmp_path: Path, name: str, value: str) -> None:
+    env = _base_env(tmp_path, **{name: value})
+    assert main(["lane"], env) == 1
+
+
 def test_setup_default_model(tmp_path: Path) -> None:
     env = _base_env(tmp_path, MODELS="")
     assert main(["setup"], env) == 0
@@ -58,6 +79,48 @@ def test_setup_default_max_tool_turns_is_fifty(tmp_path: Path) -> None:
     env = _base_env(tmp_path)
     env.pop("MAX_TOOL_TURNS", None)
     assert main(["setup"], env) == 0
+
+
+@pytest.mark.parametrize("value", ["abc", "0"])
+def test_invalid_job_budget_is_reported_as_an_action_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    env = _base_env(tmp_path, JOB_BUDGET_SECONDS=value)
+    assert main(["lane"], env) == 1
+    captured = capsys.readouterr()
+    assert "job_budget_seconds" in captured.err.lower()
+    assert "Traceback" not in captured.err
+
+
+def test_anchor_checkout_requires_the_reviewed_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reusable judge must not anchor findings against its action checkout."""
+    from or_pr_review import cli as cli_mod
+
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 1
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> Result:
+        calls.append(cmd)
+        return Result()
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    assert not cli_mod._checkout_has_commit(tmp_path, "a" * 40)
+    assert calls[0][-2:] == ["-e", f"{'a' * 40}^{{commit}}"]
+
+
+def test_capped_union_note_is_visible_to_review_readers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "deterministic_union_with_cap", lambda _lanes: ([], 3))
+    issues, note = cli_mod._capped_union_note([], "deadline fallback")
+    assert issues == []
+    assert note == "deadline fallback (capped+3)"
 
 
 def test_setup_rejects_out_of_range_max_tool_turns(tmp_path: Path) -> None:
@@ -253,12 +316,15 @@ def test_diagnostic_only_lane_posts_visible_partial_review(
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
     )
-    assert cli_mod._finish(
-        env,
-        [lane],
-        collected=collected,
-        loop=LoopState(mode="initial", round_number=1),
-    ) == 0
+    assert (
+        cli_mod._finish(
+            env,
+            [lane],
+            collected=collected,
+            loop=LoopState(mode="initial", round_number=1),
+        )
+        == 0
+    )
     assert "**Verdict:** `partial`" in posted[0]
     assert "review environment" in posted[0]
     assert "must not be treated as a clean pass" in posted[0]
@@ -296,16 +362,20 @@ def test_two_lanes_require_judge_and_attribution(
     def _judge(**kwargs: object) -> list[MergedIssue]:
         judge_calls["n"] += 1
         assert kwargs["model"] == "google/gemini-3.1-flash-lite"
-        return [
-            MergedIssue(
-                title="Missing auth check",
-                body="Unauthenticated POST",
-                severity="bug",
-                file="src/api.py",
-                line=42,
-                models=["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"],
-            )
-        ], "merged", 0.0021
+        return (
+            [
+                MergedIssue(
+                    title="Missing auth check",
+                    body="Unauthenticated POST",
+                    severity="bug",
+                    file="src/api.py",
+                    line=42,
+                    models=["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"],
+                )
+            ],
+            "merged",
+            0.0021,
+        )
 
     monkeypatch.setattr(cli_mod, "_collect", lambda env: collected)
     monkeypatch.setattr(cli_mod, "_github", lambda env: DummyGitHub())
@@ -381,9 +451,7 @@ def test_two_lanes_judge_schema_mismatch_uses_validated_union(
     posted: list[str] = []
 
     class DummyGitHub:
-        def create_review(
-            self, number: int, body: str, commit_id: str
-        ) -> dict[str, object]:
+        def create_review(self, number: int, body: str, commit_id: str) -> dict[str, object]:
             posted.append(body)
             return {"html_url": "https://example.test/review"}
 
@@ -831,8 +899,7 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
         + cli_mod.MAX_RATE_LIMIT_ATTEMPTS * cli_mod.MIN_JUDGE_ATTEMPT_SECONDS
     )
     assert all(
-        timeout <= cli_mod.JOB_BUDGET_SECONDS - expected_reserve
-        for timeout in lane_timeouts
+        timeout <= cli_mod.JOB_BUDGET_SECONDS - expected_reserve for timeout in lane_timeouts
     )
 
 
@@ -1294,9 +1361,7 @@ def test_verify_round_carries_unfixed_finding(
                 "findings": [],
                 "error": None,
                 "head_sha": "a" * 40,
-                "resolutions": [
-                    {"id": "r1-1", "status": "not_fixed", "note": "still reachable"}
-                ],
+                "resolutions": [{"id": "r1-1", "status": "not_fixed", "note": "still reachable"}],
             }
         ),
         encoding="utf-8",
@@ -1553,17 +1618,29 @@ def test_force_push_resets_to_full_pr_initial(
     def fake_collect(env: dict[str, str]) -> CollectedReview:
         collected_calls.append(dict(env))
         if env.get("REVIEW_MODE") == "verify":
-            plan = DiffPlan(
-                "latest-commit", "single-commit", None, "a" * 40, DIVERGED_NOTICE
-            )
+            plan = DiffPlan("latest-commit", "single-commit", None, "a" * 40, DIVERGED_NOTICE)
             return CollectedReview(
-                1, "t", "", "a" * 40, "main", "feat",
-                plan, Truncation("diff", False, 4, 4, 300), "verify",
+                1,
+                "t",
+                "",
+                "a" * 40,
+                "main",
+                "feat",
+                plan,
+                Truncation("diff", False, 4, 4, 300),
+                "verify",
             )
         plan = DiffPlan("full-pr", "full-pr", None, "a" * 40, None)
         return CollectedReview(
-            1, "t", "", "a" * 40, "main", "feat",
-            plan, Truncation("diff", False, 4, 4, 300), "initial",
+            1,
+            "t",
+            "",
+            "a" * 40,
+            "main",
+            "feat",
+            plan,
+            Truncation("diff", False, 4, 4, 300),
+            "initial",
         )
 
     monkeypatch.setattr(cli_mod, "_collect", fake_collect)
@@ -1605,12 +1682,17 @@ def test_transient_compare_failure_does_not_reset_the_loop(
 
     def fake_collect(env: dict[str, str]) -> CollectedReview:
         collect_count["n"] += 1
-        plan = DiffPlan(
-            "latest-commit", "single-commit", None, "a" * 40, COMPARE_FAILED_NOTICE
-        )
+        plan = DiffPlan("latest-commit", "single-commit", None, "a" * 40, COMPARE_FAILED_NOTICE)
         return CollectedReview(
-            1, "t", "", "a" * 40, "main", "feat",
-            plan, Truncation("diff", False, 4, 4, 300), "verify",
+            1,
+            "t",
+            "",
+            "a" * 40,
+            "main",
+            "feat",
+            plan,
+            Truncation("diff", False, 4, 4, 300),
+            "verify",
         )
 
     monkeypatch.setattr(cli_mod, "_collect", fake_collect)
@@ -1640,11 +1722,14 @@ def test_coverage_enforcement_skips_when_diff_exceeds_manifest_cap() -> None:
     from or_pr_review.loop import LoopState
     from or_pr_review.schema import MAX_COVERAGE_ENTRIES
 
-    diff = "".join(
-        f"diff --git a/f{n}.txt b/f{n}.txt\n" for n in range(MAX_COVERAGE_ENTRIES + 1)
-    )
+    diff = "".join(f"diff --git a/f{n}.txt b/f{n}.txt\n" for n in range(MAX_COVERAGE_ENTRIES + 1))
     collected = CollectedReview(
-        1, "t", "", "a" * 40, "main", "feat",
+        1,
+        "t",
+        "",
+        "a" * 40,
+        "main",
+        "feat",
         DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
         Truncation(diff, False, len(diff), len(diff), 300),
         "initial",
@@ -1655,7 +1740,12 @@ def test_coverage_enforcement_skips_when_diff_exceeds_manifest_cap() -> None:
     assert expected_paths is None
     # A normal-sized diff keeps enforcement on.
     small = CollectedReview(
-        1, "t", "", "a" * 40, "main", "feat",
+        1,
+        "t",
+        "",
+        "a" * 40,
+        "main",
+        "feat",
         DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
         Truncation("diff --git a/x.py b/x.py\n", False, 4, 4, 300),
         "initial",
@@ -1787,9 +1877,19 @@ def test_gitattributes_text_reads_the_reviewed_commit(tmp_path: Path) -> None:
 
     def git(*args: str) -> None:
         subprocess.run(
-            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=T",
-             "-c", "commit.gpgsign=false", *args],
-            cwd=repo, check=True, capture_output=True,
+            [
+                "git",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "user.name=T",
+                "-c",
+                "commit.gpgsign=false",
+                *args,
+            ],
+            cwd=repo,
+            check=True,
+            capture_output=True,
         )
 
     git("init", "-q", "-b", "main")

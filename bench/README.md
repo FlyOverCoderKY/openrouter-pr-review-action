@@ -49,6 +49,9 @@ adjudication verdict that fired or `UNADJUDICATED` for triage.
 
 ## Label format
 
+Completed `run-N.json` files contain finding bodies and file paths. For real-PR
+fixtures, keep `--out` outside this repository as well as the fixture itself.
+
 A label matches a finding when the finding cites the label's `file` (or the
 label has no file) and any `keywords` regex matches the finding's title+body,
 case-insensitively. Pick keyword fragments a correct finding could not avoid
@@ -98,9 +101,10 @@ python bench/capture.py --repo RetireGolden/RetireGolden --pr 331 \
 ```
 
 Capture pins metadata, diff, and checkout to one PR head (it aborts if the
-PR advances mid-capture — just re-run), records `max_diff_kb` (default 600,
-the org value) so the replay embeds the same truncated diff production
-would, and refuses `--out` under committed `bench/fixtures/` unless
+PR advances mid-capture — just re-run), records `max_diff_kb` (default 300,
+matching the action; pass the deployed repository override when applicable)
+so the replay embeds the same truncated diff production would, and refuses
+`--out` under committed `bench/fixtures/` unless
 `--allow-committed` is passed.
 
 Then curate `labels.json` from the PR's adjudicated findings (every

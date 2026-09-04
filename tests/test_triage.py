@@ -11,11 +11,14 @@ from or_pr_review.publish import decide_verdict
 from or_pr_review.triage import (
     REASON_GENERATED,
     REASON_OVER_BUDGET,
+    accounted_path,
+    accounted_paths_from_diff,
     build_stub,
     classify_generated,
     parse_generated_globs,
     parse_gitattributes,
     path_glob_regex,
+    paths_from_git_header,
     split_diff,
 )
 
@@ -70,25 +73,19 @@ def test_gitattributes_linguist_rules() -> None:
     assert classify_generated("docs/site/index.html", attr_rules=rules)
     assert classify_generated("src/data/big.json", attr_rules=rules)
     # Explicit unmark wins over the earlier glob AND over heuristics.
-    assert not classify_generated(
-        "src/data/hand.json", segment_bytes=500_000, attr_rules=rules
-    )
+    assert not classify_generated("src/data/hand.json", segment_bytes=500_000, attr_rules=rules)
     assert not classify_generated("src/main.py", attr_rules=rules)
 
 
 def test_gitattributes_last_match_wins() -> None:
-    rules = parse_gitattributes(
-        "*.json linguist-generated\n*.json -linguist-generated\n"
-    )
+    rules = parse_gitattributes("*.json linguist-generated\n*.json -linguist-generated\n")
     assert not classify_generated("a.json", attr_rules=rules)
 
 
 def test_caller_globs_take_precedence() -> None:
     rules = parse_gitattributes("src/data/hand.json -linguist-generated\n")
     caller = (path_glob_regex("src/data/**"),)
-    assert classify_generated(
-        "src/data/hand.json", attr_rules=rules, caller_regexes=caller
-    )
+    assert classify_generated("src/data/hand.json", attr_rules=rules, caller_regexes=caller)
 
 
 def test_parse_generated_globs_validation() -> None:
@@ -143,6 +140,77 @@ def test_deleted_file_accounts_under_old_path() -> None:
     )
     _, segments = split_diff(diff)  # type: ignore[misc]
     assert segments[0].path == "gone.py"
+
+
+def test_deleted_file_is_never_stubbed_as_tool_readable() -> None:
+    deleted = (
+        "diff --git a/gone.lock b/gone.lock\n"
+        "deleted file mode 100644\n"
+        "--- a/gone.lock\n"
+        "+++ /dev/null\n"
+        "@@ -1,300 +0,0 @@\n"
+        + "".join(f"-removed-{index:03d}-" + "x" * 40 + "\n" for index in range(300))
+    )
+    truncation = pack_diff(deleted, 1)
+    assert "gone.lock" not in truncation.stubbed_files
+    assert truncation.dropped_files == ("gone.lock",)
+    assert truncation.forces_partial
+
+
+def test_renamed_file_accounts_only_under_new_path() -> None:
+    diff = (
+        "diff --git a/old.py b/new.py\n"
+        "similarity index 90%\n"
+        "rename from old.py\n"
+        "rename to new.py\n"
+        "--- a/old.py\n"
+        "+++ b/new.py\n"
+    )
+    _, segments = split_diff(diff)  # type: ignore[misc]
+    assert segments[0].path == "new.py"
+    assert accounted_path("old.py", "new.py") == "new.py"
+    assert accounted_paths_from_diff(diff) == ("new.py",)
+
+
+def test_ambiguous_unquoted_header_uses_file_headers() -> None:
+    # `` b/`` occurs in the old path and in the separator, so the diff --git
+    # line cannot be split safely without consulting ---/+++.
+    header = "diff --git a/old b/file.txt b/new.txt"
+    assert paths_from_git_header(header) is None
+    diff = f"{header}\nsimilarity index 90%\n--- a/old b/file.txt\n+++ b/new.txt\n"
+    parsed = split_diff(diff)
+    assert parsed is not None
+    assert parsed[1][0].old_path == "old b/file.txt"
+    assert parsed[1][0].new_path == "new.txt"
+    assert accounted_paths_from_diff(diff) == ("new.txt",)
+
+
+def test_ambiguous_pure_rename_uses_rename_metadata() -> None:
+    diff = (
+        "diff --git a/old b/file.txt b/new.txt\n"
+        "similarity index 100%\n"
+        "rename from old b/file.txt\n"
+        "rename to new.txt\n"
+    )
+    parsed = split_diff(diff)
+    assert parsed is not None
+    assert parsed[1][0].path == "new.txt"
+    assert accounted_paths_from_diff(diff) == ("new.txt",)
+
+
+def test_binary_and_mode_only_headers_are_accountable() -> None:
+    diff = (
+        "diff --git a/image.bin b/image.bin\n"
+        "new file mode 100644\n"
+        "Binary files /dev/null and b/image.bin differ\n"
+        "diff --git a/script.sh b/script.sh\n"
+        "old mode 100644\n"
+        "new mode 100755\n"
+    )
+    parsed = split_diff(diff)
+    assert parsed is not None
+    assert [segment.path for segment in parsed[1]] == ["image.bin", "script.sh"]
+    assert accounted_paths_from_diff(diff) == ("image.bin", "script.sh")
 
 
 # ------------------------------------------------------------------------ packing
@@ -290,9 +358,7 @@ def test_stub_only_truncation_keeps_verdict_and_notice_says_covered() -> None:
     assert truncation.notice is not None
     assert "still covers every changed file" in truncation.notice
     assert "must not be treated as clean" not in truncation.notice
-    verdict = decide_verdict(
-        issues=[], truncated=truncation.forces_partial, successful_lanes=1
-    )
+    verdict = decide_verdict(issues=[], truncated=truncation.forces_partial, successful_lanes=1)
     assert verdict == "clean"
 
 
@@ -301,9 +367,7 @@ def test_dropped_files_notice_is_partial() -> None:
     truncation = pack_diff(diff, 1)
     assert truncation.notice is not None
     assert "partial" in truncation.notice
-    verdict = decide_verdict(
-        issues=[], truncated=truncation.forces_partial, successful_lanes=1
-    )
+    verdict = decide_verdict(issues=[], truncated=truncation.forces_partial, successful_lanes=1)
     assert verdict == "partial"
 
 

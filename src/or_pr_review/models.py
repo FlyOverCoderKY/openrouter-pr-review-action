@@ -14,9 +14,7 @@ DEFAULT_JUDGE_MODEL = "openai/gpt-5.6-luna"
 
 # OpenRouter slugs look like provider/model or provider/model:variant.
 # Do not invent slugs; callers pass catalogue ids.
-_SLUG_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(:[A-Za-z0-9._-]+)?$"
-)
+_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(:[A-Za-z0-9._-]+)?$")
 
 
 def parse_slug(raw: str, *, what: str) -> str:

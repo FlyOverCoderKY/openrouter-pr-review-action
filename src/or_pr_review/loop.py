@@ -26,12 +26,15 @@ from or_pr_review.merge import MergedIssue, neutralize_mentions
 from or_pr_review.schema import (
     RESOLUTION_STATUSES,
     SEVERITIES,
+    SEVERITY_RANK,
     Resolution,
     valid_review_path,
 )
 
 LEDGER_VERSION = 1
-LEDGER_PREFIX = "<!-- openrouter-review-ledger:v1:"
+# The prefix and decode regex intentionally derive from the version so a
+# ledger format bump cannot leave an old literal marker behind.
+LEDGER_PREFIX = f"<!-- openrouter-review-ledger:v{LEDGER_VERSION}:"
 LEDGER_SUFFIX = " -->"
 MAX_LEDGER_FINDINGS = 200
 MAX_LEDGER_BYTES = 40_000
@@ -46,9 +49,7 @@ MAX_REPLIES_BYTES = 16_000
 
 _FINDING_ID_RE = re.compile(r"^r\d{1,3}-\d{1,3}$")
 _GENERATION_RE = re.compile(r"^[0-9a-f]{0,12}$")
-_LEDGER_RE = re.compile(
-    re.escape(LEDGER_PREFIX) + r"([A-Za-z0-9+/=]+)" + re.escape(LEDGER_SUFFIX)
-)
+_LEDGER_RE = re.compile(re.escape(LEDGER_PREFIX) + r"([A-Za-z0-9+/=]+)" + re.escape(LEDGER_SUFFIX))
 # Markers are generation-scoped: finding ids restart at r1-1 whenever the loop
 # resets, so replies to an old generation's r1-1 must never be attributed to a
 # new finding that reuses the id.
@@ -68,7 +69,6 @@ _STATUS_LABELS = {
     "disputed": "disputed",
     "unaddressed": "unaddressed",
 }
-_SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}
 # From this verify round on, carried nit findings are retired rather than
 # re-adjudicated: round 1 is the exhaustive all-severity sweep, later rounds
 # track the bug/risk backlog to convergence (sibling Grok "severity floor").
@@ -313,14 +313,12 @@ def _overflow_message(open_count: int) -> str:
 def _trim_order(findings: list[LedgerFinding]) -> list[LedgerFinding]:
     def priority(finding: LedgerFinding) -> tuple[int, int]:
         status_rank = 0 if finding.status == "open" else 1
-        return (status_rank, -_SEVERITY_RANK.get(finding.severity, 0))
+        return (status_rank, -SEVERITY_RANK.get(finding.severity, 0))
 
     return sorted(findings, key=priority)
 
 
-def _encode(
-    ledger: Ledger, findings: list[LedgerFinding], *, repo: str, pr_number: int
-) -> str:
+def _encode(ledger: Ledger, findings: list[LedgerFinding], *, repo: str, pr_number: int) -> str:
     payload = {
         "lv": LEDGER_VERSION,
         "repo": repo,

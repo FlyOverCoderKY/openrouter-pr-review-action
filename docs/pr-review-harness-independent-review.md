@@ -1,4 +1,10 @@
-# Independent review of the Grok and OpenRouter PR-review harnesses
+# Historical review of the Grok and OpenRouter PR-review harnesses
+
+> **Historical snapshot (2026-08-25).** This document records the evidence and
+> decisions that led to the v1.2.x hardening work; it is not a current work
+> queue or description of the live organization rulesets. Use the current
+> code, tests, and `CHANGELOG.md` for shipped behavior. Repository and ruleset
+> names below are retained only as historical context.
 
 Original review: 2026-08-25, Codex GPT-5.6 Sol.
 Updated: 2026-08-25 — merged with a second independent review (Claude Fable 5, same prompt, no shared context), reconciliation of the two, Nathan's program decisions, and a live verification of the org merge-gate state.

@@ -14,6 +14,7 @@ from typing import Literal, Protocol
 from or_pr_review.errors import ActionError, DivergedRangeError
 from or_pr_review.triage import (
     AttrRule,
+    accounted_paths_from_diff,
     parse_gitattributes,
     path_glob_regex,
     plan_packing,
@@ -261,17 +262,12 @@ def pack_diff(
     every changed file and only genuine overflow (dropped files) forces a
     partial verdict. Unparseable diffs fall back to the raw byte cut.
     """
-    if max_diff_kb <= 0:
-        raise ActionError("max_diff_kb must be a positive integer")
-    limit = max_diff_kb * 1024
-    data = diff.encode("utf-8")
+    data, limit = _diff_budget(diff, max_diff_kb)
     if len(data) <= limit:
         return truncate_diff(diff, max_diff_kb)
     attr_rules: tuple[AttrRule, ...] = parse_gitattributes(gitattributes_text)
     caller_regexes = tuple(path_glob_regex(glob) for glob in (generated_globs or []))
-    packed = plan_packing(
-        diff, limit, attr_rules=attr_rules, caller_regexes=caller_regexes
-    )
+    packed = plan_packing(diff, limit, attr_rules=attr_rules, caller_regexes=caller_regexes)
     if packed is None:
         return truncate_diff(diff, max_diff_kb)
     return Truncation(
@@ -286,10 +282,7 @@ def pack_diff(
 
 
 def truncate_diff(diff: str, max_diff_kb: int) -> Truncation:
-    if max_diff_kb <= 0:
-        raise ActionError("max_diff_kb must be a positive integer")
-    limit = max_diff_kb * 1024
-    data = diff.encode("utf-8")
+    data, limit = _diff_budget(diff, max_diff_kb)
     if len(data) <= limit:
         return Truncation(
             text=diff,
@@ -321,12 +314,17 @@ def _cut_at_boundary(data: bytes, limit: int) -> bytes:
     return prefix
 
 
+def _diff_budget(diff: str, max_diff_kb: int) -> tuple[bytes, int]:
+    """Encode a diff and validate/resolve its byte budget once."""
+    if max_diff_kb <= 0:
+        raise ActionError("max_diff_kb must be a positive integer")
+    return diff.encode("utf-8"), max_diff_kb * 1024
+
+
 def fetch_scoped_diff(pr_number: int, plan: DiffPlan, source: ReviewSource) -> tuple[str, DiffPlan]:
     """Return (diff, plan). latest-commit never calls pr_diff."""
     if plan.kind == "full-pr":
-        return source.pr_diff(
-            pr_number, base_sha=plan.from_sha, head_sha=plan.to_sha
-        ), plan
+        return source.pr_diff(pr_number, base_sha=plan.from_sha, head_sha=plan.to_sha), plan
 
     if plan.kind == "commit-range":
         if plan.from_sha is None or plan.to_sha is None:
@@ -432,10 +430,7 @@ def collect_review(
 
 
 def _all_changed_paths(diff: str) -> tuple[str, ...]:
-    # Local import: prompt imports CollectedReview from this module.
-    from or_pr_review.prompt import changed_paths_from_diff
-
-    return tuple(changed_paths_from_diff(diff))
+    return accounted_paths_from_diff(diff)
 
 
 def _as_str(value: object) -> str | None:

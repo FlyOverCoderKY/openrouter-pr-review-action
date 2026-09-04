@@ -144,6 +144,80 @@ def test_run_llm_judge_bad_output_fail_closed() -> None:
         )
 
 
+def test_judge_ignores_failed_lane_before_assigning_source_ids() -> None:
+    seen: dict = {}
+
+    def chat(payload: dict) -> dict:
+        seen.update(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"issues":[{"title":"Live","body":"b","severity":"bug",'
+                            '"file":"a.py","line":1,"models":["live"],"sources":["0.0"]}]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    issues, mode, _cost = run_llm_judge(
+        model="google/gemini-3.1-flash-lite",
+        lanes=[
+            {
+                "ok": False,
+                "model": "failed",
+                "findings": [
+                    {"title": "Ignored", "body": "b", "severity": "risk", "file": "b.py", "line": 2}
+                ],
+            },
+            {
+                "ok": True,
+                "model": "live",
+                "findings": [
+                    {"title": "Live", "body": "b", "severity": "bug", "file": "a.py", "line": 1}
+                ],
+            },
+        ],
+        api_key="sk-test",
+        chat=chat,
+    )
+
+    assert mode == "merged"
+    assert [issue.title for issue in issues] == ["Live"]
+    assert '"id": "0.0"' in seen["messages"][1]["content"]
+    assert "Ignored" not in seen["messages"][1]["content"]
+
+
+def test_judge_cap_is_visible_in_mode() -> None:
+    from or_pr_review.schema import MAX_FINDINGS
+
+    findings = [
+        {
+            "title": f"Finding {index}",
+            "body": "distinct finding",
+            "severity": "bug",
+            "file": f"src/{index}.py",
+            "line": 1,
+        }
+        for index in range(MAX_FINDINGS + 1)
+    ]
+
+    def empty_merge(_payload: dict) -> dict:
+        return {"choices": [{"message": {"content": '{"issues":[]}'}}]}
+
+    issues, mode, _cost = run_llm_judge(
+        model="google/gemini-3.1-flash-lite",
+        lanes=[{"model": "m1", "findings": findings}],
+        api_key="sk-test",
+        chat=empty_merge,
+    )
+
+    assert len(issues) == MAX_FINDINGS
+    assert mode == f"repaired(+{MAX_FINDINGS + 1})(capped+1)"
+
+
 def test_coverage_repairs_unaccounted_findings() -> None:
     from or_pr_review.judge import run_llm_judge
 
@@ -323,6 +397,31 @@ def test_judge_contract_is_identity_tracked_union_merge() -> None:
     assert "exactly one output issue" in user
     # Input findings are id-annotated.
     assert '"id": "0.0"' in user
+
+
+def test_lane_supplied_id_cannot_override_judge_source_identity() -> None:
+    from or_pr_review.judge import build_judge_messages
+
+    messages = build_judge_messages(
+        [
+            {
+                "model": "m",
+                "findings": [
+                    {
+                        "id": "attacker-controlled",
+                        "title": "T",
+                        "body": "b",
+                        "severity": "bug",
+                        "file": "a.py",
+                        "line": 1,
+                    }
+                ],
+            }
+        ]
+    )
+    user = messages[1]["content"]
+    assert '"id": "0.0"' in user
+    assert "attacker-controlled" not in user
 
 
 def test_over_broad_merge_is_split_back() -> None:

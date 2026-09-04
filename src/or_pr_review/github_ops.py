@@ -31,6 +31,7 @@ class GitHub:
         timeout: int = 120,
         runner: Any = None,
         git_runner: Any = None,
+        source_workspace: str | None = None,
     ) -> None:
         if not token.strip():
             raise ActionError("github_token is empty")
@@ -43,6 +44,7 @@ class GitHub:
         self.timeout = timeout
         self._runner = runner or _run_gh
         self._git_runner = git_runner or _run_git
+        self.source_workspace = source_workspace
         self.owner, self.repo = repository.split("/", 1)
 
     def _env(self) -> dict[str, str]:
@@ -99,13 +101,13 @@ class GitHub:
         # repository history. Use the range collection already pinned before
         # the API call: resolving live PR metadata again could select a pushed
         # head that the inert checkout does not contain.
-        base = _full_sha(base_sha, "base")
-        head = _full_sha(head_sha, "head")
-        workspace = (
-            os.environ.get("SOURCE_WORKSPACE")
-            or os.environ.get("GITHUB_WORKSPACE")
-            or os.getcwd()
-        )
+        base = require_full_sha(base_sha, "base")
+        head = require_full_sha(head_sha, "head")
+        workspace = self.source_workspace
+        if not workspace:
+            raise ActionError(
+                "local diff fallback requires SOURCE_WORKSPACE to name the reviewed checkout"
+            )
         print(
             "notice: GitHub rejected the PR diff as too large; "
             "falling back to local git diff base...head"
@@ -177,19 +179,14 @@ class GitHub:
         post a review, so bodies from other authors are untrusted and never
         scanned.
         """
-        reviews = self._paginated_list(
-            f"repos/{self.repository}/pulls/{number}/reviews", "reviews"
-        )
+        reviews = self._paginated_list(f"repos/{self.repository}/pulls/{number}/reviews", "reviews")
         return [
             body
             for review in reviews
-            if _comment_login(review) == bot_login
-            and isinstance(body := review.get("body"), str)
+            if _comment_login(review) == bot_login and isinstance(body := review.get("body"), str)
         ]
 
-    def list_finding_replies(
-        self, number: int, *, generation: str
-    ) -> list[tuple[str, str, str]]:
+    def list_finding_replies(self, number: int, *, generation: str) -> list[tuple[str, str, str]]:
         """(finding_id, login, body) for replies to the bot's inline comments.
 
         Only markers from the given loop generation pair: finding ids restart
@@ -221,9 +218,7 @@ class GitHub:
             replies.append((finding_id, _comment_login(comment), body))
         return replies
 
-    def list_recent_issue_comments(
-        self, number: int, limit: int = 30
-    ) -> list[tuple[str, str]]:
+    def list_recent_issue_comments(self, number: int, limit: int = 30) -> list[tuple[str, str]]:
         """(login, body) for the newest PR conversation comments, oldest first."""
         comments = self._paginated_list(
             f"repos/{self.repository}/issues/{number}/comments", "issue comments"
@@ -239,17 +234,9 @@ class GitHub:
         return recent[-limit:]
 
     def list_issue_comments(self, number: int) -> list[dict[str, Any]]:
-        raw = self._gh(
-            "api",
-            f"repos/{self.repository}/issues/{number}/comments?per_page=100",
+        return self._paginated_list(
+            f"repos/{self.repository}/issues/{number}/comments", "issue comments"
         )
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ActionError(f"issue comments JSON failed: {exc}") from exc
-        if not isinstance(parsed, list):
-            return []
-        return [item for item in parsed if isinstance(item, dict)]
 
     def create_issue_comment(self, number: int, body: str) -> dict[str, Any]:
         raw = self._gh(
@@ -292,7 +279,7 @@ class GitHub:
                 stdin=json.dumps(payload),
             )
         except ActionError as exc:
-            if not comments:
+            if not comments or not _is_inline_comment_validation_error(str(exc)):
                 raise
             # Inline placement can fail (for example a line outside the diff
             # hunks); the review body itself must still post — but never
@@ -339,11 +326,19 @@ def _is_pr_diff_too_large(message: str) -> bool:
     )
 
 
-def _full_sha(value: object, label: str) -> str:
+def _is_inline_comment_validation_error(message: str) -> bool:
+    """Whether GitHub rejected inline placement, not the review request itself."""
+    lowered = message.lower()
+    return "422" in lowered and (
+        "line is not part of the diff" in lowered
+        or "validation failed" in lowered
+        or "unprocessable entity" in lowered
+    )
+
+
+def require_full_sha(value: object, label: str) -> str:
     if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
-        raise ActionError(
-            f"PR {label} SHA is missing or invalid; cannot compute the local diff"
-        )
+        raise ActionError(f"PR {label} SHA is missing or invalid; cannot compute the local diff")
     return value.lower()
 
 
@@ -397,10 +392,7 @@ def upsert_status_comment(
     *,
     pr_number: int,
     body: str,
-    enabled: bool,
 ) -> str | None:
-    if not enabled:
-        return None
     text = f"{STATUS_MARKER}\n{body}".rstrip() + "\n"
     for comment in github.list_issue_comments(pr_number):
         existing = comment.get("body")

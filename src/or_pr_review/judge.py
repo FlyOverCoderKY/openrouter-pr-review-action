@@ -31,6 +31,7 @@ from or_pr_review.merge import (
     absorb_merged_issue,
     deduplicate_issues,
     is_environmental_diagnostic,
+    merged_issue_from_finding,
     same_merged_issue,
 )
 from or_pr_review.redaction import redact
@@ -39,14 +40,14 @@ from or_pr_review.schema import (
     MAX_FINDINGS,
     MAX_TITLE,
     SEVERITIES,
+    SEVERITY_RANK,
+    Finding,
     extract_json_object,
-    valid_review_path,
+    normalize_review_path,
 )
 
 # Keep the judge clerical and low-latency. Luna's adoption benchmark used this setting.
 JUDGE_REASONING = {"effort": "minimal"}
-
-_SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}
 
 
 def judge_json_schema() -> dict[str, Any]:
@@ -95,15 +96,22 @@ def _finding_id(lane_index: int, finding_index: int) -> str:
     return f"{lane_index}.{finding_index}"
 
 
-def _annotated_lanes(lanes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    annotated = []
+def _annotated_lanes(
+    lanes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, tuple[dict[str, Any], str]]]:
+    """Assign source ids once and retain the exact id-to-finding mapping."""
+    annotated: list[dict[str, Any]] = []
+    source_map: dict[str, tuple[dict[str, Any], str]] = {}
     for lane_index, lane in enumerate(lanes):
-        findings = []
+        findings: list[dict[str, Any]] = []
+        model = str(lane.get("model") or "")
         for finding_index, finding in enumerate(lane.get("findings") or []):
             if isinstance(finding, dict):
-                findings.append({"id": _finding_id(lane_index, finding_index), **finding})
+                ident = _finding_id(lane_index, finding_index)
+                findings.append({**finding, "id": ident})
+                source_map[ident] = (finding, model)
         annotated.append({"model": lane.get("model"), "findings": findings})
-    return annotated
+    return annotated, source_map
 
 
 def partition_reviewable_lanes(
@@ -118,6 +126,9 @@ def partition_reviewable_lanes(
     reviewable: list[dict[str, Any]] = []
     diagnostics: list[tuple[str, str]] = []
     for lane in lanes:
+        # Failed artifacts are never valid sources for the judge or fallback.
+        if lane.get("ok") is False:
+            continue
         model = str(lane.get("model") or "")
         findings = []
         for finding in lane.get("findings") or []:
@@ -137,7 +148,12 @@ def partition_reviewable_lanes(
 
 def build_judge_messages(lanes: list[dict[str, Any]]) -> list[dict[str, str]]:
     reviewable, _diagnostics = partition_reviewable_lanes(lanes)
-    payload = json.dumps({"lanes": _annotated_lanes(reviewable)}, indent=2)
+    annotated, _source_map = _annotated_lanes(reviewable)
+    return _build_judge_messages(annotated)
+
+
+def _build_judge_messages(annotated_lanes: list[dict[str, Any]]) -> list[dict[str, str]]:
+    payload = json.dumps({"lanes": annotated_lanes}, indent=2)
     return [
         {
             "role": "system",
@@ -250,9 +266,7 @@ def _parse_one_issue(raw: object, *, allowed: set[str]) -> MergedIssue:
     file_value = raw.get("file")
     if file_value is not None and not isinstance(file_value, str):
         raise SchemaError("judge issue file must be a string or null")
-    path = file_value.strip() if isinstance(file_value, str) and file_value.strip() else None
-    if path and not valid_review_path(path):
-        path = None
+    path = normalize_review_path(file_value) if isinstance(file_value, str) else None
     line = raw.get("line")
     if line is None or line == "":
         line_n = None
@@ -270,7 +284,7 @@ def _parse_one_issue(raw: object, *, allowed: set[str]) -> MergedIssue:
     )
 
 
-def _issue_from_finding(finding: dict, lane_model: str) -> MergedIssue | None:
+def _issue_from_finding(finding: dict[str, Any], lane_model: str) -> MergedIssue | None:
     title = str(finding.get("title") or "").strip()
     if not title:
         return None
@@ -278,9 +292,7 @@ def _issue_from_finding(finding: dict, lane_model: str) -> MergedIssue | None:
     if severity not in SEVERITIES:
         severity = "nit"
     file_value = finding.get("file")
-    path = file_value.strip() if isinstance(file_value, str) and file_value.strip() else None
-    if path and not valid_review_path(path):
-        path = None
+    path = normalize_review_path(file_value) if isinstance(file_value, str) else None
     line = finding.get("line")
     line_n = line if isinstance(line, int) and not isinstance(line, bool) and line > 0 else None
     if is_environmental_diagnostic(
@@ -289,21 +301,22 @@ def _issue_from_finding(finding: dict, lane_model: str) -> MergedIssue | None:
         line=line_n,
     ):
         return None
-    return MergedIssue(
+    normalized = Finding(
         title=title[:MAX_TITLE],
         body=str(finding.get("body") or "").strip()[:MAX_BODY],
         severity=severity,
         file=path,
         line=line_n,
-        models=[lane_model] if lane_model else [],
+        model_id=lane_model,
     )
+    return merged_issue_from_finding(normalized)
 
 
 def _severity_sorted(issues: list[MergedIssue]) -> list[MergedIssue]:
-    return sorted(issues, key=lambda i: -_SEVERITY_RANK.get(i.severity, 0))
+    return sorted(issues, key=lambda i: -SEVERITY_RANK.get(i.severity, 0))
 
 
-def _capped(issues: list[MergedIssue], context: str) -> list[MergedIssue]:
+def _capped(issues: list[MergedIssue], context: str) -> tuple[list[MergedIssue], int]:
     """Severity-sorted publishing cap — loud, never silent: the strongest
     findings are kept and the truncation is logged."""
     ordered = _severity_sorted(issues)
@@ -313,10 +326,12 @@ def _capped(issues: list[MergedIssue], context: str) -> list[MergedIssue]:
             f"cap ({MAX_FINDINGS}); keeping the strongest severities and "
             f"dropping {len(ordered) - MAX_FINDINGS}"
         )
-    return ordered[:MAX_FINDINGS]
+    return ordered[:MAX_FINDINGS], max(0, len(ordered) - MAX_FINDINGS)
 
 
-def deterministic_union(lanes: list[dict[str, Any]]) -> list[MergedIssue]:
+def deterministic_union_with_cap(
+    lanes: list[dict[str, Any]],
+) -> tuple[list[MergedIssue], int]:
     """Recall-safe fallback merge: concatenate every lane's findings, merging
     only duplicates whose location, title, and evidence agree. A merged
     duplicate keeps the STRONGEST severity and the longer body, matching the
@@ -324,7 +339,8 @@ def deterministic_union(lanes: list[dict[str, Any]]) -> list[MergedIssue]:
     same-title findings; if the result exceeds the publishing cap, the
     strongest severities are kept."""
     union: list[MergedIssue] = []
-    for lane in lanes:
+    reviewable, _diagnostics = partition_reviewable_lanes(lanes)
+    for lane in reviewable:
         lane_model = str(lane.get("model") or "")
         for finding in lane.get("findings") or []:
             if not isinstance(finding, dict):
@@ -335,6 +351,17 @@ def deterministic_union(lanes: list[dict[str, Any]]) -> list[MergedIssue]:
             union.append(issue)
     merged, _absorbed = deduplicate_issues(union)
     return _capped(merged, "union")
+
+
+def deterministic_union(lanes: list[dict[str, Any]]) -> list[MergedIssue]:
+    """Compatibility wrapper for callers that only consume merged issues."""
+    issues, _dropped = deterministic_union_with_cap(lanes)
+    return issues
+
+
+def _mode_with_cap(mode: str, dropped: int) -> str:
+    """Make any publish cap visible in the judge note, not only job logs."""
+    return f"{mode}(capped+{dropped})" if dropped else mode
 
 
 def _deduplicate_judge_rows(
@@ -365,6 +392,7 @@ def _verify_coverage(
     sources: list[list[str]],
     sources_invalid: bool,
     lanes: list[dict[str, Any]],
+    input_ids: dict[str, tuple[dict[str, Any], str]],
 ) -> tuple[list[MergedIssue], str]:
     """Identity-based recall verification.
 
@@ -374,19 +402,13 @@ def _verify_coverage(
     unknown source ids — replaces the judge output with the deterministic
     union. Returns (issues, mode) where mode is 'merged', 'repaired(+N)',
     or 'union-fallback'."""
-    input_ids: dict[str, tuple[dict, str]] = {}
-    for lane_index, lane in enumerate(lanes):
-        lane_model = str(lane.get("model") or "")
-        for finding_index, finding in enumerate(lane.get("findings") or []):
-            if isinstance(finding, dict):
-                input_ids[_finding_id(lane_index, finding_index)] = (finding, lane_model)
-
     if sources_invalid:
         print(
             "judge coverage: one or more issues had missing/empty sources; "
             "using the deterministic union"
         )
-        return deterministic_union(lanes), "union-fallback"
+        fallback, dropped = deterministic_union_with_cap(lanes)
+        return fallback, _mode_with_cap("union-fallback", dropped)
 
     issues, sources, judge_duplicates = _deduplicate_judge_rows(issues, sources)
 
@@ -400,7 +422,8 @@ def _verify_coverage(
             f"judge coverage: source id(s) {repeated[:5]} were used by multiple "
             "distinct issues; using the deterministic union"
         )
-        return deterministic_union(lanes), "union-fallback"
+        fallback, dropped = deterministic_union_with_cap(lanes)
+        return fallback, _mode_with_cap("union-fallback", dropped)
 
     claimed = {s for issue_sources in sources for s in issue_sources}
     unknown = claimed - set(input_ids)
@@ -409,7 +432,8 @@ def _verify_coverage(
             f"judge coverage: unknown source id(s) {sorted(unknown)[:5]} — "
             "possible fabrication; using the deterministic union"
         )
-        return deterministic_union(lanes), "union-fallback"
+        fallback, dropped = deterministic_union_with_cap(lanes)
+        return fallback, _mode_with_cap("union-fallback", dropped)
 
     # Merge LEGALITY: the contract is same-defect-same-LOCATION, so an issue
     # whose sources span different files or distant lines cannot be a true
@@ -456,13 +480,18 @@ def _verify_coverage(
         mode += f"(+{restored})"
     if duplicate_count:
         mode += f"(deduped+{duplicate_count})"
-    return _capped(kept, "repair"), mode
+    capped, dropped = _capped(kept, "repair")
+    return capped, _mode_with_cap(mode, dropped)
 
 
+# Adjacent reporting anchors for one defect can differ by a few lines (for
+# example, condition and use); a wider window risks joining separate defects.
 _MERGE_LINE_TOLERANCE = 5
 
 
-def _legal_merge(issue_sources: list[str], input_ids: dict[str, tuple[dict, str]]) -> bool:
+def _legal_merge(
+    issue_sources: list[str], input_ids: dict[str, tuple[dict[str, Any], str]]
+) -> bool:
     """True when the merged sources plausibly describe ONE defect at ONE
     location: every source shares the same file, and their line anchors sit
     within a small window (all-null lines are allowed; mixing anchored and
@@ -515,11 +544,12 @@ def run_llm_judge(
     if diagnostics and not any(lane.get("findings") for lane in lanes):
         return [], "skipped-diagnostics", None
 
+    annotated_lanes, input_ids = _annotated_lanes(lanes)
     allowed = [str(lane.get("model")) for lane in lanes if isinstance(lane.get("model"), str)]
     send = chat or (lambda payload: openrouter_chat(api_key, payload, timeout=timeout))
     payload: dict[str, Any] = {
         "model": model,
-        "messages": build_judge_messages(lanes),
+        "messages": _build_judge_messages(annotated_lanes),
         "response_format": {"type": "json_schema", "json_schema": judge_json_schema()},
         "reasoning": dict(JUDGE_REASONING),
         "usage": {"include": True},
@@ -546,7 +576,7 @@ def run_llm_judge(
     if not content.strip():
         raise SchemaError("judge returned an empty assistant message")
     issues, sources, sources_invalid = _parse_with_sources(content, allowed_models=allowed)
-    merged, mode = _verify_coverage(issues, sources, sources_invalid, lanes)
+    merged, mode = _verify_coverage(issues, sources, sources_invalid, lanes, input_ids)
     return merged, mode, _response_cost(response)
 
 

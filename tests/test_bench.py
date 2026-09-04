@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -81,15 +82,21 @@ def test_planted_fixture_loads_and_builds_messages() -> None:
     # Bare-symbol mentions with unrelated semantics must not credit either
     # context label (the Codex P1 vector).
     assert not match_finding(
-        {"file": "report.py", "severity": "nit",
-         "title": "annual_report returns a bare dict",
-         "body": "A typed result object would be clearer than a dict."},
+        {
+            "file": "report.py",
+            "severity": "nit",
+            "title": "annual_report returns a bare dict",
+            "body": "A typed result object would be clearer than a dict.",
+        },
         r6,
     )
     assert not match_finding(
-        {"file": "calc.py", "severity": "nit",
-         "title": "validate_year lacks a docstring",
-         "body": "It raises ValueError for unsupported years but never documents that."},
+        {
+            "file": "calc.py",
+            "severity": "nit",
+            "title": "validate_year lacks a docstring",
+            "body": "It raises ValueError for unsupported years but never documents that.",
+        },
         f1,
     )
     assert match_finding(
@@ -128,9 +135,7 @@ def test_planted_fixture_loads_and_builds_messages() -> None:
 
 
 def test_match_finding_requires_file_and_keyword() -> None:
-    label = Label(
-        id="B1", severity="bug", file="calc.py", title="t", keywords=("KeyError",)
-    )
+    label = Label(id="B1", severity="bug", file="calc.py", title="t", keywords=("KeyError",))
     hit = {"file": "calc.py", "title": "apply_cap raises KeyError", "body": ""}
     wrong_file = {"file": "rules.py", "title": "apply_cap raises KeyError", "body": ""}
     wrong_text = {"file": "calc.py", "title": "something else", "body": "no match"}
@@ -221,12 +226,8 @@ def test_context_strata_and_adjudication_classification() -> None:
     score = score_run(findings, labels, adjudications)
     assert score.recall(labels, context="diff") == (1, 1)
     assert score.recall(labels, context="repo") == (0, 1)
-    assert [(f["title"], aid) for f, aid in score.adjudicated_tp] == [
-        ("Missing docstring", "A1")
-    ]
-    assert [(f["title"], aid) for f, aid in score.adjudicated_fp] == [
-        ("cosmic ray hazard", "A2")
-    ]
+    assert [(f["title"], aid) for f, aid in score.adjudicated_tp] == [("Missing docstring", "A1")]
+    assert [(f["title"], aid) for f, aid in score.adjudicated_fp] == [("cosmic ray hazard", "A2")]
     assert [f["title"] for f in score.unadjudicated] == ["mystery finding"]
     # precision: (1 label match + 1 adjudicated TP) over those plus 1 FP;
     # the unadjudicated finding is a third class, not auto-false.
@@ -262,6 +263,89 @@ def test_clean_twin_fixture_loads_with_zero_labels() -> None:
     )
     assert score.precision() == (0, 0)
     assert len(score.unadjudicated) == 1
+
+
+def test_committed_fixtures_pin_the_production_embed_cap() -> None:
+    from or_pr_review.bench import DEFAULT_MAX_DIFF_KB
+
+    assert load_fixture(FIXTURE_DIR).max_diff_kb == DEFAULT_MAX_DIFF_KB
+    assert (
+        load_fixture(FIXTURE_DIR.parent / "planted-mini-clean").max_diff_kb == DEFAULT_MAX_DIFF_KB
+    )
+
+
+def test_capture_default_matches_production_embed_cap() -> None:
+    from bench.capture import DEFAULT_CAPTURE_MAX_DIFF_KB
+
+    from or_pr_review.bench import DEFAULT_MAX_DIFF_KB
+
+    assert DEFAULT_CAPTURE_MAX_DIFF_KB == DEFAULT_MAX_DIFF_KB
+
+
+def test_bench_run_cli_defaults_follow_production_constants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    seen = {}
+
+    def capture(args: object) -> int:
+        seen.update(vars(args))
+        return 0
+
+    monkeypatch.setattr(bench_mod, "_cmd_run", capture)
+    assert bench_mod.main(["run", "fixture", "--out", "out"]) == 0
+    assert seen["model"] == bench_mod.DEFAULT_MODEL
+    assert seen["max_tool_turns"] == bench_mod.DEFAULT_MAX_TOOL_TURNS
+    assert seen["timeout"] == bench_mod.DEFAULT_TIMEOUT
+
+
+def test_capture_legacy_extraction_validates_members_before_extracting(
+    tmp_path: Path,
+) -> None:
+    from bench.capture import _extract_archive
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    class FakeTar:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple, dict]] = []
+
+        def extractall(self, *args: object, **kwargs: object) -> None:
+            self.calls.append((args, kwargs))
+            if kwargs:
+                raise TypeError("filter is unsupported")
+
+        def getmembers(self) -> list[tarfile.TarInfo]:
+            return [tarfile.TarInfo("safe.txt")]
+
+    tar = FakeTar()
+    _extract_archive(tar, checkout)
+    assert len(tar.calls) == 2
+    assert "filter" in tar.calls[0][1]
+    assert tar.calls[1][1] == {}
+
+
+def test_capture_legacy_extraction_rejects_links(tmp_path: Path) -> None:
+    from bench.capture import _extract_archive
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    class FakeTar:
+        def extractall(self, *args: object, **kwargs: object) -> None:
+            if kwargs:
+                raise TypeError("filter is unsupported")
+
+        def getmembers(self) -> list[tarfile.TarInfo]:
+            link = tarfile.TarInfo("link")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../outside"
+            return [link]
+
+    with pytest.raises(SystemExit, match="links are not allowed"):
+        _extract_archive(FakeTar(), checkout)
 
 
 def _load_generator():
@@ -319,9 +403,7 @@ def test_label_validation_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(ActionError, match="not a valid regex"):
         load_fixture(fixture_dir)
     # context is explicit, never defaulted — a missing or bogus value fails.
-    _write_fixture(
-        fixture_dir, [{"id": "X", "severity": "bug", "keywords": ["ok"]}]
-    )
+    _write_fixture(fixture_dir, [{"id": "X", "severity": "bug", "keywords": ["ok"]}])
     with pytest.raises(ActionError, match="context"):
         load_fixture(fixture_dir)
     _write_fixture(
@@ -640,8 +722,7 @@ def _expected_judge_output(fixture: JudgeFixture) -> list[dict]:
 
 def test_committed_judge_fixtures_cover_ab_abc_and_hygiene_cases() -> None:
     fixtures = {
-        path.stem: load_judge_fixture(path)
-        for path in sorted(JUDGE_FIXTURE_DIR.glob("*.json"))
+        path.stem: load_judge_fixture(path) for path in sorted(JUDGE_FIXTURE_DIR.glob("*.json"))
     }
     assert set(fixtures) == {
         "ab-clean-diagnostics",
@@ -686,12 +767,15 @@ def test_judge_fixtures_exercise_production_hygiene_offline() -> None:
     assert score.recall == 1.0  # fallback preserves the minority issue
     assert score.critical_hit == score.critical_total == 1
     assert score.duplicate_count >= 1  # semantic merging is where the LLM adds value
-    assert sum(
-        issue["title"] == "Missing validation"
-        and issue["file"] == "src/api.py"
-        and issue["line"] == 42
-        for issue in baseline
-    ) == 2
+    assert (
+        sum(
+            issue["title"] == "Missing validation"
+            and issue["file"] == "src/api.py"
+            and issue["line"] == 42
+            for issue in baseline
+        )
+        == 2
+    )
 
 
 def test_judge_scorer_reports_recall_precision_duplicates_and_verdict() -> None:

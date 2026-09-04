@@ -17,6 +17,9 @@ from or_pr_review.errors import LaneError, SchemaError
 
 SCHEMA_VERSION = 1
 SEVERITIES = ("bug", "risk", "nit")
+# Severity order is a review-wide policy: de-duplication, ledger trimming,
+# and capped judge output must all prefer the same findings.
+SEVERITY_RANK = {"bug": 2, "risk": 1, "nit": 0}
 RESOLUTION_STATUSES = ("fixed", "not_fixed", "fixed_incorrectly", "disputed")
 MAX_TITLE = 200
 MAX_BODY = 8_000
@@ -188,15 +191,19 @@ class LaneResult:
             "head_sha": self.head_sha,
             "provider": self.provider,
             "resolutions": [resolution.to_dict() for resolution in self.resolutions],
-            "coverage": [
-                {"path": path, "findings": count} for path, count in self.coverage
-            ],
+            "coverage": [{"path": path, "findings": count} for path, count in self.coverage],
         }
 
 
-def valid_review_path(value: str) -> bool:
+def normalize_review_path(value: str) -> str | None:
     """A safe repository-relative path: no traversal, backslashes, backticks,
-    control characters, or absolute paths. Mirrors the sibling Grok harness."""
+    control characters, or absolute paths.
+
+    Returning one canonical POSIX spelling prevents a lane from making the
+    same reviewed file look like multiple paths (for example ``a//b.py``).
+    This is defense in depth: callers still validate locations against the
+    reviewed diff before publishing an inline comment.
+    """
     path = value.strip()
     if (
         not path
@@ -205,9 +212,17 @@ def valid_review_path(value: str) -> bool:
         or "`" in path
         or any(ord(character) < 32 or ord(character) == 127 for character in path)
     ):
-        return False
+        return None
     parsed = PurePosixPath(path)
-    return not parsed.is_absolute() and all(part not in {"", ".", ".."} for part in parsed.parts)
+    if parsed.is_absolute() or any(part in {"", ".", ".."} for part in parsed.parts):
+        return None
+    normalized = parsed.as_posix()
+    return normalized if normalized and len(normalized) <= MAX_FILE else None
+
+
+def valid_review_path(value: str) -> bool:
+    """Compatibility predicate for callers that only need path validity."""
+    return normalize_review_path(value) is not None
 
 
 def _as_optional_str(value: object) -> str | None:
@@ -247,10 +262,10 @@ def parse_finding(raw: object, model_id: str) -> Finding:
     if not isinstance(severity, str) or severity.strip().lower() not in SEVERITIES:
         raise LaneError(f"finding severity must be one of {', '.join(SEVERITIES)}")
     path = _as_optional_str(raw.get("file") if "file" in raw else raw.get("path"))
-    if path and not valid_review_path(path):
+    if path:
         # Fail-open: keep the finding, drop the unsafe path (traversal,
         # backticks, control characters, absolute or oversized paths).
-        path = None
+        path = normalize_review_path(path)
     return Finding(
         title=title.strip()[:MAX_TITLE],
         body=body.strip()[:MAX_BODY],
@@ -428,9 +443,7 @@ def validate_resolution_note(status: str, note: str) -> str:
     )
 
 
-def validate_coverage(
-    coverage: list[tuple[str, int]], expected_paths: set[str]
-) -> str | None:
+def validate_coverage(coverage: list[tuple[str, int]], expected_paths: set[str]) -> str | None:
     """Reject a manifest that does not account for the embedded diff.
 
     Coverage is required only for files in the embedded diff; findings on
@@ -510,9 +523,7 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         raise SchemaError("lane artifact must be a JSON object")
     version = payload.get("schema_version")
     if version != SCHEMA_VERSION:
-        raise SchemaError(
-            f"lane artifact schema_version must be {SCHEMA_VERSION}, got {version!r}"
-        )
+        raise SchemaError(f"lane artifact schema_version must be {SCHEMA_VERSION}, got {version!r}")
     missing = {"ok", "model", "findings", "error"} - set(payload)
     if missing:
         raise SchemaError(f"lane artifact missing required keys: {sorted(missing)}")
@@ -564,22 +575,26 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         model=model.strip(),
         findings=findings,
         error=error,
-        elapsed_ms=_optional_int(payload.get("elapsed_ms")),
-        prompt_tokens=_optional_int(payload.get("prompt_tokens")),
-        completion_tokens=_optional_int(payload.get("completion_tokens")),
-        cached_tokens=_optional_int(payload.get("cached_tokens")),
-        cost_usd=_optional_float(payload.get("cost_usd")),
-        requests=_optional_int(payload.get("requests")),
-        tool_rounds=_optional_int(payload.get("tool_rounds")),
-        retries=_optional_int(payload.get("retries")),
+        elapsed_ms=_optional_int(payload.get("elapsed_ms"), field="elapsed_ms"),
+        prompt_tokens=_optional_int(payload.get("prompt_tokens"), field="prompt_tokens"),
+        completion_tokens=_optional_int(
+            payload.get("completion_tokens"), field="completion_tokens"
+        ),
+        cached_tokens=_optional_int(payload.get("cached_tokens"), field="cached_tokens"),
+        cost_usd=_optional_float(payload.get("cost_usd"), field="cost_usd"),
+        requests=_optional_int(payload.get("requests"), field="requests"),
+        tool_rounds=_optional_int(payload.get("tool_rounds"), field="tool_rounds"),
+        retries=_optional_int(payload.get("retries"), field="retries"),
         salvaged=salvaged,
         thought_signature_tool_turns=_optional_int(
-            payload.get("thought_signature_tool_turns")
+            payload.get("thought_signature_tool_turns"), field="thought_signature_tool_turns"
         ),
         thought_signature_recoveries=_optional_int(
-            payload.get("thought_signature_recoveries")
+            payload.get("thought_signature_recoveries"), field="thought_signature_recoveries"
         ),
-        sanitized_tool_turns=_optional_int(payload.get("sanitized_tool_turns")),
+        sanitized_tool_turns=_optional_int(
+            payload.get("sanitized_tool_turns"), field="sanitized_tool_turns"
+        ),
         head_sha=head_sha,
         provider=provider,
         resolutions=resolutions,
@@ -587,22 +602,22 @@ def parse_lane_artifact(payload: object) -> LaneResult:
     )
 
 
-def _optional_int(value: object) -> int | None:
+def _optional_int(value: object, *, field: str) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
-        raise SchemaError("numeric lane fields must be integers or null")
+        raise SchemaError(f"lane artifact {field} must be an integer or null")
     return value
 
 
-def _optional_float(value: object) -> float | None:
+def _optional_float(value: object, *, field: str) -> float | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SchemaError("cost_usd must be a number or null")
+        raise SchemaError(f"lane artifact {field} must be a number or null")
     converted = float(value)
     if not math.isfinite(converted) or converted < 0:
-        raise SchemaError("cost_usd must be finite and non-negative")
+        raise SchemaError(f"lane artifact {field} must be finite and non-negative")
     return converted
 
 

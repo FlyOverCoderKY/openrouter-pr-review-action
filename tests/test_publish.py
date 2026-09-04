@@ -148,8 +148,7 @@ def test_part_one_stays_within_cap_with_marker_and_round_report() -> None:
         f"- ⏳ `r1-{n}` unaddressed — **T**: " + "n" * 450 for n in range(1, 31)
     ]
     issues = [
-        MergedIssue(f"Finding number {n}", "x" * 5000, "bug", "a.py", n, ["m"])
-        for n in range(1, 6)
+        MergedIssue(f"Finding number {n}", "x" * 5000, "bug", "a.py", n, ["m"]) for n in range(1, 6)
     ]
     parts = render_review_parts(
         collected=_collected(),
@@ -220,9 +219,7 @@ def test_inline_comments_carry_severity_emoji() -> None:
         models=["x-ai/grok-4.6"],
         id="r1-1",
     )
-    comments = inline_review_comments(
-        [issue], allowed_lines={"db.py": {9}}, generation="abc123"
-    )
+    comments = inline_review_comments([issue], allowed_lines={"db.py": {9}}, generation="abc123")
     assert len(comments) == 1
     assert "\U0001f534 **Race** (`bug`)" in comments[0]["body"]
 
@@ -252,9 +249,7 @@ def _stub_collected() -> CollectedReview:
         base_ref="main",
         head_ref="feat",
         plan=DiffPlan("full-pr", "full-pr", None, "a" * 40, None),
-        truncation=Truncation(
-            "diff", True, 700_000, 500_000, 600, stubbed_files=("big.json",)
-        ),
+        truncation=Truncation("diff", True, 700_000, 500_000, 600, stubbed_files=("big.json",)),
         mode="initial",
     )
 
@@ -291,8 +286,6 @@ def test_dropped_files_truncation_renders_partial_banner() -> None:
         mode="initial",
     )
     assert collected.truncation.forces_partial
-    text = render_review(
-        collected=collected, lanes=[lane], issues=[], verdict="partial"
-    )
+    text = render_review(collected=collected, lanes=[lane], issues=[], verdict="partial")
     assert "partial** review" in text
     assert "must not be treated as clean" in text

@@ -124,6 +124,24 @@ def _unquote_git_path(raw: str) -> str:
 
 def paths_from_git_header(line: str) -> tuple[str, str] | None:
     """(old_path, new_path) from a `diff --git` header, unquoting as needed."""
+    # With two unquoted paths, `` b/`` is both the separator and a legal part
+    # of either path. The regex below would silently bind the last occurrence.
+    # Resolve ordinary/equal-side cases here; split_diff uses ---/+++ metadata
+    # for the remaining ambiguous cases.
+    if line.startswith("diff --git a/") and '"' not in line:
+        remainder = line[len("diff --git a/") :]
+        candidates = [match.start() for match in re.finditer(r" b/", remainder)]
+        if len(candidates) != 1:
+            equal = [
+                (remainder[:position], remainder[position + 3 :])
+                for position in candidates
+                if remainder[:position] == remainder[position + 3 :]
+            ]
+            if len(equal) == 1:
+                return equal[0]
+            return None
+        position = candidates[0]
+        return remainder[:position], remainder[position + 3 :]
     match = _DIFF_GIT_RE.match(line)
     if not match:
         return None
@@ -135,6 +153,35 @@ def paths_from_git_header(line: str) -> tuple[str, str] | None:
     return old, new
 
 
+def accounted_path(old_path: str, new_path: str) -> str:
+    """Return the one repository path used for coverage and path accounting.
+
+    Changes use the new-side path. Deletions have no new-side path and remain
+    accounted under the old path; a rename therefore contributes only its
+    destination, which is present in the reviewed checkout.
+    """
+    if new_path in {"/dev/null", "dev/null"}:
+        return old_path
+    return new_path
+
+
+def accounted_paths_from_diff(diff: str) -> tuple[str, ...]:
+    """Unique changed paths in diff order using the stateful diff parser."""
+    parsed = split_diff(diff)
+    if parsed is None:
+        return ()
+    _preamble, segments = parsed
+    found: list[str] = []
+    seen: set[str] = set()
+    for segment in segments:
+        path = accounted_path(segment.old_path, segment.new_path)
+        if path in {"", "/dev/null", "dev/null"} or path in seen:
+            continue
+        seen.add(path)
+        found.append(path)
+    return tuple(found)
+
+
 def path_glob_regex(pattern: str) -> re.Pattern[str]:
     """GitHub-Actions-style path glob: `*`/`?` never cross `/`, `**` does.
 
@@ -143,6 +190,11 @@ def path_glob_regex(pattern: str) -> re.Pattern[str]:
     semantics for path scoping. `**/` matches zero or more whole segments,
     so `src/**/*.json` covers `src/a.json` as well as `src/deep/a.json`.
     """
+    return re.compile("^" + _glob_core(pattern) + "$")
+
+
+def _glob_core(pattern: str) -> str:
+    """Compile glob metacharacters without choosing regex anchoring."""
     parts: list[str] = []
     index = 0
     while index < len(pattern):
@@ -161,7 +213,7 @@ def path_glob_regex(pattern: str) -> re.Pattern[str]:
         else:
             parts.append(re.escape(pattern[index]))
             index += 1
-    return re.compile("^" + "".join(parts) + "$")
+    return "".join(parts)
 
 
 def parse_generated_globs(raw: str | None) -> list[str] | None:
@@ -176,9 +228,7 @@ def parse_generated_globs(raw: str | None) -> list[str] | None:
     if not text:
         return None
     if len(text.encode("utf-8")) > GENERATED_GLOBS_MAX_BYTES:
-        raise ActionError(
-            f"generated_paths exceeds {GENERATED_GLOBS_MAX_BYTES:,} UTF-8 bytes"
-        )
+        raise ActionError(f"generated_paths exceeds {GENERATED_GLOBS_MAX_BYTES:,} UTF-8 bytes")
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -238,25 +288,7 @@ def parse_gitattributes(text: str) -> tuple[AttrRule, ...]:
 def _gitattributes_regex(pattern: str) -> re.Pattern[str]:
     anchored = pattern.startswith("/")
     body = pattern.lstrip("/")
-    parts: list[str] = []
-    index = 0
-    while index < len(body):
-        if body.startswith("**/", index):
-            parts.append("(?:.*/)?")
-            index += 3
-        elif body.startswith("**", index):
-            parts.append(".*")
-            index += 2
-        elif body[index] == "*":
-            parts.append("[^/]*")
-            index += 1
-        elif body[index] == "?":
-            parts.append("[^/]")
-            index += 1
-        else:
-            parts.append(re.escape(body[index]))
-            index += 1
-    core = "".join(parts)
+    core = _glob_core(body)
     if anchored or "/" in body:
         return re.compile("^" + core + "$")
     # No slash: match the basename at any depth (gitignore semantics).
@@ -280,10 +312,7 @@ def _heuristic_generated(path: str, segment_bytes: int) -> bool:
         return True
     if any(segment in _VENDORED_SEGMENTS for segment in lowered.split("/")[:-1]):
         return True
-    if (
-        basename.endswith(LARGE_SNAPSHOT_SUFFIXES)
-        and segment_bytes > LARGE_SNAPSHOT_DIFF_BYTES
-    ):
+    if basename.endswith(LARGE_SNAPSHOT_SUFFIXES) and segment_bytes > LARGE_SNAPSHOT_DIFF_BYTES:
         return True
     return False
 
@@ -320,9 +349,7 @@ class DiffSegment:
     @property
     def path(self) -> str:
         """The path the review should account the file under."""
-        if self.new_path in {"/dev/null", "dev/null"}:
-            return self.old_path
-        return self.new_path
+        return accounted_path(self.old_path, self.new_path)
 
     @property
     def text(self) -> str:
@@ -331,6 +358,13 @@ class DiffSegment:
     @property
     def byte_len(self) -> int:
         return len(self.text.encode("utf-8"))
+
+    @property
+    def is_deleted(self) -> bool:
+        """Whether the reviewed-head checkout cannot supply this file."""
+        return self.new_path in {"/dev/null", "dev/null"} or any(
+            line == "+++ /dev/null" for line in self.lines
+        )
 
     def counts(self) -> tuple[int, int]:
         adds = dels = 0
@@ -345,6 +379,41 @@ class DiffSegment:
         return [line for line in self.lines if line.startswith("@@")]
 
 
+def _path_from_file_header(line: str, prefix: str) -> str | None:
+    """Extract a path from a unified-diff ---/+++ metadata line."""
+    if not line.startswith(prefix):
+        return None
+    raw = line[len(prefix) :]
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        raw = _unquote_git_path(raw[1:-1])
+    marker = prefix[:3]
+    if raw == "/dev/null":
+        return raw
+    expected = "a/" if marker == "---" else "b/"
+    if raw.startswith(expected):
+        return raw[2:]
+    # Git normally emits the side prefix, but accepting an already-stripped
+    # path makes the fallback tolerant of hand-produced unified diffs.
+    return raw
+
+
+def _path_from_rename_header(line: str, prefix: str) -> str | None:
+    """Extract a path from git's pure-rename metadata lines."""
+    if not line.startswith(prefix):
+        return None
+    raw = line[len(prefix) :]
+    if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+        raw = _unquote_git_path(raw[1:-1])
+    return raw
+
+
+def _ambiguous_unquoted_header(line: str) -> bool:
+    if not line.startswith("diff --git a/") or '"' in line:
+        return False
+    remainder = line[len("diff --git a/") :]
+    return sum(1 for _ in re.finditer(r" b/", remainder)) > 1
+
+
 def split_diff(diff: str) -> tuple[str, list[DiffSegment]] | None:
     """(preamble, per-file segments), or None when no `diff --git` parses."""
     segments: list[DiffSegment] = []
@@ -357,11 +426,35 @@ def split_diff(diff: str) -> tuple[str, list[DiffSegment]] | None:
             current.lines.append(line)
             segments.append(current)
             continue
+        if _ambiguous_unquoted_header(line):
+            # The header itself is ambiguous when a path contains `` b/``.
+            # Keep collecting this segment and resolve it from its ---/+++
+            # lines below, which are unambiguous and authoritative.
+            current = DiffSegment(header_line=line, old_path="", new_path="")
+            current.lines.append(line)
+            segments.append(current)
+            continue
+        if current is not None and not current.old_path:
+            path = _path_from_file_header(line, "--- ")
+            if path is None:
+                path = _path_from_rename_header(line, "rename from ")
+            if path is not None:
+                current.old_path = path
+        if current is not None and not current.new_path:
+            path = _path_from_file_header(line, "+++ ")
+            if path is None:
+                path = _path_from_rename_header(line, "rename to ")
+            if path is not None:
+                current.new_path = path
         if current is None:
             preamble.append(line)
         else:
             current.lines.append(line)
     if not segments:
+        return None
+    if any(not segment.old_path or not segment.new_path for segment in segments):
+        # Without both sides there is no safe way to classify or account this
+        # segment. The collector will use its raw-cut fallback instead.
         return None
     # Drop the one trailing empty element str.split produced from the final
     # newline. Only the LAST segment can carry it — an empty last line on any
@@ -400,7 +493,6 @@ def build_stub(segment: DiffSegment, reason: str) -> str:
 @dataclass(frozen=True)
 class PackedDiff:
     text: str
-    embedded: tuple[str, ...]
     stubbed: tuple[tuple[str, str], ...]  # (path, reason)
     dropped: tuple[str, ...]
 
@@ -442,7 +534,11 @@ def plan_packing(
             caller_regexes=caller_regexes,
         )
         # A stub bigger than the hunks it replaces is pure loss.
-        if generated and stub_bytes[REASON_GENERATED][index] < seg_bytes[index]:
+        if (
+            generated
+            and not segment.is_deleted
+            and stub_bytes[REASON_GENERATED][index] < seg_bytes[index]
+        ):
             stubbed.append(REASON_GENERATED)
         else:
             stubbed.append(None)
@@ -452,15 +548,17 @@ def plan_packing(
         return seg_bytes[index] if reason is None else stub_bytes[reason][index]
 
     def total() -> int:
-        return len(preamble.encode("utf-8")) + sum(
-            _piece(index) for index in range(len(segments))
-        )
+        return len(preamble.encode("utf-8")) + sum(_piece(index) for index in range(len(segments)))
 
     while total() > limit:
         candidates = [
             (seg_bytes[i], i)
             for i in range(len(segments))
-            if stubbed[i] is None and seg_bytes[i] > stub_bytes[REASON_OVER_BUDGET][i]
+            if (
+                stubbed[i] is None
+                and not segments[i].is_deleted
+                and seg_bytes[i] > stub_bytes[REASON_OVER_BUDGET][i]
+            )
         ]
         if not candidates:
             break
@@ -484,7 +582,6 @@ def plan_packing(
                 used += piece
 
     parts: list[str] = [preamble] if preamble else []
-    embedded: list[str] = []
     stub_list: list[tuple[str, str]] = []
     for index, segment in enumerate(segments):
         if not include[index]:
@@ -492,7 +589,6 @@ def plan_packing(
         reason = stubbed[index]
         if reason is None:
             parts.append(segment.text)
-            embedded.append(segment.path)
         else:
             parts.append(build_stub(segment, reason))
             stub_list.append((segment.path, reason))
@@ -506,13 +602,11 @@ def plan_packing(
             # Long paths could blow the byte reserve the drop loop left for
             # this marker; the count alone always fits.
             marker = (
-                f"[{len(dropped)} changed file(s) beyond the embed budget "
-                "were omitted entirely]\n"
+                f"[{len(dropped)} changed file(s) beyond the embed budget were omitted entirely]\n"
             )
         parts.append(marker)
     return PackedDiff(
         text="".join(parts),
-        embedded=tuple(embedded),
         stubbed=tuple(stub_list),
         dropped=tuple(dropped),
     )

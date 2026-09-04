@@ -27,6 +27,7 @@ from or_pr_review.schema import (
     findings_json_schema,
     parse_lane_payload,
     parse_model_findings,
+    valid_review_path,
     validate_coverage,
 )
 from or_pr_review.workspace import READ_ONLY_TOOLS
@@ -94,10 +95,9 @@ MISSING_SIGNATURE_FINALIZE_NOTICE = (
 class OpenRouterHTTPError(LaneError):
     """Terminal OpenRouter HTTP error with aggregate-safe routing metadata."""
 
-    def __init__(self, message: str, *, provider: str | None, zero_cost: bool) -> None:
+    def __init__(self, message: str, *, provider: str | None) -> None:
         super().__init__(message)
         self.provider = provider
-        self.zero_cost = zero_cost
 
 
 # Bound on stub-repair rounds if a model keeps emitting tool calls after the
@@ -175,9 +175,7 @@ def openrouter_chat(
             full_error_body = exc.read().decode("utf-8", errors="replace")
             err_body = full_error_body[:800]
             provider = _provider_from_error_body(full_error_body)
-            max_attempts = (
-                MAX_RATE_LIMIT_ATTEMPTS if exc.code == 429 else MAX_HTTP_ATTEMPTS
-            )
+            max_attempts = MAX_RATE_LIMIT_ATTEMPTS if exc.code == 429 else MAX_HTTP_ATTEMPTS
             if exc.code in RETRYABLE_STATUS and attempt < max_attempts:
                 _count_retry(stats)
                 retry_after = exc.headers.get("Retry-After")
@@ -191,10 +189,8 @@ def openrouter_chat(
                     _sleep_before_retry(delay, sleep=sleep, deadline=deadline)
                 except LaneError as deadline_error:
                     raise OpenRouterHTTPError(
-                        f"{deadline_error}; last OpenRouter HTTP {exc.code}: "
-                        f"{redact(err_body)}",
+                        f"{deadline_error}; last OpenRouter HTTP {exc.code}: {redact(err_body)}",
                         provider=provider,
-                        zero_cost=True,
                     ) from exc
                 continue
             raise OpenRouterHTTPError(
@@ -203,22 +199,17 @@ def openrouter_chat(
                 # OpenRouter's zero-completion insurance makes a terminal
                 # HTTP error response non-billable. Any earlier successful
                 # requests in the lane retain their separately reported cost.
-                zero_cost=True,
             ) from exc
         except TimeoutError as exc:
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
-                _sleep_before_retry(
-                    _retry_delay(attempt, None), sleep=sleep, deadline=deadline
-                )
+                _sleep_before_retry(_retry_delay(attempt, None), sleep=sleep, deadline=deadline)
                 continue
             raise LaneError("OpenRouter request timed out") from exc
         except urllib.error.URLError as exc:
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
-                _sleep_before_retry(
-                    _retry_delay(attempt, None), sleep=sleep, deadline=deadline
-                )
+                _sleep_before_retry(_retry_delay(attempt, None), sleep=sleep, deadline=deadline)
                 continue
             raise LaneError(f"OpenRouter request failed: {redact(str(exc.reason))}") from exc
         except (http.client.HTTPException, OSError) as exc:
@@ -228,9 +219,7 @@ def openrouter_chat(
             # transient as a 502. Common on flaky routes (free tiers).
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
-                _sleep_before_retry(
-                    _retry_delay(attempt, None), sleep=sleep, deadline=deadline
-                )
+                _sleep_before_retry(_retry_delay(attempt, None), sleep=sleep, deadline=deadline)
                 continue
             raise LaneError(
                 f"OpenRouter connection failed mid-response: {redact(str(exc))}"
@@ -259,9 +248,7 @@ def _bounded_request_timeout(timeout: int, deadline: float | None) -> float:
     return min(float(timeout), remaining)
 
 
-def _sleep_before_retry(
-    delay: float, *, sleep: SleepFn, deadline: float | None
-) -> None:
+def _sleep_before_retry(delay: float, *, sleep: SleepFn, deadline: float | None) -> None:
     """Back off only when doing so cannot cross the current request budget."""
     if deadline is not None:
         remaining = deadline - time.monotonic()
@@ -276,9 +263,7 @@ def _retry_delay(attempt: int, retry_after: str | None) -> float:
             return max(0.0, min(float(retry_after), MAX_RETRY_AFTER_SECONDS))
         except ValueError:
             pass
-    return min(
-        BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), MAX_RETRY_AFTER_SECONDS
-    )
+    return min(BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), MAX_RETRY_AFTER_SECONDS)
 
 
 def _stable_rate_limit_jitter(body: bytes, attempt: int) -> float:
@@ -400,13 +385,12 @@ def run_lane(
             if missing:
                 named = ", ".join(missing[:5])
                 raise LaneError(
-                    f"resolutions are incomplete; missing entries for carried "
-                    f"finding(s): {named}"
+                    f"resolutions are incomplete; missing entries for carried finding(s): {named}"
                 )
         return findings, resolutions, coverage
 
     try:
-        content = _run_loop(
+        findings, resolutions, coverage = _run_loop(
             model=model,
             conversation=conversation,
             tools=tools,
@@ -426,9 +410,7 @@ def run_lane(
             ),
             validate_final=_validate,
             deadline=deadline,
-            finalize_reserve_seconds=min(
-                FINAL_RESPONSE_RESERVE_SECONDS, max(1, lane_timeout // 2)
-            ),
+            finalize_reserve_seconds=min(FINAL_RESPONSE_RESERVE_SECONDS, max(1, lane_timeout // 2)),
             set_request_deadline=(
                 None
                 if chat is not None
@@ -436,7 +418,6 @@ def run_lane(
             ),
             progress=emit_progress,
         )
-        findings, resolutions, coverage = _validate(content)
         gate_root = workspace if workspace is not None else anchor_root
         if gate_root is not None:
             findings = sanitize_anchors(findings, gate_root)
@@ -463,9 +444,7 @@ def run_lane(
     return result
 
 
-def _attach_stats(
-    result: LaneResult, stats: dict[str, int], usage: dict[str, int | float]
-) -> None:
+def _attach_stats(result: LaneResult, stats: dict[str, int], usage: dict[str, int | float]) -> None:
     result.requests = stats.get("requests")
     result.tool_rounds = stats.get("tool_rounds")
     result.retries = stats.get("retries")
@@ -499,12 +478,13 @@ def _run_loop(
     provider_data_collection: str | None = None,
     provider_zdr: bool = False,
     response_schema: dict[str, Any] | None = None,
-    validate_final: Callable[[str], object] | None = None,
+    validate_final: Callable[[str], tuple[list[Finding], list[Resolution], list[tuple[str, int]]]]
+    | None = None,
     deadline: float | None = None,
     finalize_reserve_seconds: int = FINAL_RESPONSE_RESERVE_SECONDS,
     set_request_deadline: Callable[[float], None] | None = None,
     progress: Callable[[], None] | None = None,
-) -> str:
+) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
     payload_base: dict[str, Any] = {
         "model": model,
         "response_format": {
@@ -524,9 +504,7 @@ def _run_loop(
     if provider_order or provider_data_collection or provider_zdr:
         provider_policy: dict[str, Any] = {}
         if provider_order:
-            provider_policy.update(
-                {"order": list(provider_order), "allow_fallbacks": False}
-            )
+            provider_policy.update({"order": list(provider_order), "allow_fallbacks": False})
         if provider_data_collection:
             provider_policy["data_collection"] = provider_data_collection
         if provider_zdr:
@@ -553,14 +531,33 @@ def _run_loop(
     signature_finalizing = False
     successful_responses = 0
 
+    def retry_finalization(
+        notice: str,
+        *,
+        error: LaneError | None = None,
+        message: dict[str, Any] | None = None,
+    ) -> bool:
+        """Make the one allowed tool-free structured-finish repair request."""
+        nonlocal finalize_retried, last_error, tools_active, use_schema
+        if finalize_retried:
+            return False
+        finalize_retried = True
+        last_error = error
+        if message is not None:
+            conversation.append(_assistant_record(message, preserve_provider_metadata=gemini_model))
+        # Some provider protocols reject adjacent user entries. Merge notices
+        # so a deadline/failure sequence remains valid for every provider.
+        _append_user_notice(conversation, notice)
+        tools_active = False
+        use_schema = True
+        return True
+
     def sanitize_gemini_history() -> None:
         if not serial_tool_calls:
             return
         sanitized = _sanitize_tool_history_for_finalize(conversation)
         if stats is not None and sanitized:
-            stats["sanitized_tool_turns"] = (
-                stats.get("sanitized_tool_turns", 0) + sanitized
-            )
+            stats["sanitized_tool_turns"] = stats.get("sanitized_tool_turns", 0) + sanitized
 
     try:
         while True:
@@ -591,9 +588,7 @@ def _run_loop(
                     request_limit = now + max(1.0, (deadline - now) / 2)
                 else:
                     request_limit = (
-                        deadline
-                        if not tools_active
-                        else deadline - finalize_reserve_seconds
+                        deadline if not tools_active else deadline - finalize_reserve_seconds
                     )
                 set_request_deadline(request_limit)
             payload = {
@@ -637,11 +632,7 @@ def _run_loop(
                 if isinstance(exc, OpenRouterHTTPError):
                     if exc.provider and meta is not None:
                         meta["provider"] = exc.provider
-                    if (
-                        exc.zero_cost
-                        and successful_responses == 0
-                        and "cost_usd" not in usage
-                    ):
+                    if successful_responses == 0 and "cost_usd" not in usage:
                         usage["cost_usd"] = 0.0
                     if progress is not None:
                         progress()
@@ -725,18 +716,14 @@ def _run_loop(
                     # A transport/provider failure during the first protected
                     # finalize still gets one bounded retry. The request above
                     # reserved time specifically for this path.
-                    finalize_retried = True
-                    last_error = exc
-                    _append_user_notice(
-                        conversation,
+                    retry_finalization(
                         (
                             "The protected finalize request failed. Do not call tools. "
                             "Return the final structured JSON now from the evidence "
                             f"already gathered. Problem: {exc}"
                         ),
+                        error=exc,
                     )
-                    tools_active = False
-                    use_schema = True
                     continue
                 raise
             tool_calls = message.get("tool_calls") or []
@@ -807,13 +794,9 @@ def _run_loop(
                     progress()
                 for call in tool_calls:
                     tool_deadline = (
-                        deadline - finalize_reserve_seconds
-                        if deadline is not None
-                        else None
+                        deadline - finalize_reserve_seconds if deadline is not None else None
                     )
-                    observation = _run_one_tool(
-                        workspace, call, deadline=tool_deadline
-                    )
+                    observation = _run_one_tool(workspace, call, deadline=tool_deadline)
                     conversation.append(observation)
                     text = observation.get("content")
                     if isinstance(text, str):
@@ -842,54 +825,33 @@ def _run_loop(
             if content.strip():
                 try:
                     if validate_final is not None:
-                        validate_final(content)
+                        validated = validate_final(content)
                     else:
-                        parse_model_findings(content, model)
+                        validated = (parse_model_findings(content, model), [], [])
                 except LaneError as exc:
-                    if finalize_retried:
+                    if not retry_finalization(
+                        f"{FINALIZE_RETRY_NOTICE} Problem: {exc}",
+                        error=exc,
+                        message=message,
+                    ):
                         raise
                     # The tool-backed path runs without response_format, so a
                     # malformed natural finish gets exactly one
                     # schema-enforced, tool-free redo before failing open.
-                    finalize_retried = True
-                    last_error = exc
-                    conversation.append(
-                        _assistant_record(message, preserve_provider_metadata=gemini_model)
-                    )
-                    conversation.append(
-                        {
-                            "role": "user",
-                            "content": f"{FINALIZE_RETRY_NOTICE} Problem: {exc}",
-                        }
-                    )
-                    tools_active = False
-                    use_schema = True
                     continue
-                return content
+                return validated
             if last_error:
                 raise last_error
-            if not finalize_retried:
+            if retry_finalization(
+                (f"{FINALIZE_RETRY_NOTICE} Problem: the previous assistant message was empty."),
+                message=message,
+            ):
                 # Some otherwise healthy providers occasionally return an
                 # empty assistant message after several successful tool
                 # rounds. Treat that like a malformed finish: preserve the
                 # gathered evidence and make one bounded, schema-enforced,
                 # tool-free finalization request instead of discarding the
                 # entire review.
-                finalize_retried = True
-                conversation.append(
-                    _assistant_record(message, preserve_provider_metadata=gemini_model)
-                )
-                conversation.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"{FINALIZE_RETRY_NOTICE} Problem: the previous "
-                            "assistant message was empty."
-                        ),
-                    }
-                )
-                tools_active = False
-                use_schema = True
                 continue
             raise LaneError("OpenRouter returned an empty assistant message")
     finally:
@@ -1229,6 +1191,7 @@ def _response_spend(block: dict[str, Any]) -> float | None:
     plus any positive `cost`; otherwise `cost` alone. A BYOK block with no
     upstream figure is an unknown, not a $0 observation.
     """
+
     def _valid(value: object) -> bool:
         return (
             isinstance(value, (int, float))
@@ -1239,9 +1202,7 @@ def _response_spend(block: dict[str, Any]) -> float | None:
 
     cost = block.get("cost")
     details = block.get("cost_details")
-    upstream = (
-        details.get("upstream_inference_cost") if isinstance(details, dict) else None
-    )
+    upstream = details.get("upstream_inference_cost") if isinstance(details, dict) else None
     if block.get("is_byok") is True:
         if not _valid(upstream):
             return None
@@ -1263,7 +1224,7 @@ def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:
     that were actually materialized, counted the way the read-only tools
     number lines. Each adjustment is logged.
     """
-    from dataclasses import replace as _replace
+    from dataclasses import replace
 
     from or_pr_review.workspace import tracked_paths
 
@@ -1273,16 +1234,27 @@ def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:
         if finding.file is None:
             sanitized.append(finding)
             continue
+        # Findings ordinarily pass through parse_finding, but this public
+        # helper also receives programmatically constructed Finding objects.
+        # Never let an invalid path escape the review workspace during the
+        # filesystem checks below.
+        if not valid_review_path(finding.file):
+            _log_redacted_warning(
+                f"anchor gate: invalid review path; finding "
+                f"{finding.title[:60]!r} becomes body-only"
+            )
+            sanitized.append(replace(finding, file=None, line=None))
+            continue
         target = workspace / finding.file
         exists = (
             finding.file in manifest if manifest is not None else target.exists()
         ) or target.exists()
         if not exists:
-            print(
+            _log_redacted_warning(
                 f"anchor gate: `{finding.file}` is not tracked at the reviewed "
                 f"commit; finding {finding.title[:60]!r} becomes body-only"
             )
-            sanitized.append(_replace(finding, file=None, line=None))
+            sanitized.append(replace(finding, file=None, line=None))
             continue
         if finding.line is not None and target.is_file():
             line_count: int | None
@@ -1290,21 +1262,24 @@ def sanitize_anchors(findings: list[Finding], workspace: Path) -> list[Finding]:
                 with target.open("rb") as handle:
                     # Count lines exactly the way read_file/grep number them
                     # (str.splitlines also splits U+2028/NEL/bare \r).
-                    line_count = len(
-                        handle.read().decode("utf-8", errors="replace").splitlines()
-                    )
+                    line_count = len(handle.read().decode("utf-8", errors="replace").splitlines())
             except OSError:
                 line_count = None
             if line_count is not None and finding.line > line_count:
-                print(
+                _log_redacted_warning(
                     f"anchor gate: line {finding.line} is beyond the end of "
                     f"`{finding.file}` ({line_count} line(s)); dropping the line "
                     f"anchor of {finding.title[:60]!r}"
                 )
-                sanitized.append(_replace(finding, line=None))
+                sanitized.append(replace(finding, line=None))
                 continue
         sanitized.append(finding)
     return sanitized
+
+
+def _log_redacted_warning(message: str) -> None:
+    """Emit the few model-derived diagnostics this module needs safely."""
+    print(redact(message), file=sys.stderr, flush=True)
 
 
 def _elapsed_ms(started: float) -> int:

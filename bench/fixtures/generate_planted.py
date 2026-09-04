@@ -85,15 +85,15 @@ RULES = {
     },
 }
 ''',
-    "docs/rules.md": '''# Rule inventory
+    "docs/rules.md": """# Rule inventory
 
 Every id in `rules.RULES` must be listed here, one row per rule.
 
 | id | statement |
 | --- | --- |
 | hsa-cap-2026-modeled | 2026 HSA family contributions are capped at $8,300. |
-''',
-    "tests/test_calc.py": '''from calc import apply_cap, contribution_total
+""",
+    "tests/test_calc.py": """from calc import apply_cap, contribution_total
 
 
 def test_apply_cap_2026() -> None:
@@ -106,7 +106,7 @@ def test_contribution_total_rejects_negative() -> None:
     except ValueError:
         return
     raise AssertionError("negative amount was accepted")
-''',
+""",
 }
 
 HEAD_PLANTED = {
@@ -176,7 +176,9 @@ RULES = {
 }
 ''',
     "docs/rules.md": BASE["docs/rules.md"],
-    "tests/test_calc.py": '''from calc import CAP_2027, apply_cap, average_contribution, contribution_total
+    "tests/test_calc.py": (
+        "from calc import CAP_2027, apply_cap, average_contribution, "
+        """contribution_total
 
 
 def test_apply_cap_2026() -> None:
@@ -198,7 +200,8 @@ def test_contribution_total_rejects_negative() -> None:
     except ValueError:
         return
     raise AssertionError("negative amount was accepted")
-''',
+"""
+    ),
 }
 
 HEAD_CLEAN = {
@@ -279,7 +282,7 @@ RULES = {
     },
 }
 ''',
-    "docs/rules.md": '''# Rule inventory
+    "docs/rules.md": """# Rule inventory
 
 Every id in `rules.RULES` must be listed here, one row per rule.
 
@@ -287,8 +290,8 @@ Every id in `rules.RULES` must be listed here, one row per rule.
 | --- | --- |
 | hsa-cap-2026-modeled | 2026 HSA family contributions are capped at $8,300. |
 | hsa-cap-2027-modeled | 2027 HSA family contributions are capped at $8,550. |
-''',
-    "tests/test_calc.py": '''from calc import apply_cap, average_contribution, contribution_total
+""",
+    "tests/test_calc.py": """from calc import apply_cap, average_contribution, contribution_total
 
 
 def test_apply_cap_2026() -> None:
@@ -325,7 +328,7 @@ def test_contribution_total_rejects_negative() -> None:
     except ValueError:
         return
     raise AssertionError("negative amount was accepted")
-''',
+""",
 }
 
 FIXTURE_HEADS = {
@@ -354,10 +357,14 @@ def git(repo: Path, *args: str) -> str:
         "GIT_EXTERNAL_DIFF": "",
     }
     base_flags = [
-        "-c", "core.autocrlf=false",
-        "-c", "commit.gpgsign=false",
-        "-c", "user.email=bench@example.invalid",
-        "-c", "user.name=Bench",
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "user.email=bench@example.invalid",
+        "-c",
+        "user.name=Bench",
     ]
     result = subprocess.run(
         ["git", *base_flags, *args],

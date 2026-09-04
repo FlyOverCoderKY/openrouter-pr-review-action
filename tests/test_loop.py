@@ -7,6 +7,7 @@ import pytest
 from or_pr_review.errors import ActionError
 from or_pr_review.loop import (
     LEDGER_PREFIX,
+    LEDGER_VERSION,
     Ledger,
     LedgerFinding,
     LoopState,
@@ -48,6 +49,7 @@ def test_ledger_roundtrip_and_binding() -> None:
     ledger = Ledger(round_number=2, findings=(_finding(),), reviewed_sha="a" * 40)
     marker = encode_ledger(ledger, repo=REPO, pr_number=7)
     assert marker.startswith(LEDGER_PREFIX)
+    assert LEDGER_PREFIX == f"<!-- openrouter-review-ledger:v{LEDGER_VERSION}:"
     decoded = extract_ledger(marker, repo=REPO, pr_number=7)
     assert decoded is not None
     assert decoded.round_number == 2
@@ -74,16 +76,18 @@ def test_latest_ledger_newest_marker_is_authoritative() -> None:
 
 def test_decide_loop_state_matrix() -> None:
     ledger = Ledger(round_number=3, findings=(), reviewed_sha="")
-    assert decide_loop_state(
-        review_mode="initial", event_action="synchronize", ledger=ledger
-    ) == ("initial", 1)
+    assert decide_loop_state(review_mode="initial", event_action="synchronize", ledger=ledger) == (
+        "initial",
+        1,
+    )
     assert decide_loop_state(review_mode="auto", event_action="synchronize", ledger=None) == (
         "initial",
         1,
     )
-    assert decide_loop_state(
-        review_mode="auto", event_action="synchronize", ledger=ledger
-    ) == ("verify", 4)
+    assert decide_loop_state(review_mode="auto", event_action="synchronize", ledger=ledger) == (
+        "verify",
+        4,
+    )
     assert decide_loop_state(review_mode="verify", event_action="", ledger=ledger) == (
         "verify",
         4,
@@ -183,9 +187,7 @@ def test_round_report_nits_only_backlog_reports_only_retirement() -> None:
     )
     carried, retired = apply_severity_floor(findings, 2)
     assert carried == ()
-    state = LoopState(
-        mode="verify", round_number=2, prior_findings=carried, retired_prior=retired
-    )
+    state = LoopState(mode="verify", round_number=2, prior_findings=carried, retired_prior=retired)
     outcome = apply_round(state, [], {})
     report = "\n".join(round_report(state, outcome))
     # The retirement line IS the resolution report; the empty-backlog

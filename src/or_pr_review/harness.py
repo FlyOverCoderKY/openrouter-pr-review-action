@@ -35,6 +35,10 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 HTTP_REFERER = "https://github.com/FlyOverCoderKY/openrouter-pr-review-action"
 APP_TITLE = "OpenRouter PR Review Action"
 DEFAULT_TIMEOUT = 180
+# Bound every completion explicitly. OpenRouter otherwise reserves against the
+# provider model's maximum output (currently 65,536 tokens for Gemini 3.8),
+# which can reject an affordable request before inference even starts.
+MAX_RESPONSE_TOKENS = 16_384
 # Keep a lane inside the caller's 25-minute job ceiling.  The protected tail
 # is deliberately long enough for one normal default-timeout request, while
 # the remaining seven minutes cover artifact upload, judging, and publishing.
@@ -498,6 +502,7 @@ def _run_loop(
 ) -> str:
     payload_base: dict[str, Any] = {
         "model": model,
+        "max_tokens": MAX_RESPONSE_TOKENS,
         "response_format": {
             "type": "json_schema",
             "json_schema": response_schema or findings_json_schema(),
@@ -903,9 +908,12 @@ def _looks_like_context_overflow(lowered_error: str) -> bool:
 def _looks_like_gemini_signature_rejection(lowered_error: str) -> bool:
     if "thought_signature" in lowered_error or "thought signature" in lowered_error:
         return True
-    return "invalid_argument" in lowered_error and (
-        "function call" in lowered_error or "tool" in lowered_error
-    )
+    # Google sometimes redacts the field-level detail and returns only a
+    # generic INVALID_ARGUMENT after accepting several tool turns. The caller
+    # invokes this predicate only for Gemini after at least one tool round, so
+    # the safe recovery is the same: preserve observations as attributed text,
+    # remove provider-specific tool protocol, and request one structured finish.
+    return "invalid_argument" in lowered_error or "invalid argument" in lowered_error
 
 
 def _conversation_has_tool_protocol(conversation: list[dict[str, Any]]) -> bool:

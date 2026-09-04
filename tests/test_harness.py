@@ -15,6 +15,7 @@ from or_pr_review.harness import (
     BUDGET_EXHAUSTED_NOTICE,
     DEADLINE_FINALIZE_NOTICE,
     DEFAULT_MAX_TOOL_TURNS,
+    MAX_RESPONSE_TOKENS,
     MAX_TOOL_TURNS,
     MISSING_SIGNATURE_FINALIZE_NOTICE,
     _assistant_record,
@@ -51,6 +52,7 @@ def test_run_lane_captures_provider_and_pins_routing(tmp_path: Path) -> None:
     )
     assert result.ok
     assert result.provider == "Baseten"
+    assert payloads[0]["max_tokens"] == MAX_RESPONSE_TOKENS
     assert payloads[0]["provider"] == {"order": ["baseten"], "allow_fallbacks": False}
     # Round-trips through the lane artifact.
     from or_pr_review.schema import parse_lane_artifact
@@ -764,6 +766,52 @@ def test_gemini_provider_400_after_tools_uses_sanitized_salvage(tmp_path: Path) 
     assert result.ok
     assert result.salvaged is True
     assert result.thought_signature_tool_turns == 1
+    assert result.sanitized_tool_turns == 1
+    assert len(payloads) == 3
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        "OpenRouter HTTP 400: INVALID_ARGUMENT",
+        "OpenRouter HTTP 400: Request contains an invalid argument.",
+    ],
+)
+def test_gemini_generic_invalid_argument_after_tools_uses_sanitized_salvage(
+    tmp_path: Path, provider_error: str
+) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        if len(payloads) == 2:
+            raise LaneError(provider_error)
+        assert "tools" not in payload
+        assert "response_format" in payload
+        assert not any(message.get("tool_calls") for message in payload["messages"])
+        assert not any(message.get("role") == "tool" for message in payload["messages"])
+        assert any(
+            "Tool: read_file\nArguments: {\"path\": \"a.py\"}\nResult:\n"
+            in str(message.get("content", ""))
+            for message in payload["messages"]
+        )
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.thought_signature_tool_turns == 1
+    assert result.thought_signature_recoveries == 1
     assert result.sanitized_tool_turns == 1
     assert len(payloads) == 3
 

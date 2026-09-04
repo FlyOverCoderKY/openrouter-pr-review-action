@@ -38,7 +38,7 @@ DEFAULT_TIMEOUT = 180
 # Bound every completion explicitly. OpenRouter otherwise reserves against the
 # provider model's maximum output (currently 65,536 tokens for Gemini 3.8),
 # which can reject an affordable request before inference even starts.
-MAX_RESPONSE_TOKENS = 16_384
+MAX_GEMINI_RESPONSE_TOKENS = 32_768
 # Keep a lane inside the caller's 25-minute job ceiling.  The protected tail
 # is deliberately long enough for one normal default-timeout request, while
 # the remaining seven minutes cover artifact upload, judging, and publishing.
@@ -183,7 +183,10 @@ def openrouter_chat(
                 retry_after = exc.headers.get("Retry-After")
                 delay = _retry_delay(attempt, retry_after)
                 if exc.code == 429 and retry_after is None:
-                    delay += _stable_rate_limit_jitter(body, attempt)
+                    delay = min(
+                        delay + _stable_rate_limit_jitter(body, attempt),
+                        MAX_RETRY_AFTER_SECONDS,
+                    )
                 try:
                     _sleep_before_retry(delay, sleep=sleep, deadline=deadline)
                 except LaneError as deadline_error:
@@ -273,7 +276,9 @@ def _retry_delay(attempt: int, retry_after: str | None) -> float:
             return max(0.0, min(float(retry_after), MAX_RETRY_AFTER_SECONDS))
         except ValueError:
             pass
-    return BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+    return min(
+        BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), MAX_RETRY_AFTER_SECONDS
+    )
 
 
 def _stable_rate_limit_jitter(body: bytes, attempt: int) -> float:
@@ -502,7 +507,6 @@ def _run_loop(
 ) -> str:
     payload_base: dict[str, Any] = {
         "model": model,
-        "max_tokens": MAX_RESPONSE_TOKENS,
         "response_format": {
             "type": "json_schema",
             "json_schema": response_schema or findings_json_schema(),
@@ -511,6 +515,8 @@ def _run_loop(
         # posted review can report what the run actually spent.
         "usage": {"include": True},
     }
+    if _is_gemini_model(model):
+        payload_base["max_tokens"] = MAX_GEMINI_RESPONSE_TOKENS
     if effort:
         payload_base["reasoning"] = {"effort": effort}
     if provider_data_collection not in {None, "allow", "deny"}:
@@ -542,7 +548,8 @@ def _run_loop(
     finalize_retried = False
     salvage_attempted = False
     deadline_finalizing = False
-    serial_tool_calls = model.startswith("google/gemini-3")
+    gemini_model = _is_gemini_model(model)
+    serial_tool_calls = _requires_strict_gemini_tool_protocol(model)
     signature_finalizing = False
     successful_responses = 0
 
@@ -570,9 +577,7 @@ def _run_loop(
                 salvage_attempted = True
                 if stats is not None:
                     stats["salvaged"] = 1
-                conversation.append(
-                    {"role": "user", "content": DEADLINE_FINALIZE_NOTICE}
-                )
+                _append_user_notice(conversation, DEADLINE_FINALIZE_NOTICE)
                 tools_active = False
                 use_schema = True
 
@@ -664,6 +669,8 @@ def _run_loop(
                     # Strip the protocol blocks once, retain their observations
                     # as attributed plain evidence, and make one no-tools
                     # structured finish rather than replaying poisoned history.
+                    if _looks_like_context_overflow(lowered):
+                        _shrink_tool_history(conversation, keep_last=0)
                     sanitize_gemini_history()
                     signature_finalizing = True
                     salvage_attempted = True
@@ -672,9 +679,7 @@ def _run_loop(
                         stats["thought_signature_recoveries"] = (
                             stats.get("thought_signature_recoveries", 0) + 1
                         )
-                    conversation.append(
-                        {"role": "user", "content": MISSING_SIGNATURE_FINALIZE_NOTICE}
-                    )
+                    _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
                     tools_active = False
                     use_schema = True
                     continue
@@ -691,9 +696,7 @@ def _run_loop(
                     salvage_attempted = True
                     if stats is not None:
                         stats["salvaged"] = 1
-                    conversation.append(
-                        {"role": "user", "content": DEADLINE_FINALIZE_NOTICE}
-                    )
+                    _append_user_notice(conversation, DEADLINE_FINALIZE_NOTICE)
                     tools_active = False
                     use_schema = True
                     continue
@@ -706,16 +709,14 @@ def _run_loop(
                         stats["salvaged"] = 1
                     if _looks_like_context_overflow(lowered):
                         _shrink_tool_history(conversation)
-                    conversation.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "The previous request failed and will not be retried. "
-                                "Do not call tools. Return your findings NOW as the "
-                                'JSON object {"findings": [...]} from the evidence '
-                                "you have already gathered."
-                            ),
-                        }
+                    _append_user_notice(
+                        conversation,
+                        (
+                            "The previous request failed and will not be retried. "
+                            "Do not call tools. Return your findings NOW as the "
+                            'JSON object {"findings": [...]} from the evidence '
+                            "you have already gathered."
+                        ),
                     )
                     tools_active = False
                     use_schema = True
@@ -726,15 +727,13 @@ def _run_loop(
                     # reserved time specifically for this path.
                     finalize_retried = True
                     last_error = exc
-                    conversation.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "The protected finalize request failed. Do not call tools. "
-                                "Return the final structured JSON now from the evidence "
-                                f"already gathered. Problem: {exc}"
-                            ),
-                        }
+                    _append_user_notice(
+                        conversation,
+                        (
+                            "The protected finalize request failed. Do not call tools. "
+                            "Return the final structured JSON now from the evidence "
+                            f"already gathered. Problem: {exc}"
+                        ),
                     )
                     tools_active = False
                     use_schema = True
@@ -759,9 +758,7 @@ def _run_loop(
                         stats["thought_signature_recoveries"] = (
                             stats.get("thought_signature_recoveries", 0) + 1
                         )
-                    conversation.append(
-                        {"role": "user", "content": MISSING_SIGNATURE_FINALIZE_NOTICE}
-                    )
+                    _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
                     use_schema = True
                     continue
                 if serial_tool_calls and not _has_round_trippable_gemini_signature(message):
@@ -778,9 +775,7 @@ def _run_loop(
                             stats.get("thought_signature_recoveries", 0) + 1
                         )
                     sanitize_gemini_history()
-                    conversation.append(
-                        {"role": "user", "content": MISSING_SIGNATURE_FINALIZE_NOTICE}
-                    )
+                    _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
                     tools_active = False
                     use_schema = True
                     continue
@@ -788,7 +783,9 @@ def _run_loop(
                     stats["thought_signature_tool_turns"] = (
                         stats.get("thought_signature_tool_turns", 0) + 1
                     )
-                conversation.append(_assistant_record(message))
+                conversation.append(
+                    _assistant_record(message, preserve_provider_metadata=gemini_model)
+                )
                 if not tools_active or workspace is None:
                     # The model produced tool calls this loop never solicited
                     # (or cannot service). Answer every call with a stub so
@@ -837,7 +834,9 @@ def _run_loop(
                 # Glance-and-clean: one forced blast-radius tool pass.
                 nudged = True
                 force_tool = True
-                conversation.append(_assistant_record(message))
+                conversation.append(
+                    _assistant_record(message, preserve_provider_metadata=gemini_model)
+                )
                 conversation.append({"role": "user", "content": BLAST_RADIUS_NUDGE})
                 continue
             if content.strip():
@@ -847,14 +846,16 @@ def _run_loop(
                     else:
                         parse_model_findings(content, model)
                 except LaneError as exc:
-                    if finalize_retried or signature_finalizing:
+                    if finalize_retried:
                         raise
                     # The tool-backed path runs without response_format, so a
                     # malformed natural finish gets exactly one
                     # schema-enforced, tool-free redo before failing open.
                     finalize_retried = True
                     last_error = exc
-                    conversation.append(_assistant_record(message))
+                    conversation.append(
+                        _assistant_record(message, preserve_provider_metadata=gemini_model)
+                    )
                     conversation.append(
                         {
                             "role": "user",
@@ -875,7 +876,9 @@ def _run_loop(
                 # tool-free finalization request instead of discarding the
                 # entire review.
                 finalize_retried = True
-                conversation.append(_assistant_record(message))
+                conversation.append(
+                    _assistant_record(message, preserve_provider_metadata=gemini_model)
+                )
                 conversation.append(
                     {
                         "role": "user",
@@ -914,6 +917,14 @@ def _looks_like_gemini_signature_rejection(lowered_error: str) -> bool:
     # the safe recovery is the same: preserve observations as attributed text,
     # remove provider-specific tool protocol, and request one structured finish.
     return "invalid_argument" in lowered_error or "invalid argument" in lowered_error
+
+
+def _is_gemini_model(model: str) -> bool:
+    return model.startswith("google/gemini-")
+
+
+def _requires_strict_gemini_tool_protocol(model: str) -> bool:
+    return model.startswith("google/gemini-3")
 
 
 def _conversation_has_tool_protocol(conversation: list[dict[str, Any]]) -> bool:
@@ -974,14 +985,26 @@ def _message_text(message: dict[str, Any]) -> str:
     return ""
 
 
-def _assistant_record(message: dict[str, Any]) -> dict[str, Any]:
+def _assistant_record(
+    message: dict[str, Any], *, preserve_provider_metadata: bool = False
+) -> dict[str, Any]:
     # Provider adapters can attach opaque continuity metadata to an assistant
     # message. Reconstructing only the fields known to this harness drops that
     # metadata (including Gemini thought signatures). Echo the complete
     # message exactly as returned, using a deep copy so later local mutations
     # cannot alter the provider-authenticated object.
-    record = copy.deepcopy(message)
-    record["role"] = "assistant"
+    if preserve_provider_metadata:
+        record = copy.deepcopy(message)
+        record["role"] = "assistant"
+        return record
+
+    record = {"role": "assistant", "content": copy.deepcopy(message.get("content") or "")}
+    if message.get("tool_calls"):
+        record["tool_calls"] = copy.deepcopy(message["tool_calls"])
+    if message.get("reasoning_details"):
+        record["reasoning_details"] = copy.deepcopy(message["reasoning_details"])
+    elif message.get("reasoning"):
+        record["reasoning"] = copy.deepcopy(message["reasoning"])
     return record
 
 
@@ -1064,22 +1087,32 @@ def _sanitize_tool_history_for_finalize(conversation: list[dict[str, Any]]) -> i
                 content = json.dumps(content, sort_keys=True, ensure_ascii=False)
             call_id = str(message.get("tool_call_id") or "unknown")
             name, arguments = call_provenance.get(call_id, ("unknown", "{}"))
-            sanitized.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Previously gathered read-only tool evidence:\n"
-                        f"Tool: {name}\n"
-                        f"Arguments: {arguments}\n"
-                        "Result:\n"
-                        f"{content}"
-                    ),
-                }
+            _append_user_notice(
+                sanitized,
+                (
+                    "Previously gathered read-only tool evidence:\n"
+                    f"Tool: {name}\n"
+                    f"Arguments: {arguments}\n"
+                    "Result:\n"
+                    f"{content}"
+                ),
             )
             continue
         sanitized.append(message)
     conversation[:] = sanitized
     return removed_turns
+
+
+def _append_user_notice(conversation: list[dict[str, Any]], content: str) -> None:
+    """Append user text without creating Gemini-invalid adjacent user turns."""
+    if conversation and conversation[-1].get("role") == "user":
+        previous = _message_text(conversation[-1]).strip()
+        conversation[-1] = {
+            **conversation[-1],
+            "content": f"{previous}\n\n{content}" if previous else content,
+        }
+        return
+    conversation.append({"role": "user", "content": content})
 
 
 def _canonical_tool_arguments(value: object) -> str:

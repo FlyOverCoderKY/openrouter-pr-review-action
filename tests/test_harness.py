@@ -15,7 +15,7 @@ from or_pr_review.harness import (
     BUDGET_EXHAUSTED_NOTICE,
     DEADLINE_FINALIZE_NOTICE,
     DEFAULT_MAX_TOOL_TURNS,
-    MAX_RESPONSE_TOKENS,
+    MAX_GEMINI_RESPONSE_TOKENS,
     MAX_TOOL_TURNS,
     MISSING_SIGNATURE_FINALIZE_NOTICE,
     _assistant_record,
@@ -52,7 +52,7 @@ def test_run_lane_captures_provider_and_pins_routing(tmp_path: Path) -> None:
     )
     assert result.ok
     assert result.provider == "Baseten"
-    assert payloads[0]["max_tokens"] == MAX_RESPONSE_TOKENS
+    assert "max_tokens" not in payloads[0]
     assert payloads[0]["provider"] == {"order": ["baseten"], "allow_fallbacks": False}
     # Round-trips through the lane artifact.
     from or_pr_review.schema import parse_lane_artifact
@@ -90,6 +90,22 @@ def test_run_lane_enforces_explicit_benchmark_data_policy(tmp_path: Path) -> Non
         "data_collection": "deny",
         "zdr": True,
     }
+
+
+def test_gemini_lane_caps_reserved_output_tokens(tmp_path: Path) -> None:
+    payloads: list[dict] = []
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        max_tool_turns=0,
+        chat=lambda payload: payloads.append(payload) or _findings_reply(),
+    )
+
+    assert result.ok
+    assert payloads[0]["max_tokens"] == MAX_GEMINI_RESPONSE_TOKENS
 
 
 @pytest.mark.parametrize(
@@ -608,13 +624,23 @@ def test_assistant_record_preserves_reasoning() -> None:
 
 def test_assistant_record_preserves_complete_provider_message_verbatim() -> None:
     message = _gemini_tool_reply()["choices"][0]["message"]
-    record = _assistant_record(message)
+    record = _assistant_record(message, preserve_provider_metadata=True)
 
     assert record == message
     assert record is not message
     assert record["tool_calls"] is not message["tool_calls"]
     assert record["reasoning_content"] == "provider reasoning alias"
     assert record["provider_metadata"] == {"opaque": "keep-exactly"}
+
+
+def test_assistant_record_drops_unrecognized_metadata_for_other_providers() -> None:
+    message = _gemini_tool_reply()["choices"][0]["message"]
+    record = _assistant_record(message)
+
+    assert "provider_metadata" not in record
+    assert "reasoning_content" not in record
+    assert record["tool_calls"] == message["tool_calls"]
+    assert record["reasoning_details"] == message["reasoning_details"]
 
 
 @pytest.mark.parametrize("call_ids", [("call_1",), ("call_1", "call_2")])
@@ -669,10 +695,16 @@ def test_gemini_missing_signature_finalizes_without_executing_bad_call(
             return _tool_reply()
         assert "tools" not in payload
         assert "response_format" in payload
-        assert payload["messages"][-1] == {
-            "role": "user",
-            "content": MISSING_SIGNATURE_FINALIZE_NOTICE,
-        }
+        assert payload["messages"][-1]["role"] == "user"
+        assert payload["messages"][-1]["content"].endswith(
+            MISSING_SIGNATURE_FINALIZE_NOTICE
+        )
+        assert not any(
+            left.get("role") == right.get("role") == "user"
+            for left, right in zip(
+                payload["messages"], payload["messages"][1:], strict=False
+            )
+        )
         assert not any(message.get("tool_calls") for message in payload["messages"])
         assert not any(message.get("role") == "tool" for message in payload["messages"])
         assert any(
@@ -814,6 +846,74 @@ def test_gemini_generic_invalid_argument_after_tools_uses_sanitized_salvage(
     assert result.thought_signature_recoveries == 1
     assert result.sanitized_tool_turns == 1
     assert len(payloads) == 3
+
+
+def test_gemini_invalid_argument_context_overflow_shrinks_before_salvage(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("x" * 10_000, encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        if len(payloads) == 2:
+            raise LaneError(
+                "OpenRouter HTTP 400: INVALID_ARGUMENT context length exceeded"
+            )
+        messages = payload["messages"]
+        assert any(
+            "observation truncated after a context overflow"
+            in str(message.get("content", ""))
+            for message in messages
+        )
+        assert not any(
+            left.get("role") == right.get("role") == "user"
+            for left, right in zip(messages, messages[1:], strict=False)
+        )
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+
+    assert result.ok
+    assert result.thought_signature_recoveries == 1
+
+
+def test_gemini_signature_salvage_gets_one_json_repair(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        if len(payloads) == 2:
+            raise LaneError("OpenRouter HTTP 400: INVALID_ARGUMENT")
+        if len(payloads) == 3:
+            return {"choices": [{"message": {"content": "not valid JSON"}}]}
+        assert "response_format" in payload
+        assert "tools" not in payload
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.thought_signature_recoveries == 1
+    assert len(payloads) == 4
 
 
 def test_gemini_deadline_finish_replays_signed_tool_protocol_with_tools(
@@ -1308,12 +1408,16 @@ def test_openrouter_chat_rate_limit_retries_longer_with_stable_jitter(
     assert raised.value.zero_cost is True
     assert len(sleeps) == harness.MAX_RATE_LIMIT_ATTEMPTS - 1
     assert sleeps == [
-        harness._retry_delay(index, None)
-        + harness._stable_rate_limit_jitter(
-            b'{"model": "google/gemini-3.8-flash"}', index
+        min(
+            harness._retry_delay(index, None)
+            + harness._stable_rate_limit_jitter(
+                b'{"model": "google/gemini-3.8-flash"}', index
+            ),
+            harness.MAX_RETRY_AFTER_SECONDS,
         )
         for index in range(1, harness.MAX_RATE_LIMIT_ATTEMPTS)
     ]
+    assert max(sleeps) <= harness.MAX_RETRY_AFTER_SECONDS
 
 
 def test_lane_preserves_terminal_http_provider_and_zero_cost() -> None:
@@ -1500,8 +1604,9 @@ def test_lane_wall_clock_forces_structured_finish_before_job_timeout(
     assert now["value"] < 10
 
 
+@pytest.mark.parametrize("model", ["x-ai/grok-4.6", "google/gemini-3.8-flash"])
 def test_deadline_finalize_transport_failure_keeps_one_repair_turn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
 ) -> None:
     from or_pr_review import harness
 
@@ -1514,18 +1619,29 @@ def test_deadline_finalize_transport_failure_keeps_one_repair_turn(
         payloads.append(payload)
         if len(payloads) == 1:
             now["value"] = 6.0
+            if model.startswith("google/gemini-"):
+                return _gemini_tool_reply()
             return _tool_reply()
         if len(payloads) == 2:
             now["value"] = 8.0
             raise LaneError("OpenRouter HTTP 429: retry later")
-        assert "tools" not in payload
+        if model.startswith("google/gemini-"):
+            assert payload["tool_choice"] == "none"
+        else:
+            assert "tools" not in payload
         assert "response_format" in payload
         assert "protected finalize request failed" in payload["messages"][-1]["content"]
+        assert not any(
+            left.get("role") == right.get("role") == "user"
+            for left, right in zip(
+                payload["messages"], payload["messages"][1:], strict=False
+            )
+        )
         now["value"] = 9.0
         return _findings_reply()
 
     result = run_lane(
-        model="x-ai/grok-4.6",
+        model=model,
         messages=[{"role": "user", "content": "review"}],
         api_key="sk-test",
         workspace=tmp_path,

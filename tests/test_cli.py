@@ -826,9 +826,9 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
     assert (artifact_dir / "lane-1.json").is_file()
     expected_reserve = (
         cli_mod.POST_RESERVE_SECONDS
-        + (cli_mod.MAX_HTTP_ATTEMPTS - 1) * cli_mod.MAX_RETRY_AFTER_SECONDS
+        + (cli_mod.MAX_RATE_LIMIT_ATTEMPTS - 1) * cli_mod.MAX_RETRY_AFTER_SECONDS
         + cli_mod.JUDGE_SCHEDULING_MARGIN_SECONDS
-        + cli_mod.MAX_HTTP_ATTEMPTS * cli_mod.MIN_JUDGE_ATTEMPT_SECONDS
+        + cli_mod.MAX_RATE_LIMIT_ATTEMPTS * cli_mod.MIN_JUDGE_ATTEMPT_SECONDS
     )
     assert all(
         timeout <= cli_mod.JOB_BUDGET_SECONDS - expected_reserve
@@ -950,10 +950,10 @@ def test_judge_timeout_is_clipped_to_fit_all_retries(
     from or_pr_review import cli as cli_mod
 
     monkeypatch.setattr(cli_mod.time, "monotonic", lambda: 100.0)
-    # 180s post + 90s worst Retry-After + 5s scheduling + 4*30s requests.
+    # 180s post + 180s worst Retry-After + 5s scheduling + 7*30s requests.
     env = {
         "OPENROUTER_TIMEOUT_SECONDS": "180",
-        cli_mod._JOB_DEADLINE_KEY: str(100 + 180 + 90 + 5 + 120),
+        cli_mod._JOB_DEADLINE_KEY: str(100 + 180 + 180 + 5 + 210),
     }
     assert cli_mod._judge_request_timeout(env) == 30
 

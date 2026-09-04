@@ -125,6 +125,7 @@ def test_run_llm_judge_sends_schema_and_minimal_reasoning() -> None:
     assert issues[0].title == "Race"
     assert seen["model"] == "google/gemini-3.1-flash-lite"
     assert seen["reasoning"] == {"effort": "minimal"}
+    assert seen["max_tokens"] == 32_768
     assert seen["usage"] == {"include": True}
     assert seen["provider"] == {"data_collection": "deny", "zdr": True}
     assert seen["response_format"]["type"] == "json_schema"

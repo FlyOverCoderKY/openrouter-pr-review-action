@@ -15,6 +15,12 @@
   rejected tool protocol blocks while retaining their read-only observations,
   and lane artifacts expose aggregate signature-recovery counts without
   persisting signature values.
+- Gemini review and judge requests now use a 32,768-token output ceiling to
+  avoid OpenRouter reserving the provider's much larger default maximum before
+  inference. Other providers retain their native limits. Rate-limit retries
+  now cap exponential backoff and reserve time for all seven possible 429
+  attempts; terminal HTTP failures retain aggregate provider and zero-cost
+  metadata without overwriting earlier paid usage.
 - Full-PR acquisition now falls back to an unlimited local
   `git diff base...head` when GitHub rejects `gh pr diff` with its 20,000-line
   HTTP 406 response. The fallback uses fresh base/head commit OIDs from PR

@@ -153,8 +153,14 @@ def render_review_parts(
                 if lane.cost_usd is not None
                 else ""
             )
+            recovery = ""
+            if lane.thought_signature_recoveries:
+                recovery = (
+                    f"; {lane.thought_signature_recoveries} thought-signature "
+                    f"{'recovery' if lane.thought_signature_recoveries == 1 else 'recoveries'}"
+                )
             lane_lines.append(
-                f"- `{lane.model}`: failed-open{spent} — "
+                f"- `{lane.model}`: failed-open{spent}{recovery} — "
                 f"{neutralize_mentions(lane.error or 'unknown error')}"
             )
 

@@ -375,7 +375,13 @@ def test_lane_artifact_roundtrip_with_coverage_and_resolutions() -> None:
         error=None,
         resolutions=[Resolution(id="r1-1", status="fixed", note="done")],
         coverage=[("a.py", 0)],
+        thought_signature_tool_turns=7,
+        thought_signature_recoveries=1,
+        sanitized_tool_turns=2,
     )
     parsed = parse_lane_artifact(lane.to_dict())
     assert parsed.resolutions[0].id == "r1-1"
     assert parsed.coverage == [("a.py", 0)]
+    assert parsed.thought_signature_tool_turns == 7
+    assert parsed.thought_signature_recoveries == 1
+    assert parsed.sanitized_tool_turns == 2

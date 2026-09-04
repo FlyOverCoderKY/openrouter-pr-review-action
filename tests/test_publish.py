@@ -15,7 +15,13 @@ def _collected(*, truncated: bool = False) -> CollectedReview:
         base_ref="main",
         head_ref="feat",
         plan=DiffPlan("full-pr", "full-pr", None, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", None),
-        truncation=Truncation("diff", truncated, 4000 if truncated else 4, 1000 if truncated else 4, 1 if truncated else 300),
+        truncation=Truncation(
+            "diff",
+            truncated,
+            4000 if truncated else 4,
+            1000 if truncated else 4,
+            1 if truncated else 300,
+        ),
         mode="initial",
     )
 
@@ -74,6 +80,20 @@ def test_failed_lane_error_mentions_neutralized() -> None:
     lane = LaneResult(SCHEMA_VERSION, False, "x-ai/grok-4.6", [], "boom @maintainers")
     text = render_review(collected=_collected(), lanes=[lane], issues=[], verdict="error")
     assert "@\u200bmaintainers" in text
+
+
+def test_failed_lane_reports_signature_recovery_count() -> None:
+    lane = LaneResult(
+        SCHEMA_VERSION,
+        False,
+        "google/gemini-3.8-flash",
+        [],
+        "salvage failed",
+        thought_signature_recoveries=1,
+    )
+    text = render_review(collected=_collected(), lanes=[lane], issues=[], verdict="error")
+
+    assert "1 thought-signature recovery" in text
 
 
 def test_long_reviews_split_into_parts() -> None:

@@ -27,7 +27,7 @@ from or_pr_review.errors import ActionError, LaneError, SchemaError
 from or_pr_review.github_ops import GitHub, upsert_status_comment
 from or_pr_review.harness import (
     DEFAULT_LANE_TIMEOUT_SECONDS,
-    MAX_HTTP_ATTEMPTS,
+    MAX_RATE_LIMIT_ATTEMPTS,
     MAX_RETRY_AFTER_SECONDS,
     parse_max_tool_turns,
     require_openrouter_key,
@@ -356,9 +356,9 @@ def _role_all(env: dict[str, str]) -> int:
         if needed:
             judge_reserve = (
                 POST_RESERVE_SECONDS
-                + (MAX_HTTP_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
+                + (MAX_RATE_LIMIT_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
                 + JUDGE_SCHEDULING_MARGIN_SECONDS
-                + MAX_HTTP_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS
+                + MAX_RATE_LIMIT_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS
             )
         lane_timeout = max(
             1,
@@ -1093,11 +1093,11 @@ def _judge_request_timeout(env: dict[str, str]) -> int | None:
     if remaining is None:
         return configured
     judge_budget = remaining - POST_RESERVE_SECONDS
-    retry_reserve = (MAX_HTTP_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
+    retry_reserve = (MAX_RATE_LIMIT_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
     usable = judge_budget - retry_reserve - JUDGE_SCHEDULING_MARGIN_SECONDS
-    if usable < MAX_HTTP_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS:
+    if usable < MAX_RATE_LIMIT_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS:
         return None
-    return min(configured, max(1, int(usable // MAX_HTTP_ATTEMPTS)))
+    return min(configured, max(1, int(usable // MAX_RATE_LIMIT_ATTEMPTS)))
 
 
 def _github(env: dict[str, str]) -> GitHub:

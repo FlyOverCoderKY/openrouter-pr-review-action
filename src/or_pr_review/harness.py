@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import http.client
 import json
 import math
@@ -33,6 +35,10 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 HTTP_REFERER = "https://github.com/FlyOverCoderKY/openrouter-pr-review-action"
 APP_TITLE = "OpenRouter PR Review Action"
 DEFAULT_TIMEOUT = 180
+# Bound every completion explicitly. OpenRouter otherwise reserves against the
+# provider model's maximum output (currently 65,536 tokens for Gemini 3.8),
+# which can reject an affordable request before inference even starts.
+MAX_GEMINI_RESPONSE_TOKENS = 32_768
 # Keep a lane inside the caller's 25-minute job ceiling.  The protected tail
 # is deliberately long enough for one normal default-timeout request, while
 # the remaining seven minutes cover artifact upload, judging, and publishing.
@@ -43,8 +49,10 @@ FINAL_RESPONSE_RESERVE_SECONDS = DEFAULT_TIMEOUT
 # in _run_loop instead of discarding the gathered evidence.
 RETRYABLE_STATUS = (408, 429, 500, 502, 503, 504)
 MAX_HTTP_ATTEMPTS = 4
+MAX_RATE_LIMIT_ATTEMPTS = 7
 BACKOFF_BASE_SECONDS = 2.0
 MAX_RETRY_AFTER_SECONDS = 30.0
+RATE_LIMIT_JITTER_SECONDS = 5.0
 # First-pass budget matches the sibling Grok action's default max_turns=50.
 # Follow-up jobs may pass a lower value (sibling callers often use 30).
 DEFAULT_MAX_TOOL_TURNS = 50
@@ -75,6 +83,23 @@ DEADLINE_FINALIZE_NOTICE = (
     "and return the best complete JSON result now from the embedded diff and "
     "all evidence gathered so far."
 )
+MISSING_SIGNATURE_FINALIZE_NOTICE = (
+    "The tool request could not be safely continued because its provider "
+    "reasoning signature was missing. Do not call tools. Return the best "
+    'complete JSON result now as {"findings": [...]} from the embedded diff '
+    "and evidence already gathered."
+)
+
+
+class OpenRouterHTTPError(LaneError):
+    """Terminal OpenRouter HTTP error with aggregate-safe routing metadata."""
+
+    def __init__(self, message: str, *, provider: str | None, zero_cost: bool) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.zero_cost = zero_cost
+
+
 # Bound on stub-repair rounds if a model keeps emitting tool calls after the
 # tool budget was withdrawn.
 MAX_REPAIR_ROUNDS = 3
@@ -147,16 +172,39 @@ def openrouter_chat(
                 raw = response.read().decode("utf-8")
             break
         except urllib.error.HTTPError as exc:
-            err_body = exc.read().decode("utf-8", errors="replace")[:800]
-            if exc.code in RETRYABLE_STATUS and attempt < MAX_HTTP_ATTEMPTS:
+            full_error_body = exc.read().decode("utf-8", errors="replace")
+            err_body = full_error_body[:800]
+            provider = _provider_from_error_body(full_error_body)
+            max_attempts = (
+                MAX_RATE_LIMIT_ATTEMPTS if exc.code == 429 else MAX_HTTP_ATTEMPTS
+            )
+            if exc.code in RETRYABLE_STATUS and attempt < max_attempts:
                 _count_retry(stats)
-                _sleep_before_retry(
-                    _retry_delay(attempt, exc.headers.get("Retry-After")),
-                    sleep=sleep,
-                    deadline=deadline,
-                )
+                retry_after = exc.headers.get("Retry-After")
+                delay = _retry_delay(attempt, retry_after)
+                if exc.code == 429 and retry_after is None:
+                    delay = min(
+                        delay + _stable_rate_limit_jitter(body, attempt),
+                        MAX_RETRY_AFTER_SECONDS,
+                    )
+                try:
+                    _sleep_before_retry(delay, sleep=sleep, deadline=deadline)
+                except LaneError as deadline_error:
+                    raise OpenRouterHTTPError(
+                        f"{deadline_error}; last OpenRouter HTTP {exc.code}: "
+                        f"{redact(err_body)}",
+                        provider=provider,
+                        zero_cost=True,
+                    ) from exc
                 continue
-            raise LaneError(f"OpenRouter HTTP {exc.code}: {redact(err_body)}") from exc
+            raise OpenRouterHTTPError(
+                f"OpenRouter HTTP {exc.code}: {redact(err_body)}",
+                provider=provider,
+                # OpenRouter's zero-completion insurance makes a terminal
+                # HTTP error response non-billable. Any earlier successful
+                # requests in the lane retain their separately reported cost.
+                zero_cost=True,
+            ) from exc
         except TimeoutError as exc:
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
@@ -228,7 +276,38 @@ def _retry_delay(attempt: int, retry_after: str | None) -> float:
             return max(0.0, min(float(retry_after), MAX_RETRY_AFTER_SECONDS))
         except ValueError:
             pass
-    return BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+    return min(
+        BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), MAX_RETRY_AFTER_SECONDS
+    )
+
+
+def _stable_rate_limit_jitter(body: bytes, attempt: int) -> float:
+    """Desynchronize concurrent benchmark lanes without nondeterministic tests."""
+
+    digest = hashlib.sha256(body + attempt.to_bytes(4, "big")).digest()
+    fraction = int.from_bytes(digest[:2], "big") / 65_535
+    return fraction * RATE_LIMIT_JITTER_SECONDS
+
+
+def _provider_from_error_body(body: str) -> str | None:
+    """Read only the aggregate provider name from an OpenRouter error body."""
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    metadata = error.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    provider = metadata.get("provider_name")
+    if not isinstance(provider, str) or not provider.strip():
+        return None
+    return provider.strip()
 
 
 def run_lane(
@@ -390,6 +469,9 @@ def _attach_stats(
     result.requests = stats.get("requests")
     result.tool_rounds = stats.get("tool_rounds")
     result.retries = stats.get("retries")
+    result.thought_signature_tool_turns = stats.get("thought_signature_tool_turns")
+    result.thought_signature_recoveries = stats.get("thought_signature_recoveries")
+    result.sanitized_tool_turns = stats.get("sanitized_tool_turns")
     result.cached_tokens = usage.get("cached_tokens")
     cost = usage.get("cost_usd")
     if isinstance(cost, (int, float)) and not isinstance(cost, bool):
@@ -433,6 +515,8 @@ def _run_loop(
         # posted review can report what the run actually spent.
         "usage": {"include": True},
     }
+    if _is_gemini_model(model):
+        payload_base["max_tokens"] = MAX_GEMINI_RESPONSE_TOKENS
     if effort:
         payload_base["reasoning"] = {"effort": effort}
     if provider_data_collection not in {None, "allow", "deny"}:
@@ -464,6 +548,20 @@ def _run_loop(
     finalize_retried = False
     salvage_attempted = False
     deadline_finalizing = False
+    gemini_model = _is_gemini_model(model)
+    serial_tool_calls = _requires_strict_gemini_tool_protocol(model)
+    signature_finalizing = False
+    successful_responses = 0
+
+    def sanitize_gemini_history() -> None:
+        if not serial_tool_calls:
+            return
+        sanitized = _sanitize_tool_history_for_finalize(conversation)
+        if stats is not None and sanitized:
+            stats["sanitized_tool_turns"] = (
+                stats.get("sanitized_tool_turns", 0) + sanitized
+            )
+
     try:
         while True:
             now = time.monotonic()
@@ -479,9 +577,7 @@ def _run_loop(
                 salvage_attempted = True
                 if stats is not None:
                     stats["salvaged"] = 1
-                conversation.append(
-                    {"role": "user", "content": DEADLINE_FINALIZE_NOTICE}
-                )
+                _append_user_notice(conversation, DEADLINE_FINALIZE_NOTICE)
                 tools_active = False
                 use_schema = True
 
@@ -506,13 +602,30 @@ def _run_loop(
             }
             if not use_schema:
                 payload.pop("response_format", None)
-            if tools_active:
+            replay_tools = (
+                serial_tool_calls
+                and not tools_active
+                and _conversation_has_tool_protocol(conversation)
+            )
+            if tools_active or replay_tools:
                 payload["tools"] = tools
-                payload["tool_choice"] = "required" if force_tool else "auto"
+                if tools_active:
+                    payload["tool_choice"] = "required" if force_tool else "auto"
+                else:
+                    payload["tool_choice"] = "none"
+                # Gemini 3 strictly validates thought signatures across a
+                # function-calling turn.  Parallel calls have intermittently
+                # arrived without a usable signature for every call, causing
+                # the next otherwise-valid request to fail with HTTP 400
+                # INVALID_ARGUMENT.  Keep Gemini's tool transcript serial so
+                # there is exactly one signature-bearing call to round-trip.
+                if serial_tool_calls and tools_active:
+                    payload["parallel_tool_calls"] = False
             if stats is not None:
                 stats["requests"] = stats.get("requests", 0) + 1
             try:
                 response = send(payload)
+                successful_responses += 1
                 _absorb_usage(usage, response, meta)
                 if progress is not None:
                     progress()
@@ -521,6 +634,23 @@ def _run_loop(
                 # same schema-fallback and salvage handling as HTTP errors.
                 message = _assistant_message(response)
             except LaneError as exc:
+                if isinstance(exc, OpenRouterHTTPError):
+                    if exc.provider and meta is not None:
+                        meta["provider"] = exc.provider
+                    if (
+                        exc.zero_cost
+                        and successful_responses == 0
+                        and "cost_usd" not in usage
+                    ):
+                        usage["cost_usd"] = 0.0
+                    if progress is not None:
+                        progress()
+                if signature_finalizing:
+                    # An unsigned tool turn gets one safe, tool-free finish.
+                    # Retrying it with another transcript mutation would no
+                    # longer be the promised recovery from the last valid
+                    # provider-authenticated history.
+                    raise
                 message = str(exc)
                 lowered = message.lower()
                 schema_rejected = "response_format" in lowered or "json_schema" in lowered
@@ -529,6 +659,29 @@ def _run_loop(
                     last_error = exc
                     if deadline_finalizing:
                         finalize_retried = True
+                    continue
+                if (
+                    serial_tool_calls
+                    and turns > 0
+                    and _looks_like_gemini_signature_rejection(lowered)
+                ):
+                    # The provider rejected an ostensibly signed tool history.
+                    # Strip the protocol blocks once, retain their observations
+                    # as attributed plain evidence, and make one no-tools
+                    # structured finish rather than replaying poisoned history.
+                    if _looks_like_context_overflow(lowered):
+                        _shrink_tool_history(conversation, keep_last=0)
+                    sanitize_gemini_history()
+                    signature_finalizing = True
+                    salvage_attempted = True
+                    if stats is not None:
+                        stats["salvaged"] = 1
+                        stats["thought_signature_recoveries"] = (
+                            stats.get("thought_signature_recoveries", 0) + 1
+                        )
+                    _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
+                    tools_active = False
+                    use_schema = True
                     continue
                 deadline_pressure = (
                     deadline is not None
@@ -543,9 +696,7 @@ def _run_loop(
                     salvage_attempted = True
                     if stats is not None:
                         stats["salvaged"] = 1
-                    conversation.append(
-                        {"role": "user", "content": DEADLINE_FINALIZE_NOTICE}
-                    )
+                    _append_user_notice(conversation, DEADLINE_FINALIZE_NOTICE)
                     tools_active = False
                     use_schema = True
                     continue
@@ -558,16 +709,14 @@ def _run_loop(
                         stats["salvaged"] = 1
                     if _looks_like_context_overflow(lowered):
                         _shrink_tool_history(conversation)
-                    conversation.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "The previous request failed and will not be retried. "
-                                "Do not call tools. Return your findings NOW as the "
-                                'JSON object {"findings": [...]} from the evidence '
-                                "you have already gathered."
-                            ),
-                        }
+                    _append_user_notice(
+                        conversation,
+                        (
+                            "The previous request failed and will not be retried. "
+                            "Do not call tools. Return your findings NOW as the "
+                            'JSON object {"findings": [...]} from the evidence '
+                            "you have already gathered."
+                        ),
                     )
                     tools_active = False
                     use_schema = True
@@ -578,15 +727,13 @@ def _run_loop(
                     # reserved time specifically for this path.
                     finalize_retried = True
                     last_error = exc
-                    conversation.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "The protected finalize request failed. Do not call tools. "
-                                "Return the final structured JSON now from the evidence "
-                                f"already gathered. Problem: {exc}"
-                            ),
-                        }
+                    _append_user_notice(
+                        conversation,
+                        (
+                            "The protected finalize request failed. Do not call tools. "
+                            "Return the final structured JSON now from the evidence "
+                            f"already gathered. Problem: {exc}"
+                        ),
                     )
                     tools_active = False
                     use_schema = True
@@ -594,8 +741,51 @@ def _run_loop(
                 raise
             tool_calls = message.get("tool_calls") or []
             if tool_calls:
+                if signature_finalizing:
+                    raise LaneError(
+                        "Gemini returned another tool call during thought-signature recovery"
+                    )
                 force_tool = False
-                conversation.append(_assistant_record(message))
+                if serial_tool_calls and not tools_active:
+                    # The provider ignored tool_choice=none. Do not append or
+                    # execute the unexpected turn; finish once from attributed
+                    # plain evidence without replaying tool protocol.
+                    sanitize_gemini_history()
+                    signature_finalizing = True
+                    salvage_attempted = True
+                    if stats is not None:
+                        stats["salvaged"] = 1
+                        stats["thought_signature_recoveries"] = (
+                            stats.get("thought_signature_recoveries", 0) + 1
+                        )
+                    _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
+                    use_schema = True
+                    continue
+                if serial_tool_calls and not _has_round_trippable_gemini_signature(message):
+                    # Gemini 3 requires the thought signature from each
+                    # function-calling step to appear unchanged in the next
+                    # request. Never execute a call whose response cannot be
+                    # replayed: doing so would both waste local work and poison
+                    # every subsequent provider request, including salvage.
+                    signature_finalizing = True
+                    salvage_attempted = True
+                    if stats is not None:
+                        stats["salvaged"] = 1
+                        stats["thought_signature_recoveries"] = (
+                            stats.get("thought_signature_recoveries", 0) + 1
+                        )
+                    sanitize_gemini_history()
+                    _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
+                    tools_active = False
+                    use_schema = True
+                    continue
+                if serial_tool_calls and stats is not None:
+                    stats["thought_signature_tool_turns"] = (
+                        stats.get("thought_signature_tool_turns", 0) + 1
+                    )
+                conversation.append(
+                    _assistant_record(message, preserve_provider_metadata=gemini_model)
+                )
                 if not tools_active or workspace is None:
                     # The model produced tool calls this loop never solicited
                     # (or cannot service). Answer every call with a stub so
@@ -644,7 +834,9 @@ def _run_loop(
                 # Glance-and-clean: one forced blast-radius tool pass.
                 nudged = True
                 force_tool = True
-                conversation.append(_assistant_record(message))
+                conversation.append(
+                    _assistant_record(message, preserve_provider_metadata=gemini_model)
+                )
                 conversation.append({"role": "user", "content": BLAST_RADIUS_NUDGE})
                 continue
             if content.strip():
@@ -661,7 +853,9 @@ def _run_loop(
                     # schema-enforced, tool-free redo before failing open.
                     finalize_retried = True
                     last_error = exc
-                    conversation.append(_assistant_record(message))
+                    conversation.append(
+                        _assistant_record(message, preserve_provider_metadata=gemini_model)
+                    )
                     conversation.append(
                         {
                             "role": "user",
@@ -682,7 +876,9 @@ def _run_loop(
                 # tool-free finalization request instead of discarding the
                 # entire review.
                 finalize_retried = True
-                conversation.append(_assistant_record(message))
+                conversation.append(
+                    _assistant_record(message, preserve_provider_metadata=gemini_model)
+                )
                 conversation.append(
                     {
                         "role": "user",
@@ -709,6 +905,32 @@ def _looks_like_context_overflow(lowered_error: str) -> bool:
         or "exceed" in lowered_error
         or "window" in lowered_error
         or "token" in lowered_error
+    )
+
+
+def _looks_like_gemini_signature_rejection(lowered_error: str) -> bool:
+    if "thought_signature" in lowered_error or "thought signature" in lowered_error:
+        return True
+    # Google sometimes redacts the field-level detail and returns only a
+    # generic INVALID_ARGUMENT after accepting several tool turns. The caller
+    # invokes this predicate only for Gemini after at least one tool round, so
+    # the safe recovery is the same: preserve observations as attributed text,
+    # remove provider-specific tool protocol, and request one structured finish.
+    return "invalid_argument" in lowered_error or "invalid argument" in lowered_error
+
+
+def _is_gemini_model(model: str) -> bool:
+    return model.startswith("google/gemini-")
+
+
+def _requires_strict_gemini_tool_protocol(model: str) -> bool:
+    return model.startswith("google/gemini-3")
+
+
+def _conversation_has_tool_protocol(conversation: list[dict[str, Any]]) -> bool:
+    return any(
+        message.get("role") == "assistant" and bool(message.get("tool_calls"))
+        for message in conversation
     )
 
 
@@ -763,19 +985,146 @@ def _message_text(message: dict[str, Any]) -> str:
     return ""
 
 
-def _assistant_record(message: dict[str, Any]) -> dict[str, Any]:
-    record: dict[str, Any] = {"role": "assistant", "content": message.get("content") or ""}
+def _assistant_record(
+    message: dict[str, Any], *, preserve_provider_metadata: bool = False
+) -> dict[str, Any]:
+    # Provider adapters can attach opaque continuity metadata to an assistant
+    # message. Reconstructing only the fields known to this harness drops that
+    # metadata (including Gemini thought signatures). Echo the complete
+    # message exactly as returned, using a deep copy so later local mutations
+    # cannot alter the provider-authenticated object.
+    if preserve_provider_metadata:
+        record = copy.deepcopy(message)
+        record["role"] = "assistant"
+        return record
+
+    record = {"role": "assistant", "content": copy.deepcopy(message.get("content") or "")}
     if message.get("tool_calls"):
-        record["tool_calls"] = message["tool_calls"]
-    # OpenRouter's reasoning contract: reasoning_details must be passed back
-    # unmodified when continuing a tool-calling conversation. Dropping it
-    # strips the model's prior reasoning from every later turn. `reasoning`
-    # is the normalized text form some providers return instead.
+        record["tool_calls"] = copy.deepcopy(message["tool_calls"])
     if message.get("reasoning_details"):
-        record["reasoning_details"] = message["reasoning_details"]
+        record["reasoning_details"] = copy.deepcopy(message["reasoning_details"])
     elif message.get("reasoning"):
-        record["reasoning"] = message["reasoning"]
+        record["reasoning"] = copy.deepcopy(message["reasoning"])
     return record
+
+
+def _has_round_trippable_gemini_signature(message: dict[str, Any]) -> bool:
+    """Return whether a Gemini tool step carries an opaque signature we echo.
+
+    OpenRouter normally exposes Gemini signatures as a google-gemini-v1
+    reasoning detail. Direct thought-signature fields are also accepted for
+    compatibility with adapters that retain Google's function-call metadata.
+    Plain reasoning/reasoning_content text is useful context but is not a
+    cryptographic thought signature.
+    """
+    details = message.get("reasoning_details")
+    if isinstance(details, list):
+        for detail in details:
+            if not isinstance(detail, dict) or detail.get("format") != "google-gemini-v1":
+                continue
+            signature = detail.get("signature")
+            data = detail.get("data")
+            if isinstance(signature, str) and signature.strip():
+                return True
+            if (
+                detail.get("type") == "reasoning.encrypted"
+                and isinstance(data, str)
+                and data.strip()
+            ):
+                return True
+
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list) or not calls or not isinstance(calls[0], dict):
+        return False
+    first = calls[0]
+    function = first.get("function")
+    candidates = [first]
+    if isinstance(function, dict):
+        candidates.append(function)
+    for candidate in candidates:
+        for key in ("thought_signature", "thoughtSignature"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+    return False
+
+
+def _sanitize_tool_history_for_finalize(conversation: list[dict[str, Any]]) -> int:
+    """Replace tool protocol history with plain evidence for safe salvage.
+
+    A provider 400 can mean an earlier tool-call signature is unacceptable.
+    Re-sending the same function-call blocks poisons a no-tools salvage request
+    too. Remove assistant function-call messages and convert their tool results
+    to ordinary user evidence, retaining the observations without asking the
+    provider to authenticate the broken tool protocol.
+    """
+    sanitized: list[dict[str, Any]] = []
+    call_provenance: dict[str, tuple[str, str]] = {}
+    removed_turns = 0
+    for message in conversation:
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            removed_turns += 1
+            calls = message.get("tool_calls")
+            if isinstance(calls, list):
+                for call in calls:
+                    if not isinstance(call, dict):
+                        continue
+                    call_id = str(call.get("id") or "unknown")
+                    function = call.get("function")
+                    if not isinstance(function, dict):
+                        function = {}
+                    call_provenance[call_id] = (
+                        str(function.get("name") or "unknown"),
+                        _canonical_tool_arguments(function.get("arguments")),
+                    )
+            assistant_text = _message_text(message).strip()
+            if assistant_text:
+                sanitized.append({"role": "assistant", "content": assistant_text})
+            continue
+        if message.get("role") == "tool":
+            content = message.get("content")
+            if not isinstance(content, str):
+                content = json.dumps(content, sort_keys=True, ensure_ascii=False)
+            call_id = str(message.get("tool_call_id") or "unknown")
+            name, arguments = call_provenance.get(call_id, ("unknown", "{}"))
+            _append_user_notice(
+                sanitized,
+                (
+                    "Previously gathered read-only tool evidence:\n"
+                    f"Tool: {name}\n"
+                    f"Arguments: {arguments}\n"
+                    "Result:\n"
+                    f"{content}"
+                ),
+            )
+            continue
+        sanitized.append(message)
+    conversation[:] = sanitized
+    return removed_turns
+
+
+def _append_user_notice(conversation: list[dict[str, Any]], content: str) -> None:
+    """Append user text without creating Gemini-invalid adjacent user turns."""
+    if conversation and conversation[-1].get("role") == "user":
+        previous = _message_text(conversation[-1]).strip()
+        conversation[-1] = {
+            **conversation[-1],
+            "content": f"{previous}\n\n{content}" if previous else content,
+        }
+        return
+    conversation.append({"role": "user", "content": content})
+
+
+def _canonical_tool_arguments(value: object) -> str:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return json.dumps(value, ensure_ascii=False)
+    try:
+        return json.dumps(value if value is not None else {}, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return json.dumps(str(value), ensure_ascii=False)
 
 
 def _stub_tool_result(call: object) -> dict[str, Any]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import email.message
 import inspect
 import io
+import json
 import urllib.error
 from pathlib import Path
 
@@ -14,7 +15,9 @@ from or_pr_review.harness import (
     BUDGET_EXHAUSTED_NOTICE,
     DEADLINE_FINALIZE_NOTICE,
     DEFAULT_MAX_TOOL_TURNS,
+    MAX_GEMINI_RESPONSE_TOKENS,
     MAX_TOOL_TURNS,
+    MISSING_SIGNATURE_FINALIZE_NOTICE,
     _assistant_record,
     parse_max_tool_turns,
     require_openrouter_key,
@@ -49,6 +52,7 @@ def test_run_lane_captures_provider_and_pins_routing(tmp_path: Path) -> None:
     )
     assert result.ok
     assert result.provider == "Baseten"
+    assert "max_tokens" not in payloads[0]
     assert payloads[0]["provider"] == {"order": ["baseten"], "allow_fallbacks": False}
     # Round-trips through the lane artifact.
     from or_pr_review.schema import parse_lane_artifact
@@ -86,6 +90,22 @@ def test_run_lane_enforces_explicit_benchmark_data_policy(tmp_path: Path) -> Non
         "data_collection": "deny",
         "zdr": True,
     }
+
+
+def test_gemini_lane_caps_reserved_output_tokens(tmp_path: Path) -> None:
+    payloads: list[dict] = []
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        max_tool_turns=0,
+        chat=lambda payload: payloads.append(payload) or _findings_reply(),
+    )
+
+    assert result.ok
+    assert payloads[0]["max_tokens"] == MAX_GEMINI_RESPONSE_TOKENS
 
 
 @pytest.mark.parametrize(
@@ -443,6 +463,41 @@ def _tool_reply() -> dict:
     }
 
 
+def _gemini_tool_reply(*, call_ids: tuple[str, ...] = ("call_1",)) -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": '{"path":"a.py"}',
+                            },
+                        }
+                        for call_id in call_ids
+                    ],
+                    "reasoning_details": [
+                        {
+                            "type": "reasoning.encrypted",
+                            "data": "opaque-google-signature",
+                            "id": "sig-1",
+                            "format": "google-gemini-v1",
+                            "index": 0,
+                        }
+                    ],
+                    "reasoning_content": "provider reasoning alias",
+                    "provider_metadata": {"opaque": "keep-exactly"},
+                }
+            }
+        ]
+    }
+
+
 def _findings_reply() -> dict:
     return {"choices": [{"message": {"content": '{"findings":[]}'}}]}
 
@@ -567,6 +622,390 @@ def test_assistant_record_preserves_reasoning() -> None:
     assert "reasoning" not in bare and "reasoning_details" not in bare
 
 
+def test_assistant_record_preserves_complete_provider_message_verbatim() -> None:
+    message = _gemini_tool_reply()["choices"][0]["message"]
+    record = _assistant_record(message, preserve_provider_metadata=True)
+
+    assert record == message
+    assert record is not message
+    assert record["tool_calls"] is not message["tool_calls"]
+    assert record["reasoning_content"] == "provider reasoning alias"
+    assert record["provider_metadata"] == {"opaque": "keep-exactly"}
+
+
+def test_assistant_record_drops_unrecognized_metadata_for_other_providers() -> None:
+    message = _gemini_tool_reply()["choices"][0]["message"]
+    record = _assistant_record(message)
+
+    assert "provider_metadata" not in record
+    assert "reasoning_content" not in record
+    assert record["tool_calls"] == message["tool_calls"]
+    assert record["reasoning_details"] == message["reasoning_details"]
+
+
+@pytest.mark.parametrize("call_ids", [("call_1",), ("call_1", "call_2")])
+def test_gemini_signed_tool_message_round_trips_exactly(
+    tmp_path: Path, call_ids: tuple[str, ...]
+) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    signed_message = _gemini_tool_reply(call_ids=call_ids)["choices"][0]["message"]
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"choices": [{"message": signed_message}]}
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=2,
+    )
+
+    assert result.ok
+    assert result.thought_signature_tool_turns == 1
+    echoed = next(
+        message
+        for message in payloads[1]["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert echoed == signed_message
+    assert [
+        message["tool_call_id"]
+        for message in payloads[1]["messages"]
+        if message.get("role") == "tool"
+    ] == list(call_ids)
+
+
+def test_gemini_missing_signature_finalizes_without_executing_bad_call(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        if len(payloads) == 2:
+            return _tool_reply()
+        assert "tools" not in payload
+        assert "response_format" in payload
+        assert payload["messages"][-1]["role"] == "user"
+        assert payload["messages"][-1]["content"].endswith(
+            MISSING_SIGNATURE_FINALIZE_NOTICE
+        )
+        assert not any(
+            left.get("role") == right.get("role") == "user"
+            for left, right in zip(
+                payload["messages"], payload["messages"][1:], strict=False
+            )
+        )
+        assert not any(message.get("tool_calls") for message in payload["messages"])
+        assert not any(message.get("role") == "tool" for message in payload["messages"])
+        assert any(
+            "Tool: read_file\nArguments: {\"path\": \"a.py\"}\nResult:\n"
+            in str(message.get("content", ""))
+            for message in payload["messages"]
+        )
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.tool_rounds == 1
+    assert result.thought_signature_recoveries == 1
+    assert result.thought_signature_tool_turns == 1
+    assert result.sanitized_tool_turns == 1
+    assert len(payloads) == 3
+
+
+def test_gemini_signed_fifty_turn_chain_round_trips(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) <= 50:
+            reply = _gemini_tool_reply(call_ids=(f"call_{len(payloads)}",))
+            detail = reply["choices"][0]["message"]["reasoning_details"][0]
+            detail["data"] = f"opaque-signature-{len(payloads)}"
+            detail["id"] = f"sig-{len(payloads)}"
+            return reply
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=51,
+    )
+
+    assert result.ok
+    assert result.tool_rounds == 50
+    assert result.thought_signature_tool_turns == 50
+    assert len(payloads) == 51
+    final_history = payloads[-1]["messages"]
+    signed_turns = [message for message in final_history if message.get("tool_calls")]
+    assert len(signed_turns) == 50
+    assert [
+        message["reasoning_details"][0]["data"] for message in signed_turns
+    ] == [f"opaque-signature-{index}" for index in range(1, 51)]
+
+
+def test_gemini_provider_400_after_tools_uses_sanitized_salvage(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        if len(payloads) == 2:
+            raise LaneError("OpenRouter HTTP 400: INVALID_ARGUMENT thought signature")
+        assert "tools" not in payload
+        assert "response_format" in payload
+        assert not any(message.get("tool_calls") for message in payload["messages"])
+        assert not any(message.get("role") == "tool" for message in payload["messages"])
+        assert any(
+            "Tool: read_file\nArguments: {\"path\": \"a.py\"}\nResult:\n"
+            in str(message.get("content", ""))
+            for message in payload["messages"]
+        )
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.thought_signature_tool_turns == 1
+    assert result.sanitized_tool_turns == 1
+    assert len(payloads) == 3
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        "OpenRouter HTTP 400: INVALID_ARGUMENT",
+        "OpenRouter HTTP 400: Request contains an invalid argument.",
+    ],
+)
+def test_gemini_generic_invalid_argument_after_tools_uses_sanitized_salvage(
+    tmp_path: Path, provider_error: str
+) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        if len(payloads) == 2:
+            raise LaneError(provider_error)
+        assert "tools" not in payload
+        assert "response_format" in payload
+        assert not any(message.get("tool_calls") for message in payload["messages"])
+        assert not any(message.get("role") == "tool" for message in payload["messages"])
+        assert any(
+            "Tool: read_file\nArguments: {\"path\": \"a.py\"}\nResult:\n"
+            in str(message.get("content", ""))
+            for message in payload["messages"]
+        )
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.thought_signature_tool_turns == 1
+    assert result.thought_signature_recoveries == 1
+    assert result.sanitized_tool_turns == 1
+    assert len(payloads) == 3
+
+
+def test_gemini_invalid_argument_context_overflow_shrinks_before_salvage(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("x" * 10_000, encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        if len(payloads) == 2:
+            raise LaneError(
+                "OpenRouter HTTP 400: INVALID_ARGUMENT context length exceeded"
+            )
+        messages = payload["messages"]
+        assert any(
+            "observation truncated after a context overflow"
+            in str(message.get("content", ""))
+            for message in messages
+        )
+        assert not any(
+            left.get("role") == right.get("role") == "user"
+            for left, right in zip(messages, messages[1:], strict=False)
+        )
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+
+    assert result.ok
+    assert result.thought_signature_recoveries == 1
+
+
+def test_gemini_signature_salvage_gets_one_json_repair(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        if len(payloads) == 2:
+            raise LaneError("OpenRouter HTTP 400: INVALID_ARGUMENT")
+        if len(payloads) == 3:
+            return {"choices": [{"message": {"content": "not valid JSON"}}]}
+        assert "response_format" in payload
+        assert "tools" not in payload
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.thought_signature_recoveries == 1
+    assert len(payloads) == 4
+
+
+def test_gemini_deadline_finish_replays_signed_tool_protocol_with_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    now = {"value": 0.0}
+    payloads: list[dict] = []
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            now["value"] = 6.0
+            return _gemini_tool_reply()
+        assert payload.get("tools")
+        assert payload.get("tool_choice") == "none"
+        assert "response_format" in payload
+        assert any(message.get("tool_calls") for message in payload["messages"])
+        assert any(message.get("role") == "tool" for message in payload["messages"])
+        now["value"] = 7.0
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        lane_timeout=10,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.thought_signature_tool_turns == 1
+    assert result.sanitized_tool_turns is None
+    assert len(payloads) == 2
+
+
+def test_gemini_deadline_signature_rejection_sanitizes_before_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    now = {"value": 0.0}
+    payloads: list[dict] = []
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            now["value"] = 6.0
+            return _gemini_tool_reply()
+        if len(payloads) == 2:
+            assert payload.get("tools")
+            assert payload.get("tool_choice") == "none"
+            raise LaneError(
+                "OpenRouter HTTP 400: INVALID_ARGUMENT function call has invalid "
+                "thought_signature"
+            )
+        assert "tools" not in payload
+        assert "response_format" in payload
+        assert not any(message.get("tool_calls") for message in payload["messages"])
+        assert not any(message.get("role") == "tool" for message in payload["messages"])
+        assert any(
+            "Tool: read_file\nArguments: {\"path\": \"a.py\"}\nResult:\n"
+            in str(message.get("content", ""))
+            for message in payload["messages"]
+        )
+        now["value"] = 7.0
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        lane_timeout=10,
+    )
+
+    assert result.ok
+    assert result.salvaged is True
+    assert result.thought_signature_tool_turns == 1
+    assert result.thought_signature_recoveries == 1
+    assert result.sanitized_tool_turns == 1
+    assert len(payloads) == 3
+
+
 def test_budget_withdrawal_never_solicits_unserviceable_calls(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     payloads: list[dict] = []
@@ -650,6 +1089,60 @@ def test_malformed_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None
     )
     assert result.ok
     assert len(payloads) == 3
+
+
+def test_gemini_3_disables_parallel_tool_calls_only_while_tools_are_active(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _gemini_tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=1,
+    )
+
+    assert result.ok
+    assert payloads[0]["parallel_tool_calls"] is False
+    assert "parallel_tool_calls" not in payloads[1]
+    assert payloads[1].get("tools")
+    assert payloads[1].get("tool_choice") == "none"
+    assert any(message.get("tool_calls") for message in payloads[1]["messages"])
+    assert result.thought_signature_tool_turns == 1
+    assert result.sanitized_tool_turns is None
+
+
+def test_non_gemini_tool_calls_keep_provider_default_parallelism(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _tool_reply()
+        return _findings_reply()
+
+    result = run_lane(
+        model="x-ai/grok-4.6",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        chat=chat,
+        max_tool_turns=1,
+    )
+
+    assert result.ok
+    assert "parallel_tool_calls" not in payloads[0]
 
 
 def test_empty_finish_gets_one_schema_enforced_retry(tmp_path: Path) -> None:
@@ -802,12 +1295,14 @@ def test_repeated_resolution_contradiction_fails_visibly_after_retry() -> None:
     assert "note contradicts" in (result.error or "")
 
 
-def _http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
+def _http_error(
+    code: int, retry_after: str | None = None, body: bytes = b"body"
+) -> urllib.error.HTTPError:
     headers = email.message.Message()
     if retry_after:
         headers["Retry-After"] = retry_after
     return urllib.error.HTTPError(
-        "https://openrouter.ai/api/v1/chat/completions", code, "err", headers, io.BytesIO(b"body")
+        "https://openrouter.ai/api/v1/chat/completions", code, "err", headers, io.BytesIO(body)
     )
 
 
@@ -887,6 +1382,142 @@ def test_openrouter_chat_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyP
         harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append)
     assert len(sleeps) == harness.MAX_HTTP_ATTEMPTS - 1
     assert sleeps == [2.0, 4.0, 8.0]
+
+
+def test_openrouter_chat_rate_limit_retries_longer_with_stable_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import harness
+
+    body = (
+        b'{"error":{"message":"Provider returned error","code":429,'
+        b'"metadata":{"provider_name":"Google"}}}'
+    )
+
+    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+        raise _http_error(429, body=body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    sleeps: list[float] = []
+    with pytest.raises(harness.OpenRouterHTTPError) as raised:
+        harness.openrouter_chat(
+            "sk-test", {"model": "google/gemini-3.8-flash"}, timeout=5, sleep=sleeps.append
+        )
+
+    assert raised.value.provider == "Google"
+    assert raised.value.zero_cost is True
+    assert len(sleeps) == harness.MAX_RATE_LIMIT_ATTEMPTS - 1
+    assert sleeps == [
+        min(
+            harness._retry_delay(index, None)
+            + harness._stable_rate_limit_jitter(
+                b'{"model": "google/gemini-3.8-flash"}', index
+            ),
+            harness.MAX_RETRY_AFTER_SECONDS,
+        )
+        for index in range(1, harness.MAX_RATE_LIMIT_ATTEMPTS)
+    ]
+    assert max(sleeps) <= harness.MAX_RETRY_AFTER_SECONDS
+
+
+def test_lane_preserves_terminal_http_provider_and_zero_cost() -> None:
+    from or_pr_review import harness
+
+    def chat(_payload: dict) -> dict:
+        raise harness.OpenRouterHTTPError(
+            "OpenRouter HTTP 429: rate limited", provider="Google", zero_cost=True
+        )
+
+    result = run_lane(
+        model="google/gemini-3.8-flash",
+        messages=[{"role": "user", "content": "verify"}],
+        api_key="sk-test",
+        workspace=None,
+        max_tool_turns=0,
+        chat=chat,
+    )
+
+    assert result.ok is False
+    assert result.provider == "Google"
+    assert result.cost_usd == 0.0
+
+
+def test_terminal_http_error_does_not_hide_prior_unknown_cost(tmp_path: Path) -> None:
+    from or_pr_review import harness
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    calls = 0
+
+    def chat(_payload: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _tool_reply()
+        raise harness.OpenRouterHTTPError(
+            "OpenRouter HTTP 429: rate limited", provider="Google", zero_cost=True
+        )
+
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "verify"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=1,
+        chat=chat,
+    )
+
+    assert result.ok is False
+    assert result.provider == "Google"
+    assert result.cost_usd is None
+
+
+def test_http_error_provider_is_parsed_beyond_display_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import harness
+
+    body = json.dumps(
+        {
+            "error": {
+                "message": "x" * 1_000,
+                "metadata": {"provider_name": "Google"},
+            }
+        }
+    ).encode()
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        raise _http_error(400, body=body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(harness.OpenRouterHTTPError) as raised:
+        harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5)
+
+    assert raised.value.provider == "Google"
+
+
+def test_rate_limit_deadline_preserves_provider_and_zero_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import harness
+
+    body = b'{"error":{"metadata":{"provider_name":"Google"}}}'
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        raise _http_error(429, body=body)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(harness.OpenRouterHTTPError) as raised:
+        harness.openrouter_chat(
+            "sk-test",
+            {"model": "google/gemini-3.8-flash"},
+            timeout=5,
+            sleep=lambda _delay: None,
+            deadline=harness.time.monotonic() + 1,
+        )
+
+    assert raised.value.provider == "Google"
+    assert raised.value.zero_cost is True
+    assert "budget exhausted" in str(raised.value)
 
 
 def test_openrouter_chat_does_not_retry_client_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -973,8 +1604,9 @@ def test_lane_wall_clock_forces_structured_finish_before_job_timeout(
     assert now["value"] < 10
 
 
+@pytest.mark.parametrize("model", ["x-ai/grok-4.6", "google/gemini-3.8-flash"])
 def test_deadline_finalize_transport_failure_keeps_one_repair_turn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
 ) -> None:
     from or_pr_review import harness
 
@@ -987,18 +1619,29 @@ def test_deadline_finalize_transport_failure_keeps_one_repair_turn(
         payloads.append(payload)
         if len(payloads) == 1:
             now["value"] = 6.0
+            if model.startswith("google/gemini-"):
+                return _gemini_tool_reply()
             return _tool_reply()
         if len(payloads) == 2:
             now["value"] = 8.0
             raise LaneError("OpenRouter HTTP 429: retry later")
-        assert "tools" not in payload
+        if model.startswith("google/gemini-"):
+            assert payload["tool_choice"] == "none"
+        else:
+            assert "tools" not in payload
         assert "response_format" in payload
         assert "protected finalize request failed" in payload["messages"][-1]["content"]
+        assert not any(
+            left.get("role") == right.get("role") == "user"
+            for left, right in zip(
+                payload["messages"], payload["messages"][1:], strict=False
+            )
+        )
         now["value"] = 9.0
         return _findings_reply()
 
     result = run_lane(
-        model="x-ai/grok-4.6",
+        model=model,
         messages=[{"role": "user", "content": "review"}],
         api_key="sk-test",
         workspace=tmp_path,

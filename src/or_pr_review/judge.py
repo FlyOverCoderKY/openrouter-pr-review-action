@@ -19,7 +19,9 @@ from typing import Any
 
 from or_pr_review.errors import ActionError, SchemaError
 from or_pr_review.harness import (
+    MAX_GEMINI_RESPONSE_TOKENS,
     ChatFn,
+    _is_gemini_model,
     _response_spend,
     openrouter_chat,
     response_message_text,
@@ -522,6 +524,8 @@ def run_llm_judge(
         "reasoning": dict(JUDGE_REASONING),
         "usage": {"include": True},
     }
+    if _is_gemini_model(model):
+        payload["max_tokens"] = MAX_GEMINI_RESPONSE_TOKENS
     if provider_data_collection not in {None, "allow", "deny"}:
         raise ActionError("provider_data_collection must be allow, deny, or unset")
     if provider_data_collection or provider_zdr:

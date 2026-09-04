@@ -43,6 +43,12 @@ MAX_EVIDENCE = 600
 TRIMMED_EVIDENCE = 200
 MAX_LEDGER_TITLE = 160
 TRIMMED_TITLE = 100
+# The v1 decoder deliberately accepts the wider envelope used by already-posted
+# ledgers, even though the current encoder writes the tighter limits above.
+# Keep these fixed for the lifetime of ledger v1: tightening them could make a
+# previously valid PR ledger unreadable. Change them only with LEDGER_VERSION.
+LEDGER_V1_TITLE_COMPAT_LIMIT = 300
+LEDGER_V1_EVIDENCE_COMPAT_LIMIT = 616
 MAX_LEDGER_MODELS = 8
 MAX_REPLY_CHARS = 2_000
 MAX_REPLIES_BYTES = 16_000
@@ -441,9 +447,9 @@ def _decode_finding(item: object) -> LedgerFinding | None:
         return None
     if line is not None and (isinstance(line, bool) or not isinstance(line, int) or line <= 0):
         return None
-    if not isinstance(title, str) or not title.strip() or len(title) > 300:
+    if not isinstance(title, str) or not title.strip() or len(title) > LEDGER_V1_TITLE_COMPAT_LIMIT:
         return None
-    if not isinstance(evidence, str) or len(evidence) > MAX_EVIDENCE + 16:
+    if not isinstance(evidence, str) or len(evidence) > LEDGER_V1_EVIDENCE_COMPAT_LIMIT:
         return None
     if status not in {"open", "disputed"}:
         return None

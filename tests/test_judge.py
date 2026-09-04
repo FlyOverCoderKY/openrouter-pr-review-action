@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from or_pr_review.errors import SchemaError
+from or_pr_review.errors import ActionError, SchemaError
 from or_pr_review.judge import JUDGE_REASONING, parse_judge_issues, run_llm_judge
 from or_pr_review.models import (
     DEFAULT_JUDGE_MODEL,
@@ -141,6 +141,17 @@ def test_run_llm_judge_bad_output_fail_closed() -> None:
             lanes=[{"model": "x-ai/grok-4.6"}],
             api_key="sk-test",
             chat=chat,
+        )
+
+
+def test_run_llm_judge_rejects_invalid_provider_data_collection() -> None:
+    with pytest.raises(ActionError, match="allow, deny, or unset"):
+        run_llm_judge(
+            model="example/judge",
+            lanes=[{"model": "example/reviewer", "ok": True, "findings": []}],
+            api_key="sk-test",
+            chat=lambda _payload: pytest.fail("invalid policy must fail before transport"),
+            provider_data_collection="sometimes",
         )
 
 

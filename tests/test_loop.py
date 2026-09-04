@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 
 from or_pr_review.errors import ActionError
 from or_pr_review.loop import (
     LEDGER_PREFIX,
+    LEDGER_V1_EVIDENCE_COMPAT_LIMIT,
+    LEDGER_V1_TITLE_COMPAT_LIMIT,
     LEDGER_VERSION,
     Ledger,
     LedgerFinding,
@@ -45,6 +48,31 @@ def _finding(
     )
 
 
+def _raw_ledger_marker(*, title: str, evidence: str) -> str:
+    payload = {
+        "lv": LEDGER_VERSION,
+        "repo": REPO,
+        "pr": 7,
+        "sha": "",
+        "gen": "",
+        "round": 1,
+        "findings": [
+            {
+                "id": "r1-1",
+                "sev": "bug",
+                "file": None,
+                "line": None,
+                "title": title,
+                "ev": evidence,
+                "st": "open",
+                "m": [],
+            }
+        ],
+    }
+    token = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    return f"{LEDGER_PREFIX}{token} -->"
+
+
 def test_ledger_roundtrip_and_binding() -> None:
     ledger = Ledger(round_number=2, findings=(_finding(),), reviewed_sha="a" * 40)
     marker = encode_ledger(ledger, repo=REPO, pr_number=7)
@@ -58,6 +86,26 @@ def test_ledger_roundtrip_and_binding() -> None:
     assert decoded.findings[0].models == ("x-ai/grok-4.6",)
     assert extract_ledger(marker, repo="other/repo", pr_number=7) is None
     assert extract_ledger(marker, repo=REPO, pr_number=8) is None
+
+
+@pytest.mark.parametrize(
+    ("field", "limit"),
+    (
+        ("title", LEDGER_V1_TITLE_COMPAT_LIMIT),
+        ("evidence", LEDGER_V1_EVIDENCE_COMPAT_LIMIT),
+    ),
+)
+def test_ledger_v1_compatibility_limits(field: str, limit: int) -> None:
+    values = {"title": "t", "evidence": "e"}
+    values[field] = "x" * limit
+    at_limit = _raw_ledger_marker(**values)
+    decoded = extract_ledger(at_limit, repo=REPO, pr_number=7)
+    assert decoded is not None
+    assert getattr(decoded.findings[0], field) == "x" * limit
+
+    values[field] = "x" * (limit + 1)
+    over_limit = _raw_ledger_marker(**values)
+    assert extract_ledger(over_limit, repo=REPO, pr_number=7) is None
 
 
 def test_latest_ledger_newest_marker_is_authoritative() -> None:

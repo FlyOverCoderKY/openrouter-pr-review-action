@@ -19,12 +19,10 @@ from typing import Any
 
 from or_pr_review.errors import ActionError, SchemaError
 from or_pr_review.harness import (
-    MAX_GEMINI_RESPONSE_TOKENS,
     ChatFn,
-    _is_gemini_model,
-    _response_spend,
     openrouter_chat,
     response_message_text,
+    response_spend,
 )
 from or_pr_review.merge import (
     MergedIssue,
@@ -34,6 +32,7 @@ from or_pr_review.merge import (
     merged_issue_from_finding,
     same_merged_issue,
 )
+from or_pr_review.models import base_chat_payload
 from or_pr_review.redaction import redact
 from or_pr_review.schema import (
     MAX_BODY,
@@ -547,24 +546,17 @@ def run_llm_judge(
     annotated_lanes, input_ids = _annotated_lanes(lanes)
     allowed = [str(lane.get("model")) for lane in lanes if isinstance(lane.get("model"), str)]
     send = chat or (lambda payload: openrouter_chat(api_key, payload, timeout=timeout))
-    payload: dict[str, Any] = {
-        "model": model,
-        "messages": _build_judge_messages(annotated_lanes),
-        "response_format": {"type": "json_schema", "json_schema": judge_json_schema()},
-        "reasoning": dict(JUDGE_REASONING),
-        "usage": {"include": True},
-    }
-    if _is_gemini_model(model):
-        payload["max_tokens"] = MAX_GEMINI_RESPONSE_TOKENS
-    if provider_data_collection not in {None, "allow", "deny"}:
-        raise ActionError("provider_data_collection must be allow, deny, or unset")
-    if provider_data_collection or provider_zdr:
-        provider_policy: dict[str, Any] = {}
-        if provider_data_collection:
-            provider_policy["data_collection"] = provider_data_collection
-        if provider_zdr:
-            provider_policy["zdr"] = True
-        payload["provider"] = provider_policy
+    try:
+        payload, _protocol = base_chat_payload(
+            model=model,
+            response_schema=judge_json_schema(),
+            reasoning=JUDGE_REASONING,
+            provider_data_collection=provider_data_collection,
+            provider_zdr=provider_zdr,
+        )
+    except ValueError as exc:
+        raise ActionError(str(exc)) from exc
+    payload["messages"] = _build_judge_messages(annotated_lanes)
     try:
         response = send(payload)
     except Exception as exc:  # noqa: BLE001
@@ -584,4 +576,4 @@ def _response_cost(response: dict[str, Any]) -> float | None:
     block = response.get("usage")
     if not isinstance(block, dict):
         return None
-    return _response_spend(block)
+    return response_spend(block)

@@ -19,15 +19,71 @@ from or_pr_review.harness import (
     MAX_TOOL_TURNS,
     MISSING_SIGNATURE_FINALIZE_NOTICE,
     _assistant_record,
+    _LaneClock,
+    _LoopPhase,
+    _LoopState,
     parse_max_tool_turns,
     require_openrouter_key,
     run_lane,
 )
+from or_pr_review.models import GEMINI_MAX_RESPONSE_TOKENS
 
 
 def test_require_key_fail_closed() -> None:
     with pytest.raises(ActionError, match="OPENROUTER_API_KEY"):
         require_openrouter_key({})
+
+
+def test_lane_clock_preserves_finalize_repair_budget() -> None:
+    clock = _LaneClock(deadline=100.0, reserve_seconds=20.0)
+
+    assert (
+        clock.prepare_request(
+            now=50.0,
+            tools_active=True,
+            deadline_finalizing=False,
+            repair_available=True,
+        )
+        == 80.0
+    )
+    assert clock.finalize_due(now=80.0, tools_active=True)
+    assert (
+        clock.prepare_request(
+            now=80.0,
+            tools_active=False,
+            deadline_finalizing=True,
+            repair_available=True,
+        )
+        == 90.0
+    )
+    assert (
+        clock.prepare_request(
+            now=90.0,
+            tools_active=False,
+            deadline_finalizing=True,
+            repair_available=False,
+        )
+        == 100.0
+    )
+    assert clock.tool_deadline() == 80.0
+
+
+def test_loop_state_phase_owns_tool_and_finalize_flags() -> None:
+    state = _LoopState(phase=_LoopPhase.NUDGE, use_schema=False)
+    assert state.tools_active
+    assert state.force_tool
+
+    state.enter_finalize("signature", salvaged=True)
+
+    assert not state.tools_active
+    assert state.use_schema
+    assert state.signature_finalizing
+    assert state.salvage_attempted
+
+    state.enter_finalize("deadline", salvaged=True)
+    state.enter_finalize("signature", salvaged=True)
+    assert state.deadline_finalizing
+    assert state.signature_finalizing
 
 
 def test_run_lane_captures_provider_and_pins_routing(tmp_path: Path) -> None:
@@ -145,7 +201,8 @@ def test_gemini_lane_caps_reserved_output_tokens(tmp_path: Path) -> None:
     )
 
     assert result.ok
-    assert payloads[0]["max_tokens"] == MAX_GEMINI_RESPONSE_TOKENS
+    assert payloads[0]["max_tokens"] == GEMINI_MAX_RESPONSE_TOKENS
+    assert MAX_GEMINI_RESPONSE_TOKENS == GEMINI_MAX_RESPONSE_TOKENS
 
 
 @pytest.mark.parametrize(
@@ -1023,7 +1080,16 @@ def test_gemini_deadline_signature_rejection_sanitizes_before_retry(
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     now = {"value": 0.0}
     payloads: list[dict] = []
+    request_deadlines: list[float | None] = []
     monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
+    original_prepare = harness._LaneClock.prepare_request
+
+    def capture_request_deadline(clock: harness._LaneClock, **kwargs: object) -> float | None:
+        result = original_prepare(clock, **kwargs)
+        request_deadlines.append(result)
+        return result
+
+    monkeypatch.setattr(harness._LaneClock, "prepare_request", capture_request_deadline)
 
     def chat(payload: dict) -> dict:
         payloads.append(payload)
@@ -1036,16 +1102,18 @@ def test_gemini_deadline_signature_rejection_sanitizes_before_retry(
             raise LaneError(
                 "OpenRouter HTTP 400: INVALID_ARGUMENT function call has invalid thought_signature"
             )
-        assert "tools" not in payload
-        assert "response_format" in payload
-        assert not any(message.get("tool_calls") for message in payload["messages"])
-        assert not any(message.get("role") == "tool" for message in payload["messages"])
-        assert any(
-            'Tool: read_file\nArguments: {"path": "a.py"}\nResult:\n'
-            in str(message.get("content", ""))
-            for message in payload["messages"]
-        )
-        now["value"] = 7.0
+        if len(payloads) == 3:
+            assert "tools" not in payload
+            assert "response_format" in payload
+            assert not any(message.get("tool_calls") for message in payload["messages"])
+            assert not any(message.get("role") == "tool" for message in payload["messages"])
+            assert any(
+                'Tool: read_file\nArguments: {"path": "a.py"}\nResult:\n'
+                in str(message.get("content", ""))
+                for message in payload["messages"]
+            )
+            now["value"] = 7.0
+            return {"choices": [{"message": {"content": "not valid JSON"}}]}
         return _findings_reply()
 
     result = run_lane(
@@ -1062,7 +1130,8 @@ def test_gemini_deadline_signature_rejection_sanitizes_before_retry(
     assert result.thought_signature_tool_turns == 1
     assert result.thought_signature_recoveries == 1
     assert result.sanitized_tool_turns == 1
-    assert len(payloads) == 3
+    assert len(payloads) == 4
+    assert request_deadlines == [5.0, 8.0, 8.0, 10.0]
 
 
 def test_budget_withdrawal_never_solicits_unserviceable_calls(tmp_path: Path) -> None:
@@ -2149,17 +2218,17 @@ def test_run_lane_progress_failure_does_not_abort_paid_work(tmp_path: Path) -> N
 
 
 def test_response_spend_policy() -> None:
-    from or_pr_review.harness import _response_spend
+    from or_pr_review.harness import response_spend
 
     # Non-BYOK mirrors the charge into cost_details: count it once.
-    assert _response_spend(
+    assert response_spend(
         {"cost": 0.011, "is_byok": False, "cost_details": {"upstream_inference_cost": 0.011}}
     ) == pytest.approx(0.011)
     # BYOK: upstream is the spend; positive cost is the BYOK fee on top.
-    assert _response_spend(
+    assert response_spend(
         {"cost": 0.0, "is_byok": True, "cost_details": {"upstream_inference_cost": 0.009}}
     ) == pytest.approx(0.009)
     # BYOK with no upstream figure is unknown spend, not a $0 observation.
-    assert _response_spend({"cost": 0.0, "is_byok": True}) is None
+    assert response_spend({"cost": 0.0, "is_byok": True}) is None
     # Free non-BYOK routes legitimately cost $0.
-    assert _response_spend({"cost": 0}) == 0.0
+    assert response_spend({"cost": 0}) == 0.0

@@ -8,11 +8,16 @@ from or_pr_review.errors import ActionError
 from or_pr_review.models import (
     DEFAULT_JUDGE_MODEL,
     DEFAULT_MODEL,
+    GEMINI_MAX_RESPONSE_TOKENS,
     LANE_CAP,
+    ModelProtocolProfile,
+    base_chat_payload,
     judge_is_needed,
     matrix_json,
+    model_protocol_profile,
     parse_judge_model,
     parse_models,
+    provider_policy,
 )
 
 
@@ -84,3 +89,51 @@ def test_matrix_json_includes_indexes() -> None:
         {"index": 0, "model": "x-ai/grok-4.6"},
         {"index": 1, "model": "anthropic/claude-sonnet-4.6"},
     ]
+
+
+def test_model_protocol_profile_is_model_family_policy() -> None:
+    assert model_protocol_profile("example/model") == ModelProtocolProfile()
+    assert model_protocol_profile("google/gemini-2.5-pro") == ModelProtocolProfile(
+        max_response_tokens=GEMINI_MAX_RESPONSE_TOKENS,
+        preserve_provider_metadata=True,
+    )
+    gemini_3 = model_protocol_profile("google/gemini-3.1-flash-lite")
+    assert gemini_3.serial_tool_calls
+    assert gemini_3.is_signature_rejection("provider returned INVALID_ARGUMENT")
+    assert not model_protocol_profile("example/model").is_signature_rejection(
+        "provider returned invalid_argument"
+    )
+
+
+def test_provider_policy_centralizes_routing_and_data_controls() -> None:
+    assert provider_policy() is None
+    assert provider_policy(order=["Baseten"], data_collection="deny", zdr=True) == {
+        "order": ["Baseten"],
+        "allow_fallbacks": False,
+        "data_collection": "deny",
+        "zdr": True,
+    }
+    with pytest.raises(ValueError, match="allow, deny, or unset"):
+        provider_policy(data_collection="sometimes")
+
+
+def test_base_chat_payload_applies_protocol_and_shared_fields() -> None:
+    payload, profile = base_chat_payload(
+        model="google/gemini-3.1-flash-lite",
+        response_schema={"name": "result"},
+        reasoning={"effort": "minimal"},
+        provider_data_collection="deny",
+    )
+
+    assert profile.serial_tool_calls
+    assert payload == {
+        "model": "google/gemini-3.1-flash-lite",
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "result"},
+        },
+        "usage": {"include": True},
+        "max_tokens": GEMINI_MAX_RESPONSE_TOKENS,
+        "reasoning": {"effort": "minimal"},
+        "provider": {"data_collection": "deny"},
+    }

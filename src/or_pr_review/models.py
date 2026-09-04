@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
+from typing import Any
 
 from or_pr_review.errors import ActionError
 
@@ -12,9 +14,103 @@ DEFAULT_MODEL = "x-ai/grok-4.6"
 # Verified live on OpenRouter 2026-08-29. Merge/de-dupe only; not a second reviewer.
 DEFAULT_JUDGE_MODEL = "openai/gpt-5.6-luna"
 
+# Gemini reserves against a large provider maximum unless the client supplies
+# an explicit cap. Other model families keep their native output maximum.
+GEMINI_MAX_RESPONSE_TOKENS = 32_768
+
 # OpenRouter slugs look like provider/model or provider/model:variant.
 # Do not invent slugs; callers pass catalogue ids.
 _SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(:[A-Za-z0-9._-]+)?$")
+
+
+@dataclass(frozen=True)
+class ModelProtocolProfile:
+    """Model-family behavior that OpenRouter's generic API does not describe.
+
+    OpenRouter may route one model through several providers, so this policy
+    follows the requested model slug rather than the eventual provider name.
+    """
+
+    max_response_tokens: int | None = None
+    preserve_provider_metadata: bool = False
+    serial_tool_calls: bool = False
+
+    def is_signature_rejection(self, error: str) -> bool:
+        if not self.serial_tool_calls:
+            return False
+        lowered_error = error.lower()
+        if "thought_signature" in lowered_error or "thought signature" in lowered_error:
+            return True
+        # Google sometimes redacts the field-level detail and returns only a
+        # generic INVALID_ARGUMENT after accepting several tool turns.
+        return "invalid_argument" in lowered_error or "invalid argument" in lowered_error
+
+
+def model_protocol_profile(model: str) -> ModelProtocolProfile:
+    """Resolve stable request/transcript behavior without a live API lookup."""
+
+    if not model.startswith("google/gemini-"):
+        return ModelProtocolProfile()
+    return ModelProtocolProfile(
+        max_response_tokens=GEMINI_MAX_RESPONSE_TOKENS,
+        preserve_provider_metadata=True,
+        serial_tool_calls=model.startswith("google/gemini-3"),
+    )
+
+
+def provider_policy(
+    *,
+    order: list[str] | None = None,
+    data_collection: str | None = None,
+    zdr: bool = False,
+) -> dict[str, Any] | None:
+    """Build the shared OpenRouter routing/data policy.
+
+    ``ValueError`` deliberately leaves callers free to translate invalid
+    action configuration into their own public error type.
+    """
+
+    if data_collection not in {None, "allow", "deny"}:
+        raise ValueError("provider_data_collection must be allow, deny, or unset")
+    policy: dict[str, Any] = {}
+    if order:
+        policy.update({"order": list(order), "allow_fallbacks": False})
+    if data_collection:
+        policy["data_collection"] = data_collection
+    if zdr:
+        policy["zdr"] = True
+    return policy or None
+
+
+def base_chat_payload(
+    *,
+    model: str,
+    response_schema: dict[str, Any],
+    reasoning: dict[str, str] | None = None,
+    provider_order: list[str] | None = None,
+    provider_data_collection: str | None = None,
+    provider_zdr: bool = False,
+) -> tuple[dict[str, Any], ModelProtocolProfile]:
+    """Build fields shared by lane and judge chat-completion requests."""
+
+    profile = model_protocol_profile(model)
+    payload: dict[str, Any] = {
+        "model": model,
+        "response_format": {"type": "json_schema", "json_schema": response_schema},
+        "usage": {"include": True},
+    }
+    if profile.max_response_tokens is not None:
+        payload["max_tokens"] = profile.max_response_tokens
+    if reasoning:
+        payload["reasoning"] = dict(reasoning)
+    policy = provider_policy(
+        order=provider_order,
+        data_collection=provider_data_collection,
+        zdr=provider_zdr,
+    )
+    if policy is not None:
+        payload["provider"] = policy
+    return payload, profile
 
 
 def parse_slug(raw: str, *, what: str) -> str:

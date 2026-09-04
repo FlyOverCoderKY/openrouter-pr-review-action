@@ -13,10 +13,13 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
 from or_pr_review.errors import ActionError, LaneError
+from or_pr_review.models import GEMINI_MAX_RESPONSE_TOKENS, base_chat_payload
 from or_pr_review.redaction import redact
 from or_pr_review.schema import (
     SCHEMA_VERSION,
@@ -36,10 +39,9 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 HTTP_REFERER = "https://github.com/FlyOverCoderKY/openrouter-pr-review-action"
 APP_TITLE = "OpenRouter PR Review Action"
 DEFAULT_TIMEOUT = 180
-# Bound every completion explicitly. OpenRouter otherwise reserves against the
-# provider model's maximum output (currently 65,536 tokens for Gemini 3.8),
-# which can reject an affordable request before inference even starts.
-MAX_GEMINI_RESPONSE_TOKENS = 32_768
+# Compatibility import for Python callers that used the former harness-level
+# constant. New code should import GEMINI_MAX_RESPONSE_TOKENS from models.
+MAX_GEMINI_RESPONSE_TOKENS = GEMINI_MAX_RESPONSE_TOKENS
 # Keep a lane inside the caller's 25-minute job ceiling.  The protected tail
 # is deliberately long enough for one normal default-timeout request, while
 # the remaining seven minutes cover artifact upload, judging, and publishing.
@@ -111,6 +113,98 @@ MAX_TOOL_CALL_SECONDS = 30
 ChatFn = Callable[[dict[str, Any]], dict[str, Any]]
 SleepFn = Callable[[float], None]
 ProgressFn = Callable[[dict[str, int | float | str]], None]
+
+
+class _LoopPhase(Enum):
+    EXPLORE = auto()
+    NUDGE = auto()
+    FINALIZE = auto()
+    REPAIR = auto()
+
+
+@dataclass
+class _LoopState:
+    phase: _LoopPhase
+    use_schema: bool
+    turns: int = 0
+    repairs: int = 0
+    observation_bytes: int = 0
+    last_error: LaneError | None = None
+    finalize_reason: str | None = None
+    deadline_limited: bool = False
+    finalize_retried: bool = False
+    salvage_attempted: bool = False
+    successful_responses: int = 0
+
+    @property
+    def tools_active(self) -> bool:
+        return self.phase in {_LoopPhase.EXPLORE, _LoopPhase.NUDGE}
+
+    @property
+    def force_tool(self) -> bool:
+        return self.phase is _LoopPhase.NUDGE
+
+    @property
+    def deadline_finalizing(self) -> bool:
+        return self.deadline_limited
+
+    @property
+    def signature_finalizing(self) -> bool:
+        return self.finalize_reason == "signature"
+
+    def enter_finalize(self, reason: str, *, salvaged: bool = False) -> None:
+        self.phase = _LoopPhase.FINALIZE
+        self.use_schema = True
+        self.finalize_reason = reason
+        if reason == "deadline":
+            # Deadline pressure is orthogonal to the immediate finalize reason.
+            # A later signature recovery must still preserve the repair reserve.
+            self.deadline_limited = True
+        if salvaged:
+            self.salvage_attempted = True
+
+
+@dataclass
+class _LaneClock:
+    """Own lane-wall-clock arithmetic for real and injected chat transports."""
+
+    deadline: float | None
+    reserve_seconds: float
+    request_deadline: float | None = None
+
+    def ensure_active(self, now: float) -> None:
+        if self.deadline is not None and now >= self.deadline:
+            raise LaneError("OpenRouter lane wall-clock deadline exhausted")
+
+    def finalize_due(self, *, now: float, tools_active: bool) -> bool:
+        return bool(
+            self.deadline is not None
+            and tools_active
+            and now >= self.deadline - self.reserve_seconds
+        )
+
+    def prepare_request(
+        self,
+        *,
+        now: float,
+        tools_active: bool,
+        deadline_finalizing: bool,
+        repair_available: bool,
+    ) -> float | None:
+        if self.deadline is None:
+            self.request_deadline = None
+        elif deadline_finalizing and repair_available:
+            self.request_deadline = now + max(1.0, (self.deadline - now) / 2)
+        elif tools_active:
+            self.request_deadline = self.deadline - self.reserve_seconds
+        else:
+            self.request_deadline = self.deadline
+        return self.request_deadline
+
+    def tool_deadline(self) -> float | None:
+        if self.deadline is None:
+            return None
+        return self.deadline - self.reserve_seconds
 
 
 def require_openrouter_key(env: dict[str, str]) -> str:
@@ -321,14 +415,18 @@ def run_lane(
     started = time.monotonic()
     deadline = started + lane_timeout
     stats: dict[str, int] = {}
-    request_deadline = {"value": deadline}
+    clock = _LaneClock(
+        deadline=deadline,
+        reserve_seconds=min(FINAL_RESPONSE_RESERVE_SECONDS, max(1, lane_timeout // 2)),
+        request_deadline=deadline,
+    )
     send = chat or (
         lambda payload: openrouter_chat(
             api_key,
             payload,
             timeout=timeout,
             stats=stats,
-            deadline=request_deadline["value"],
+            deadline=clock.request_deadline,
         )
     )
     conversation = list(messages)
@@ -409,13 +507,7 @@ def run_lane(
                 include_resolutions=expect_resolutions,
             ),
             validate_final=_validate,
-            deadline=deadline,
-            finalize_reserve_seconds=min(FINAL_RESPONSE_RESERVE_SECONDS, max(1, lane_timeout // 2)),
-            set_request_deadline=(
-                None
-                if chat is not None
-                else lambda value: request_deadline.__setitem__("value", value)
-            ),
+            clock=clock,
             progress=emit_progress,
         )
         gate_root = workspace if workspace is not None else anchor_root
@@ -480,56 +572,29 @@ def _run_loop(
     response_schema: dict[str, Any] | None = None,
     validate_final: Callable[[str], tuple[list[Finding], list[Resolution], list[tuple[str, int]]]]
     | None = None,
-    deadline: float | None = None,
-    finalize_reserve_seconds: int = FINAL_RESPONSE_RESERVE_SECONDS,
-    set_request_deadline: Callable[[float], None] | None = None,
+    clock: _LaneClock,
     progress: Callable[[], None] | None = None,
 ) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
-    payload_base: dict[str, Any] = {
-        "model": model,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": response_schema or findings_json_schema(),
-        },
-        # Ask OpenRouter to return the credit cost of each request so the
-        # posted review can report what the run actually spent.
-        "usage": {"include": True},
-    }
-    if _is_gemini_model(model):
-        payload_base["max_tokens"] = MAX_GEMINI_RESPONSE_TOKENS
-    if effort:
-        payload_base["reasoning"] = {"effort": effort}
-    if provider_data_collection not in {None, "allow", "deny"}:
-        raise LaneError("provider_data_collection must be allow, deny, or unset")
-    if provider_order or provider_data_collection or provider_zdr:
-        provider_policy: dict[str, Any] = {}
-        if provider_order:
-            provider_policy.update({"order": list(provider_order), "allow_fallbacks": False})
-        if provider_data_collection:
-            provider_policy["data_collection"] = provider_data_collection
-        if provider_zdr:
-            provider_policy["zdr"] = True
-        # Pin routing for comparisons and make benchmark data policy explicit.
-        payload_base["provider"] = provider_policy
+    try:
+        payload_base, protocol = base_chat_payload(
+            model=model,
+            response_schema=response_schema or findings_json_schema(),
+            reasoning={"effort": effort} if effort else None,
+            provider_order=provider_order,
+            provider_data_collection=provider_data_collection,
+            provider_zdr=provider_zdr,
+        )
+    except ValueError as exc:
+        raise LaneError(str(exc)) from exc
 
-    turns = 0
-    repairs = 0
-    observation_bytes = 0
-    last_error: LaneError | None = None
     tools_active = bool(tools) and workspace is not None
     # JSON schema on the first tool-enabled turn pushes a glance-and-clean
     # empty findings object. Offer tools without a schema until the model
     # stops calling them (or the budget is gone).
-    use_schema = not tools_active
-    nudged = False
-    force_tool = False
-    finalize_retried = False
-    salvage_attempted = False
-    deadline_finalizing = False
-    gemini_model = _is_gemini_model(model)
-    serial_tool_calls = _requires_strict_gemini_tool_protocol(model)
-    signature_finalizing = False
-    successful_responses = 0
+    state = _LoopState(
+        phase=_LoopPhase.EXPLORE if tools_active else _LoopPhase.FINALIZE,
+        use_schema=not tools_active,
+    )
 
     def retry_finalization(
         notice: str,
@@ -538,22 +603,28 @@ def _run_loop(
         message: dict[str, Any] | None = None,
     ) -> bool:
         """Make the one allowed tool-free structured-finish repair request."""
-        nonlocal finalize_retried, last_error, tools_active, use_schema
-        if finalize_retried:
+        if state.finalize_retried:
             return False
-        finalize_retried = True
-        last_error = error
+        state.finalize_retried = True
+        state.last_error = error
         if message is not None:
-            conversation.append(_assistant_record(message, preserve_provider_metadata=gemini_model))
+            conversation.append(
+                _assistant_record(
+                    message,
+                    preserve_provider_metadata=protocol.preserve_provider_metadata,
+                )
+            )
         # Some provider protocols reject adjacent user entries. Merge notices
         # so a deadline/failure sequence remains valid for every provider.
         _append_user_notice(conversation, notice)
-        tools_active = False
-        use_schema = True
+        state.phase = _LoopPhase.REPAIR
+        state.use_schema = True
+        if state.finalize_reason is None:
+            state.finalize_reason = "repair"
         return True
 
     def sanitize_gemini_history() -> None:
-        if not serial_tool_calls:
+        if not protocol.serial_tool_calls:
             return
         sanitized = _sanitize_tool_history_for_finalize(conversation)
         if stats is not None and sanitized:
@@ -562,50 +633,41 @@ def _run_loop(
     try:
         while True:
             now = time.monotonic()
-            if deadline is not None and now >= deadline:
-                raise LaneError("OpenRouter lane wall-clock deadline exhausted")
+            clock.ensure_active(now)
             if (
-                deadline is not None
-                and tools_active
-                and not deadline_finalizing
-                and now >= deadline - finalize_reserve_seconds
+                clock.finalize_due(now=now, tools_active=state.tools_active)
+                and not state.deadline_finalizing
             ):
-                deadline_finalizing = True
-                salvage_attempted = True
+                state.enter_finalize("deadline", salvaged=True)
                 if stats is not None:
                     stats["salvaged"] = 1
                 _append_user_notice(conversation, DEADLINE_FINALIZE_NOTICE)
-                tools_active = False
-                use_schema = True
 
             # Tool exploration may use only the leading portion of the lane
             # budget.  Preserve the protected tail for a structured finish.
-            if set_request_deadline is not None and deadline is not None:
-                if deadline_finalizing and not finalize_retried:
-                    # Do not let the first protected-tail finalize request
-                    # consume the entire lane. Preserve half of the remaining
-                    # tail for the documented schema/transport repair turn.
-                    request_limit = now + max(1.0, (deadline - now) / 2)
-                else:
-                    request_limit = (
-                        deadline if not tools_active else deadline - finalize_reserve_seconds
-                    )
-                set_request_deadline(request_limit)
+            # This calculation also runs for injected chat fakes, keeping the
+            # tested control path identical even though they do no network I/O.
+            clock.prepare_request(
+                now=now,
+                tools_active=state.tools_active,
+                deadline_finalizing=state.deadline_finalizing,
+                repair_available=not state.finalize_retried,
+            )
             payload = {
                 **payload_base,
                 "messages": conversation,
             }
-            if not use_schema:
+            if not state.use_schema:
                 payload.pop("response_format", None)
             replay_tools = (
-                serial_tool_calls
-                and not tools_active
+                protocol.serial_tool_calls
+                and not state.tools_active
                 and _conversation_has_tool_protocol(conversation)
             )
-            if tools_active or replay_tools:
+            if state.tools_active or replay_tools:
                 payload["tools"] = tools
-                if tools_active:
-                    payload["tool_choice"] = "required" if force_tool else "auto"
+                if state.tools_active:
+                    payload["tool_choice"] = "required" if state.force_tool else "auto"
                 else:
                     payload["tool_choice"] = "none"
                 # Gemini 3 strictly validates thought signatures across a
@@ -614,13 +676,13 @@ def _run_loop(
                 # the next otherwise-valid request to fail with HTTP 400
                 # INVALID_ARGUMENT.  Keep Gemini's tool transcript serial so
                 # there is exactly one signature-bearing call to round-trip.
-                if serial_tool_calls and tools_active:
+                if protocol.serial_tool_calls and state.tools_active:
                     payload["parallel_tool_calls"] = False
             if stats is not None:
                 stats["requests"] = stats.get("requests", 0) + 1
             try:
                 response = send(payload)
-                successful_responses += 1
+                state.successful_responses += 1
                 _absorb_usage(usage, response, meta)
                 if progress is not None:
                     progress()
@@ -632,11 +694,11 @@ def _run_loop(
                 if isinstance(exc, OpenRouterHTTPError):
                     if exc.provider and meta is not None:
                         meta["provider"] = exc.provider
-                    if successful_responses == 0 and "cost_usd" not in usage:
+                    if state.successful_responses == 0 and "cost_usd" not in usage:
                         usage["cost_usd"] = 0.0
                     if progress is not None:
                         progress()
-                if signature_finalizing:
+                if state.signature_finalizing:
                     # An unsigned tool turn gets one safe, tool-free finish.
                     # Retrying it with another transcript mutation would no
                     # longer be the promised recovery from the last valid
@@ -645,17 +707,13 @@ def _run_loop(
                 message = str(exc)
                 lowered = message.lower()
                 schema_rejected = "response_format" in lowered or "json_schema" in lowered
-                if use_schema and schema_rejected:
-                    use_schema = False
-                    last_error = exc
-                    if deadline_finalizing:
-                        finalize_retried = True
+                if state.use_schema and schema_rejected:
+                    state.use_schema = False
+                    state.last_error = exc
+                    if state.deadline_finalizing:
+                        state.finalize_retried = True
                     continue
-                if (
-                    serial_tool_calls
-                    and turns > 0
-                    and _looks_like_gemini_signature_rejection(lowered)
-                ):
+                if state.turns > 0 and protocol.is_signature_rejection(lowered):
                     # The provider rejected an ostensibly signed tool history.
                     # Strip the protocol blocks once, retain their observations
                     # as attributed plain evidence, and make one no-tools
@@ -663,39 +721,32 @@ def _run_loop(
                     if _looks_like_context_overflow(lowered):
                         _shrink_tool_history(conversation, keep_last=0)
                     sanitize_gemini_history()
-                    signature_finalizing = True
-                    salvage_attempted = True
+                    state.enter_finalize("signature", salvaged=True)
                     if stats is not None:
                         stats["salvaged"] = 1
                         stats["thought_signature_recoveries"] = (
                             stats.get("thought_signature_recoveries", 0) + 1
                         )
                     _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
-                    tools_active = False
-                    use_schema = True
                     continue
-                deadline_pressure = (
-                    deadline is not None
-                    and tools_active
-                    and time.monotonic() >= deadline - finalize_reserve_seconds
+                deadline_pressure = clock.finalize_due(
+                    now=time.monotonic(),
+                    tools_active=state.tools_active,
                 )
-                if deadline_pressure and not salvage_attempted:
+                if deadline_pressure and not state.salvage_attempted:
                     # The exploration-stage request budget expired.  This is
                     # expected deadline control, not a failed lane: finalize
                     # from the embedded diff even if no tool round completed.
-                    deadline_finalizing = True
-                    salvage_attempted = True
+                    state.enter_finalize("deadline", salvaged=True)
                     if stats is not None:
                         stats["salvaged"] = 1
                     _append_user_notice(conversation, DEADLINE_FINALIZE_NOTICE)
-                    tools_active = False
-                    use_schema = True
                     continue
-                if turns > 0 and not salvage_attempted:
+                if state.turns > 0 and not state.salvage_attempted:
                     # Salvage: a mid-loop failure that survived the HTTP
                     # retries must not discard every gathered observation.
                     # Ask for a final JSON answer from the evidence so far.
-                    salvage_attempted = True
+                    state.enter_finalize("transport", salvaged=True)
                     if stats is not None:
                         stats["salvaged"] = 1
                     if _looks_like_context_overflow(lowered):
@@ -709,10 +760,8 @@ def _run_loop(
                             "you have already gathered."
                         ),
                     )
-                    tools_active = False
-                    use_schema = True
                     continue
-                if deadline_finalizing and not finalize_retried:
+                if state.deadline_finalizing and not state.finalize_retried:
                     # A transport/provider failure during the first protected
                     # finalize still gets one bounded retry. The request above
                     # reserved time specifically for this path.
@@ -728,34 +777,34 @@ def _run_loop(
                 raise
             tool_calls = message.get("tool_calls") or []
             if tool_calls:
-                if signature_finalizing:
+                if state.signature_finalizing:
                     raise LaneError(
                         "Gemini returned another tool call during thought-signature recovery"
                     )
-                force_tool = False
-                if serial_tool_calls and not tools_active:
+                if state.phase is _LoopPhase.NUDGE:
+                    state.phase = _LoopPhase.EXPLORE
+                if protocol.serial_tool_calls and not state.tools_active:
                     # The provider ignored tool_choice=none. Do not append or
                     # execute the unexpected turn; finish once from attributed
                     # plain evidence without replaying tool protocol.
                     sanitize_gemini_history()
-                    signature_finalizing = True
-                    salvage_attempted = True
+                    state.enter_finalize("signature", salvaged=True)
                     if stats is not None:
                         stats["salvaged"] = 1
                         stats["thought_signature_recoveries"] = (
                             stats.get("thought_signature_recoveries", 0) + 1
                         )
                     _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
-                    use_schema = True
                     continue
-                if serial_tool_calls and not _has_round_trippable_gemini_signature(message):
+                if protocol.serial_tool_calls and not _has_round_trippable_gemini_signature(
+                    message
+                ):
                     # Gemini 3 requires the thought signature from each
                     # function-calling step to appear unchanged in the next
                     # request. Never execute a call whose response cannot be
                     # replayed: doing so would both waste local work and poison
                     # every subsequent provider request, including salvage.
-                    signature_finalizing = True
-                    salvage_attempted = True
+                    state.enter_finalize("signature", salvaged=True)
                     if stats is not None:
                         stats["salvaged"] = 1
                         stats["thought_signature_recoveries"] = (
@@ -763,62 +812,64 @@ def _run_loop(
                         )
                     sanitize_gemini_history()
                     _append_user_notice(conversation, MISSING_SIGNATURE_FINALIZE_NOTICE)
-                    tools_active = False
-                    use_schema = True
                     continue
-                if serial_tool_calls and stats is not None:
+                if protocol.serial_tool_calls and stats is not None:
                     stats["thought_signature_tool_turns"] = (
                         stats.get("thought_signature_tool_turns", 0) + 1
                     )
                 conversation.append(
-                    _assistant_record(message, preserve_provider_metadata=gemini_model)
+                    _assistant_record(
+                        message,
+                        preserve_provider_metadata=protocol.preserve_provider_metadata,
+                    )
                 )
-                if not tools_active or workspace is None:
+                if not state.tools_active or workspace is None:
                     # The model produced tool calls this loop never solicited
                     # (or cannot service). Answer every call with a stub so
                     # the transcript stays valid, then insist on the finish.
-                    repairs += 1
-                    if repairs > MAX_REPAIR_ROUNDS:
+                    state.repairs += 1
+                    if state.repairs > MAX_REPAIR_ROUNDS:
                         raise LaneError(
                             "model kept issuing tool calls after the tool budget was withdrawn"
                         )
                     for call in tool_calls:
                         conversation.append(_stub_tool_result(call))
                     conversation.append({"role": "user", "content": BUDGET_EXHAUSTED_NOTICE})
-                    use_schema = True
+                    state.use_schema = True
                     continue
-                turns += 1
+                state.turns += 1
                 if stats is not None:
-                    stats["tool_rounds"] = turns
+                    stats["tool_rounds"] = state.turns
                 if progress is not None:
                     progress()
                 for call in tool_calls:
-                    tool_deadline = (
-                        deadline - finalize_reserve_seconds if deadline is not None else None
-                    )
-                    observation = _run_one_tool(workspace, call, deadline=tool_deadline)
+                    observation = _run_one_tool(workspace, call, deadline=clock.tool_deadline())
                     conversation.append(observation)
                     text = observation.get("content")
                     if isinstance(text, str):
-                        observation_bytes += len(text.encode("utf-8"))
-                if turns >= max_tool_turns or observation_bytes >= MAX_OBSERVATION_BYTES:
+                        state.observation_bytes += len(text.encode("utf-8"))
+                if (
+                    state.turns >= max_tool_turns
+                    or state.observation_bytes >= MAX_OBSERVATION_BYTES
+                ):
                     # Withdraw tools BEFORE the next request: the loop must
                     # never solicit a tool call it will not execute (a
                     # dangling assistant tool_calls entry is an invalid
                     # conversation). The observation-byte cap bounds the
                     # resent transcript the same way the turn budget does.
-                    tools_active = False
-                    use_schema = True
+                    state.enter_finalize("budget")
                     conversation.append({"role": "user", "content": BUDGET_EXHAUSTED_NOTICE})
                 continue
 
             content = _message_text(message)
-            if tools_active and turns == 0 and not nudged:
+            if state.phase is _LoopPhase.EXPLORE and state.turns == 0:
                 # Glance-and-clean: one forced blast-radius tool pass.
-                nudged = True
-                force_tool = True
+                state.phase = _LoopPhase.NUDGE
                 conversation.append(
-                    _assistant_record(message, preserve_provider_metadata=gemini_model)
+                    _assistant_record(
+                        message,
+                        preserve_provider_metadata=protocol.preserve_provider_metadata,
+                    )
                 )
                 conversation.append({"role": "user", "content": BLAST_RADIUS_NUDGE})
                 continue
@@ -840,8 +891,8 @@ def _run_loop(
                     # schema-enforced, tool-free redo before failing open.
                     continue
                 return validated
-            if last_error:
-                raise last_error
+            if state.last_error:
+                raise state.last_error
             if retry_finalization(
                 (f"{FINALIZE_RETRY_NOTICE} Problem: the previous assistant message was empty."),
                 message=message,
@@ -856,7 +907,7 @@ def _run_loop(
             raise LaneError("OpenRouter returned an empty assistant message")
     finally:
         if stats is not None:
-            stats["tool_rounds"] = turns
+            stats["tool_rounds"] = state.turns
 
 
 def _looks_like_context_overflow(lowered_error: str) -> bool:
@@ -868,25 +919,6 @@ def _looks_like_context_overflow(lowered_error: str) -> bool:
         or "window" in lowered_error
         or "token" in lowered_error
     )
-
-
-def _looks_like_gemini_signature_rejection(lowered_error: str) -> bool:
-    if "thought_signature" in lowered_error or "thought signature" in lowered_error:
-        return True
-    # Google sometimes redacts the field-level detail and returns only a
-    # generic INVALID_ARGUMENT after accepting several tool turns. The caller
-    # invokes this predicate only for Gemini after at least one tool round, so
-    # the safe recovery is the same: preserve observations as attributed text,
-    # remove provider-specific tool protocol, and request one structured finish.
-    return "invalid_argument" in lowered_error or "invalid argument" in lowered_error
-
-
-def _is_gemini_model(model: str) -> bool:
-    return model.startswith("google/gemini-")
-
-
-def _requires_strict_gemini_tool_protocol(model: str) -> bool:
-    return model.startswith("google/gemini-3")
 
 
 def _conversation_has_tool_protocol(conversation: list[dict[str, Any]]) -> bool:
@@ -1171,7 +1203,7 @@ def _absorb_usage(
         value = block.get(key)
         if isinstance(value, int):
             usage[key] = usage.get(key, 0) + value
-    spend = _response_spend(block)
+    spend = response_spend(block)
     if spend is not None:
         usage["cost_usd"] = usage.get("cost_usd", 0) + spend
     details = block.get("prompt_tokens_details")
@@ -1181,7 +1213,7 @@ def _absorb_usage(
             usage["cached_tokens"] = usage.get("cached_tokens", 0) + cached
 
 
-def _response_spend(block: dict[str, Any]) -> float | None:
+def response_spend(block: dict[str, Any]) -> float | None:
     """What this request actually cost the operator, from one usage block.
 
     Non-BYOK responses put the charge in `cost` AND mirror the same figure

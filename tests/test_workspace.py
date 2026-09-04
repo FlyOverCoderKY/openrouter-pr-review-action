@@ -58,6 +58,43 @@ def test_nested_and_case_variant_credential_paths_are_blocked(
     assert "refusing" in tool_read_file(tmp_path, relative)
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".npmrc",
+        "nested/.pypirc",
+        "nested/.netrc",
+        "nested/_netrc",
+        "nested/.git-credentials",
+        "nested/.htpasswd",
+        "nested/id_dsa",
+        "nested/id_ecdsa_sk",
+        "nested/id_ed25519_sk",
+        "nested/release.keystore",
+        "nested/terraform.tfstate",
+        "nested/terraform.tfstate.backup",
+        "config/secrets.yaml",
+        ".envrc",
+        "nested/.envrc.local",
+        "nested/.direnv/token",
+    ],
+)
+def test_high_confidence_credential_paths_are_blocked(tmp_path: Path, relative: str) -> None:
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("secret\n", encoding="utf-8")
+    assert is_blocked_path(target)
+    assert "refusing" in tool_read_file(tmp_path, relative)
+
+
+def test_envrc_exported_assignments_are_refused_without_content_heuristics(tmp_path: Path) -> None:
+    target = tmp_path / ".envrc"
+    target.write_text("export OPENROUTER_API_KEY=sk-test-secret\n", encoding="utf-8")
+
+    assert "refusing" in tool_read_file(tmp_path, ".envrc")
+    assert ".envrc" not in tool_grep(tmp_path, "OPENROUTER_API_KEY")
+
+
 def test_dotenv_contents_refused(tmp_path: Path) -> None:
     notes = tmp_path / "notes.txt"
     notes.write_text("FOO=1\nBAR=2\nBAZ=3\n", encoding="utf-8")
@@ -266,6 +303,109 @@ def test_materialize_commit_writes_full_manifest_despite_skips(tmp_path):
     assert (dest / "small.py").is_file()
     manifest = tracked_paths(dest)
     assert manifest == {"small.py", "big.bin"}
+
+
+def test_materialized_workspace_uses_safety_metadata_instead_of_rescanning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    import or_pr_review.workspace as ws
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "user.name=T",
+                "-c",
+                "commit.gpgsign=false",
+                *args,
+            ],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    (repo / "safe.txt").write_text(
+        "needle=value with prose\u2028same logical line\nsecond\n", encoding="utf-8"
+    )
+    (repo / "dotenv.txt").write_text("FOO=1\nBAR=2\nBAZ=3\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "c")
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    dest = tmp_path / "inert-checkout"
+    ws.materialize_commit(repo, sha, dest)
+    metadata = json.loads((dest.parent / f"{dest.name}.safety.json").read_text(encoding="utf-8"))
+    assert metadata["files"] == {
+        "dotenv.txt": {"line_count": 3, "state": "dotenv"},
+        "safe.txt": {"line_count": 2, "state": "safe"},
+    }
+
+    def unexpected_scan(_text: str) -> bool:
+        raise AssertionError("materialized content was rescanned")
+
+    monkeypatch.setattr(ws, "looks_like_dotenv", unexpected_scan)
+    assert "needle=value" in ws.tool_read_file(dest, "safe.txt")
+    assert "needle=value" in ws.tool_grep(dest, "needle")
+    assert "refusing" in ws.tool_read_file(dest, "dotenv.txt")
+    assert "dotenv.txt" not in ws.tool_grep(dest, "FOO")
+
+    def unexpected_full_read(_path: Path) -> bytes:
+        raise AssertionError("ranged reads must use the indexed line window")
+
+    monkeypatch.setattr(Path, "read_bytes", unexpected_full_read)
+    first = ws.tool_read_file(dest, "safe.txt", start_line=1, max_lines=1)
+    second = ws.tool_read_file(dest, "safe.txt", start_line=2, max_lines=1)
+    assert "needle=value" in first and "same logical line" in first
+    assert "second" in second
+
+
+@pytest.mark.parametrize("contents", [None, "not-json", '{"version":1,"files":{}}'])
+def test_materialized_workspace_fails_closed_for_missing_or_bad_safety_metadata(
+    tmp_path: Path, contents: str | None
+) -> None:
+    workspace = tmp_path / "inert-checkout"
+    workspace.mkdir()
+    (workspace / "safe.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "inert-checkout.paths").write_text("safe.txt\n", encoding="utf-8")
+    safety_path = tmp_path / "inert-checkout.safety.json"
+    if contents is not None:
+        safety_path.write_text(contents, encoding="utf-8")
+
+    read_result = tool_read_file(workspace, "safe.txt")
+    grep_result = tool_grep(workspace, "needle")
+    assert "safety metadata is missing or invalid" in read_result
+    assert "safety metadata is missing or invalid" in grep_result
+
+
+def test_direct_fixture_roots_keep_full_file_dotenv_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import or_pr_review.workspace as ws
+
+    target = tmp_path / "config.txt"
+    target.write_text("needle=value\n", encoding="utf-8")
+    calls: list[str] = []
+
+    def record_scan(text: str) -> bool:
+        calls.append(text)
+        return False
+
+    monkeypatch.setattr(ws, "looks_like_dotenv", record_scan)
+    assert "needle=value" in ws.tool_read_file(tmp_path, "config.txt")
+    assert "needle=value" in ws.tool_grep(tmp_path, "needle")
+    assert len(calls) == 2
+    assert all(call.replace("\r\n", "\n") == "needle=value\n" for call in calls)
 
 
 def test_materialize_commit_allows_oversized_stubbed_files(tmp_path):

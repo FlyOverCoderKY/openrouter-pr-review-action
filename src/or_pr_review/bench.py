@@ -29,10 +29,10 @@ adjudications (never auto-false); the `noise` column (adjudicated-false plus
 unadjudicated) is the oversensitivity headline, and on a zero-label clean
 twin fixture it IS the score.
 
-Usage (needs OPENROUTER_API_KEY in the environment for `run`):
+Usage (`run` requires `--allow-spend` and OPENROUTER_API_KEY):
 
     python -m or_pr_review.bench run bench/fixtures/planted-mini \
-        --model x-ai/grok-4.6 --out /tmp/bench-out
+        --model x-ai/grok-4.6 --out /tmp/bench-out --allow-spend
     python -m or_pr_review.bench score bench/fixtures/planted-mini /tmp/bench-out
 
 `score` is deterministic and offline; `run` spends real tokens. Real-PR
@@ -248,8 +248,10 @@ class JudgeScore:
         return self.expected_verdict == self.actual_verdict
 
 
-def _confined(fixture_dir: Path, relative: str, kind: str) -> Path:
+def _confined(fixture_dir: Path, relative: object, kind: str) -> Path:
     """Resolve a fixture-relative path and refuse escapes from the fixture dir."""
+    if not isinstance(relative, str) or not relative.strip():
+        raise ActionError(f"fixture {kind} must be a non-empty string path")
     base = fixture_dir.resolve()
     resolved = (base / relative).resolve()
     if resolved != base and base not in resolved.parents:
@@ -257,14 +259,57 @@ def _confined(fixture_dir: Path, relative: str, kind: str) -> Path:
     return resolved
 
 
+def _read_json_file(path: Path, *, expected_type: type) -> tuple[Any, bytes]:
+    """Read one UTF-8 JSON file and retain the exact bytes for callers that hash it."""
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        raise ActionError(f"could not read JSON file {path}: {exc}") from exc
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ActionError(f"{path} is not valid UTF-8: {exc}") from exc
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ActionError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, expected_type):
+        expected_name = {
+            dict: "a JSON object",
+            list: "a JSON array",
+        }.get(expected_type, expected_type.__name__)
+        raise ActionError(f"{path} must contain {expected_name}")
+    return payload, raw_bytes
+
+
+def _fixture_text(meta: dict[str, Any], name: str, default: str) -> str:
+    value = meta.get(name, default)
+    if not isinstance(value, str):
+        raise ActionError(f"fixture {name} must be a string")
+    return value
+
+
+def _fixture_pr_number(meta: dict[str, Any]) -> int:
+    raw = meta.get("pr_number", 1)
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        value = raw
+    elif isinstance(raw, str):
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ActionError("fixture pr_number must be a positive integer") from exc
+    else:
+        raise ActionError("fixture pr_number must be a positive integer")
+    if value < 1:
+        raise ActionError("fixture pr_number must be a positive integer")
+    return value
+
+
 def load_fixture(fixture_dir: Path) -> Fixture:
     meta_path = fixture_dir / "fixture.json"
     if not meta_path.is_file():
         raise ActionError(f"{meta_path} does not exist")
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ActionError(f"{meta_path} is not valid JSON: {exc}") from exc
+    meta, _ = _read_json_file(meta_path, expected_type=dict)
     diff_path = _confined(fixture_dir, meta.get("diff_file", "diff.patch"), "diff_file")
     checkout = _confined(fixture_dir, meta.get("checkout_dir", "checkout"), "checkout_dir")
     labels_path = _confined(fixture_dir, meta.get("labels_file", "labels.json"), "labels_file")
@@ -274,18 +319,12 @@ def load_fixture(fixture_dir: Path) -> Fixture:
         raise ActionError(f"fixture diff {diff_path} does not exist")
     if not labels_path.is_file():
         raise ActionError(f"fixture labels {labels_path} does not exist")
-    try:
-        raw_labels = json.loads(labels_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ActionError(f"{labels_path} is not valid JSON: {exc}") from exc
+    raw_labels, _ = _read_json_file(labels_path, expected_type=list)
     labels = tuple(_parse_label(item) for item in raw_labels)
     adjudications: tuple[Adjudication, ...] = ()
     adjudications_path = fixture_dir / "adjudications.json"
     if adjudications_path.is_file():
-        try:
-            raw_adjudications = json.loads(adjudications_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ActionError(f"{adjudications_path} is not valid JSON: {exc}") from exc
+        raw_adjudications, _ = _read_json_file(adjudications_path, expected_type=list)
         adjudications = tuple(_parse_adjudication(item) for item in raw_adjudications)
         ids = [adjudication.id for adjudication in adjudications]
         if len(ids) != len(set(ids)):
@@ -295,16 +334,20 @@ def load_fixture(fixture_dir: Path) -> Fixture:
         isinstance(max_diff_kb, bool) or not isinstance(max_diff_kb, int) or max_diff_kb <= 0
     ):
         raise ActionError("fixture max_diff_kb must be a positive integer when present")
+    try:
+        diff = diff_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ActionError(f"could not read fixture diff {diff_path}: {exc}") from exc
     return Fixture(
         name=fixture_dir.name,
-        title=meta.get("title", ""),
-        body=meta.get("body", ""),
-        pr_number=int(meta.get("pr_number", 1)),
-        head_sha=meta.get("head_sha", "f" * 40),
-        base_ref=meta.get("base_ref", "main"),
-        head_ref=meta.get("head_ref", "feature"),
-        custom_instructions=meta.get("custom_instructions", ""),
-        diff=diff_path.read_text(encoding="utf-8"),
+        title=_fixture_text(meta, "title", ""),
+        body=_fixture_text(meta, "body", ""),
+        pr_number=_fixture_pr_number(meta),
+        head_sha=_fixture_text(meta, "head_sha", "f" * 40),
+        base_ref=_fixture_text(meta, "base_ref", "main"),
+        head_ref=_fixture_text(meta, "head_ref", "feature"),
+        custom_instructions=_fixture_text(meta, "custom_instructions", ""),
+        diff=diff,
         max_diff_kb=max_diff_kb,
         checkout=checkout,
         labels=labels,
@@ -479,6 +522,8 @@ def _write_progress(
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    if not args.allow_spend:
+        raise ActionError("run is live and spends OpenRouter credits; re-run with --allow-spend")
     if args.runs < 1:
         raise ActionError("--runs must be at least 1")
     lane_timeout = args.lane_timeout
@@ -586,15 +631,18 @@ def _cmd_score(args: argparse.Namespace) -> int:
     scored: list[tuple[str, RunScore]] = []
     failed = 0
     for run_file in run_files:
-        payload = json.loads(run_file.read_text(encoding="utf-8"))
+        payload, _ = _read_json_file(run_file, expected_type=dict)
         if not payload.get("ok"):
             print(f"{run_file.name}: lane failed ({payload.get('error')}); excluded from means")
             failed += 1
             continue
+        findings = payload.get("findings", [])
+        if not isinstance(findings, list) or not all(isinstance(item, dict) for item in findings):
+            raise ActionError(f"{run_file} findings must be an array of objects")
         scored.append(
             (
                 run_file.stem,
-                score_run(payload.get("findings", []), fixture.labels, fixture.adjudications),
+                score_run(findings, fixture.labels, fixture.adjudications),
             )
         )
 
@@ -694,13 +742,7 @@ def load_judge_fixture(path: Path) -> JudgeFixture:
     """Load and validate one committed synthetic judge fixture."""
     if not path.is_file():
         raise ActionError(f"judge fixture {path} does not exist")
-    raw_bytes = path.read_bytes()
-    try:
-        payload = json.loads(raw_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ActionError(f"judge fixture {path} is not valid UTF-8 JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ActionError("judge fixture must be a JSON object")
+    payload, raw_bytes = _read_json_file(path, expected_type=dict)
     if payload.get("schema_version") != JUDGE_FIXTURE_SCHEMA_VERSION:
         raise ActionError(f"judge fixture schema_version must be {JUDGE_FIXTURE_SCHEMA_VERSION}")
     name = payload.get("name")
@@ -1077,12 +1119,7 @@ def _cmd_judge_score(args: argparse.Namespace) -> int:
     rows: list[tuple[str, dict[str, Any], JudgeScore]] = []
     failed = 0
     for result_file in result_files:
-        try:
-            payload = json.loads(result_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ActionError(f"{result_file} is not valid JSON: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise ActionError(f"{result_file} must contain a JSON object")
+        payload, _ = _read_json_file(result_file, expected_type=dict)
         if payload.get("ok") is False:
             print(f"{result_file.name}: failed run excluded ({payload.get('error')})")
             failed += 1
@@ -1191,6 +1228,11 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="require an OpenRouter zero-data-retention endpoint per request "
         "(default: enabled; use --no-provider-zdr only for non-private bake-offs)",
+    )
+    run_parser.add_argument(
+        "--allow-spend",
+        action="store_true",
+        help="required acknowledgement that this command makes paid OpenRouter calls",
     )
     run_parser.set_defaults(func=_cmd_run)
 

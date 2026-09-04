@@ -7,9 +7,12 @@ directories inside this tree. No shell, no writes, no network.
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import tarfile
+from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path, PurePosixPath
 
 from or_pr_review.errors import ActionError, LaneError
@@ -36,17 +39,49 @@ MAX_GREP_FILES = 5_000
 
 _BLOCKED_NAMES = {
     ".env",
+    ".envrc",
+    ".git-credentials",
+    ".htpasswd",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".secrets.yaml",
+    ".secrets.yml",
     ".env.local",
     ".env.production",
     ".env.development",
+    "_netrc",
+    "id_dsa",
     "id_rsa",
     "id_ed25519",
+    "id_ed25519_sk",
     "id_ecdsa",
+    "id_ecdsa_sk",
     "credentials.json",
+    "secrets.yaml",
+    "secrets.yml",
     "service-account.json",
 }
-_BLOCKED_SUFFIXES = (".pem", ".p12", ".pfx", ".key")
-_BLOCKED_DIRECTORY_NAMES = frozenset({"credentials", "credential", "secrets", "secret"})
+_BLOCKED_SUFFIXES = (
+    ".pem",
+    ".p12",
+    ".pfx",
+    ".key",
+    ".jks",
+    ".keystore",
+    ".tfstate",
+    ".tfstate.backup",
+)
+_BLOCKED_DIRECTORY_NAMES = frozenset({"credentials", "credential", "secrets", "secret", ".direnv"})
+_SAFETY_METADATA_VERSION = 1
+_SAFETY_STATES = frozenset({"safe", "dotenv", "blocked"})
+_SAFETY_METADATA_ERROR = "workspace safety metadata is missing or invalid"
+
+
+@dataclass(frozen=True)
+class _SafetyRecord:
+    state: str
+    line_count: int
 
 
 def materialize_commit(
@@ -69,6 +104,7 @@ def materialize_commit(
     dest.mkdir(parents=True, exist_ok=True)
     archive = _git_archive(repo, sha)
     tracked: list[str] = []
+    materialized: list[str] = []
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
             for member in tar.getmembers():
@@ -77,17 +113,132 @@ def materialize_commit(
                 if not _safe_member(member, oversized_ok):
                     continue
                 tar.extract(member, path=dest, filter="data")
+                materialized.append(PurePosixPath(member.name.replace("\\", "/")).as_posix())
     except (tarfile.TarError, OSError) as exc:
         raise ActionError(f"failed to materialize reviewed commit {sha[:12]}: {exc}") from exc
-    _manifest_path(dest).write_text(
-        "\n".join(tracked) + ("\n" if tracked else ""), encoding="utf-8"
-    )
+    try:
+        _manifest_path(dest).write_text(
+            "\n".join(tracked) + ("\n" if tracked else ""), encoding="utf-8"
+        )
+        _write_safety_metadata(dest, materialized)
+    except OSError as exc:
+        raise ActionError(f"failed to record reviewed commit safety metadata: {exc}") from exc
     return dest
 
 
 def _manifest_path(workspace: Path) -> Path:
     # Beside the checkout, not inside it: the read-only tools must never see it.
     return workspace.parent / f"{workspace.name}.paths"
+
+
+def _safety_path(workspace: Path) -> Path:
+    # Like the tracked-path manifest, this must not be visible to review tools.
+    return workspace.parent / f"{workspace.name}.safety.json"
+
+
+def _write_safety_metadata(workspace: Path, materialized: list[str]) -> None:
+    """Classify extracted files once so each tool subprocess need not rescan them."""
+    files: dict[str, dict[str, str | int]] = {}
+    for rel in materialized:
+        path = workspace.joinpath(*PurePosixPath(rel).parts)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if is_blocked_path(path):
+            state = "blocked"
+        else:
+            state = "dotenv" if "=" in text and looks_like_dotenv(text) else "safe"
+        files[rel] = {"state": state, "line_count": _textio_line_count(text)}
+    _safety_path(workspace).write_text(
+        json.dumps(
+            {"version": _SAFETY_METADATA_VERSION, "files": files},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+
+def _load_safety_metadata(workspace: Path) -> dict[str, _SafetyRecord] | None:
+    """Return materialized-workspace classifications, or None for fixture roots."""
+    if not _manifest_path(workspace).is_file():
+        # Tests and benchmark fixtures are complete, directly-created trees.
+        # They retain the conservative content scan at each access.
+        return None
+    try:
+        raw = json.loads(_safety_path(workspace).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LaneError(_SAFETY_METADATA_ERROR) from exc
+    if not isinstance(raw, dict) or raw.get("version") != _SAFETY_METADATA_VERSION:
+        raise LaneError(_SAFETY_METADATA_ERROR)
+    files = raw.get("files")
+    if not isinstance(files, dict):
+        raise LaneError(_SAFETY_METADATA_ERROR)
+    validated: dict[str, _SafetyRecord] = {}
+    for rel, value in files.items():
+        if not isinstance(rel, str) or not isinstance(value, dict):
+            raise LaneError(_SAFETY_METADATA_ERROR)
+        path = PurePosixPath(rel)
+        if not rel or path.is_absolute() or ".." in path.parts or path.as_posix() != rel:
+            raise LaneError(_SAFETY_METADATA_ERROR)
+        state = value.get("state")
+        line_count = value.get("line_count")
+        if (
+            not isinstance(state, str)
+            or state not in _SAFETY_STATES
+            or isinstance(line_count, bool)
+            or not isinstance(line_count, int)
+            or line_count < 0
+        ):
+            raise LaneError(_SAFETY_METADATA_ERROR)
+        validated[rel] = _SafetyRecord(state=state, line_count=line_count)
+    return validated
+
+
+def _safety_record(root: Path, path: Path, metadata: dict[str, _SafetyRecord]) -> _SafetyRecord:
+    try:
+        rel = path.relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise LaneError(_SAFETY_METADATA_ERROR) from exc
+    record = metadata.get(rel)
+    if record is None:
+        # A file created after extraction, or an incomplete metadata record,
+        # is not part of the inert snapshot's trusted classification.
+        raise LaneError(_SAFETY_METADATA_ERROR)
+    return record
+
+
+def _textio_line_count(text: str) -> int:
+    """Count lines exactly as TextIOWrapper iteration used by ranged reads."""
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def _format_read_window(window: list[str], *, start: int, total: int) -> str:
+    """Format one already-bounded line window using the public read contract."""
+    body = "".join(window)
+    encoded = body.encode("utf-8")
+    if len(encoded) > MAX_READ_BYTES:
+        body = encoded[:MAX_READ_BYTES].decode("utf-8", errors="replace")
+        delivered = body.count("\n")
+        if delivered:
+            end = start + delivered - 1
+            footer = (
+                f"\n[window truncated after {MAX_READ_BYTES} bytes; call "
+                f"read_file with start_line={end + 1} for the rest]"
+            )
+        else:
+            end = start
+            footer = (
+                f"\n[window truncated after {MAX_READ_BYTES} bytes; line "
+                f"{start} alone exceeds the byte cap]"
+            )
+    else:
+        end = min(start + len(window) - 1, total)
+        if end < total:
+            footer = f"\n[file continues; call read_file with start_line={end + 1} for more]"
+        else:
+            footer = ""
+    return f"[lines {start}-{end} of {total}]\n" + body + footer
 
 
 def tracked_paths(workspace: Path) -> set[str] | None:
@@ -171,7 +322,7 @@ def is_blocked_path(path: Path) -> bool:
     # credential paths cannot be reached by the read-only tools.
     for part in path.parts:
         name = part.casefold()
-        if name in _BLOCKED_NAMES or name.startswith(".env."):
+        if name in _BLOCKED_NAMES or name.startswith((".env.", ".envrc.")):
             return True
         if name in _BLOCKED_DIRECTORY_NAMES or name.endswith(_BLOCKED_SUFFIXES):
             return True
@@ -190,6 +341,28 @@ def tool_read_file(
     if is_blocked_path(path):
         return "error: refusing to read a secret-like path"
     try:
+        safety = _load_safety_metadata(root)
+        if safety is not None:
+            record = _safety_record(root, path, safety)
+            if record.state != "safe":
+                return "error: refusing to return secret-like contents"
+    except LaneError as exc:
+        return f"error: refusing to read file: {exc}"
+    start = start_line if start_line is not None and start_line > 0 else 1
+    count = max_lines if max_lines is not None and max_lines > 0 else DEFAULT_RANGE_LINES
+    count = min(count, MAX_RANGE_LINES)
+    if safety is not None and (start_line is not None or max_lines is not None):
+        if record.line_count and start > record.line_count:
+            return (
+                f"error: start_line {start} is past the end of the file ({record.line_count} lines)"
+            )
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                window = list(islice(handle, start - 1, start - 1 + count))
+        except OSError as exc:
+            return f"error: {exc}"
+        return _format_read_window(window, start=start, total=record.line_count)
+    try:
         data = path.read_bytes()
     except OSError as exc:
         return f"error: {exc}"
@@ -197,7 +370,7 @@ def tool_read_file(
     # Every dotenv candidate needs an equals sign.  The cheap pre-check keeps
     # the redaction heuristic from scanning ordinary source files that cannot
     # match, while still doing the complete heuristic scan for candidates.
-    if "=" in text and looks_like_dotenv(text):
+    if safety is None and "=" in text and looks_like_dotenv(text):
         return "error: refusing to return .env-style KEY=value contents"
     if start_line is None and max_lines is None:
         if len(data) > MAX_READ_BYTES:
@@ -208,41 +381,12 @@ def tool_read_file(
                 f"call read_file again with start_line={next_line} to keep reading]"
             )
         return text
-    start = start_line if start_line is not None and start_line > 0 else 1
-    count = max_lines if max_lines is not None and max_lines > 0 else DEFAULT_RANGE_LINES
-    count = min(count, MAX_RANGE_LINES)
     lines = text.splitlines(keepends=True)
     total = len(lines)
     if total and start > total:
         return f"error: start_line {start} is past the end of the file ({total} lines)"
     window = lines[start - 1 : start - 1 + count]
-    body = "".join(window)
-    encoded = body.encode("utf-8")
-    if len(encoded) > MAX_READ_BYTES:
-        # Report only what was actually delivered, with a truthful resume
-        # hint — never claim lines that were cut.
-        body = encoded[:MAX_READ_BYTES].decode("utf-8", errors="replace")
-        delivered = body.count("\n")
-        if delivered:
-            end = start + delivered - 1
-            footer = (
-                f"\n[window truncated after {MAX_READ_BYTES} bytes; call "
-                f"read_file with start_line={end + 1} for the rest]"
-            )
-        else:
-            end = start
-            footer = (
-                f"\n[window truncated after {MAX_READ_BYTES} bytes; line "
-                f"{start} alone exceeds the byte cap]"
-            )
-    else:
-        end = min(start + len(window) - 1, total)
-        if end < total:
-            footer = f"\n[file continues; call read_file with start_line={end + 1} for more]"
-        else:
-            footer = ""
-    header = f"[lines {start}-{end} of {total}]\n"
-    return header + body + footer
+    return _format_read_window(window, start=start, total=total)
 
 
 def tool_list_dir(root: Path, rel: str) -> str:
@@ -276,6 +420,10 @@ def tool_grep(root: Path, pattern: str, rel: str = ".") -> str:
     start = resolve_inside(root, rel)
     if not start.exists():
         return f"error: path not found: {rel}"
+    try:
+        safety = _load_safety_metadata(root)
+    except LaneError as exc:
+        return f"error: refusing to search files: {exc}"
     matches: list[str] = []
     files = [start] if start.is_file() and not start.is_symlink() else _walk_files(start)
     for path in files:
@@ -284,10 +432,16 @@ def tool_grep(root: Path, pattern: str, rel: str = ".") -> str:
         try:
             if path.stat().st_size > MAX_GREP_FILE:
                 continue
+            if safety is not None:
+                record = _safety_record(root, path, safety)
+                if record.state != "safe":
+                    continue
             text = path.read_text(encoding="utf-8", errors="replace")
+        except LaneError as exc:
+            return f"error: refusing to search files: {exc}"
         except OSError:
             continue
-        if "=" in text and looks_like_dotenv(text):
+        if safety is None and "=" in text and looks_like_dotenv(text):
             continue
         rel_path = path.relative_to(root.resolve()).as_posix()
         for lineno, line in enumerate(text.splitlines(), start=1):

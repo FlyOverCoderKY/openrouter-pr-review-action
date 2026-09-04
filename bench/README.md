@@ -26,12 +26,14 @@ Three kinds of fixture:
 ```bash
 export OPENROUTER_API_KEY=...   # `run` spends real tokens; `score` is offline
 python -m or_pr_review.bench run bench/fixtures/planted-mini \
-    --model x-ai/grok-4.6 --out /tmp/bench-out
+    --model x-ai/grok-4.6 --out /tmp/bench-out --allow-spend
 python -m or_pr_review.bench score bench/fixtures/planted-mini /tmp/bench-out
 ```
 
-Lanes are nondeterministic — `run` defaults to 3 runs, and `score` prints a
-mean row across the successful runs. During each paid lane, `run` atomically
+`run` makes no request unless both `--allow-spend` is present and
+`OPENROUTER_API_KEY` is set. Lanes are nondeterministic — `run` defaults to 3
+runs, and `score` prints a mean row across the successful runs. During each
+paid lane, `run` atomically
 writes an aggregate-only `progress-N.json` checkpoint containing elapsed time,
 usage, request/tool counts, provider, and provider-reported cost; it contains no
 prompt, code, findings, paths, or credentials. A completed `run-N.json` replaces
@@ -139,8 +141,9 @@ silently mixed.
 
 ### Opt-in live model comparison
 
-`judge-run` is the only paid judge-benchmark command. It makes no request
-unless **both** `--allow-spend` is present and `OPENROUTER_API_KEY` is set.
+`run` and `judge-run` are the paid benchmark commands; `judge-run` is the only
+paid judge-benchmark command. Neither makes a request unless **both**
+`--allow-spend` is present and `OPENROUTER_API_KEY` is set.
 Use a new output directory per experiment; existing result filenames are
 never overwritten. The complete model/run output matrix is collision-checked
 before the first request, and `--runs` has a hard safety cap of 20.

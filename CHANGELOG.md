@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.0 — 2026-09-04
+
 - Paid benchmark lanes now persist an atomic aggregate-only progress checkpoint
   after every completed OpenRouter response, allowing provider-reported cost and
   usage to survive an outer process timeout without storing prompts, findings,
@@ -32,6 +34,28 @@
   met every acceptance gate without repair/fallback while the former default
   missed seven of 50 expected non-empty-fixture findings. Luna also cost 36%
   less in the measured calls, with a 90% latency increase.
+
+- Both paid benchmark runners now require explicit `--allow-spend` consent in
+  addition to `OPENROUTER_API_KEY`; omitted consent fails before any provider call.
+- Read-only workspace tools retain the strict secret policy: dotenv-shaped files
+  and known credential paths are refused, a sibling safety index classifies each
+  materialized file once, and ranged reads reuse cached line counts.
+- Benchmark JSON loading now reports contextual `ActionError` messages for
+  unreadable, malformed, or wrong-shaped fixtures and run artifacts instead of
+  leaking raw decoder tracebacks.
+- Model-specific transport behavior is centralized in an immutable protocol
+  profile shared by review lanes and the judge. Gemini thought-signature handling
+  and its output-token ceiling now come from that profile rather than scattered
+  model-name checks.
+- Lane execution now carries its mutable phase and counters in explicit state and
+  owns time through a monotonic lane clock. Retry, salvage, and finalization paths
+  share the same deadline accounting while preserving the existing request and
+  repair budgets.
+- The Gemini response-token setting is named for its actual scope and supplied by
+  the model protocol profile; non-Gemini models continue to use provider defaults.
+- Ledger v1's wider decode-only title and evidence bounds are now named, documented
+  compatibility constants with exact boundary tests through the public extraction
+  API. Encoder limits and the on-wire ledger version are unchanged.
 
 ## 1.2.7 — 2026-08-29
 

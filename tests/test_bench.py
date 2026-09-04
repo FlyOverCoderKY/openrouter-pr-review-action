@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import tarfile
@@ -446,6 +447,29 @@ def test_fixture_paths_are_confined(tmp_path: Path) -> None:
         load_fixture(fixture_dir)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("diff_file", 7, "diff_file must be a non-empty string path"),
+        ("checkout_dir", [], "checkout_dir must be a non-empty string path"),
+        ("labels_file", None, "labels_file must be a non-empty string path"),
+        ("pr_number", "not-a-number", "pr_number must be a positive integer"),
+        ("pr_number", 1.5, "pr_number must be a positive integer"),
+        ("title", {"unexpected": "object"}, "title must be a string"),
+    ],
+)
+def test_fixture_metadata_type_errors_are_action_errors(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    fixture_dir = tmp_path / "f"
+    _write_fixture(fixture_dir, [])
+    meta = {"title": "t", field: value}
+    (fixture_dir / "fixture.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    with pytest.raises(ActionError, match=message):
+        load_fixture(fixture_dir)
+
+
 def _fake_lane(ok: bool = True, findings: list | None = None):
     from or_pr_review.schema import SCHEMA_VERSION, LaneResult
 
@@ -457,6 +481,40 @@ def _fake_lane(ok: bool = True, findings: list | None = None):
         error=None if ok else "boom",
         tool_rounds=1,
     )
+
+
+def test_cmd_run_requires_allow_spend_before_other_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-present-but-not-consent")
+    called = False
+
+    def unexpected_load(path: Path):
+        nonlocal called
+        called = True
+        raise AssertionError("fixture loading must not happen before spend consent")
+
+    monkeypatch.setattr(bench_mod, "load_fixture", unexpected_load)
+    out = tmp_path / "out"
+    assert main(["run", "missing-fixture", "--out", str(out)]) == 1
+    assert not called
+    assert not out.exists()
+    assert "re-run with --allow-spend" in capsys.readouterr().err
+
+
+def test_cmd_run_requires_api_key_after_spend_consent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fixture_dir = tmp_path / "fixture"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    assert main(["run", str(fixture_dir), "--out", str(out), "--allow-spend"]) == 1
+    assert not out.exists()
+    assert "OPENROUTER_API_KEY is not set" in capsys.readouterr().err
 
 
 def test_cmd_run_clears_stale_files_and_flags_failures(
@@ -481,7 +539,7 @@ def test_cmd_run_clears_stale_files_and_flags_failures(
         return _fake_lane(ok=True)
 
     monkeypatch.setattr(bench_mod, "run_lane", successful)
-    rc = main(["run", str(fixture_dir), "--runs", "2", "--out", str(out)])
+    rc = main(["run", str(fixture_dir), "--runs", "2", "--out", str(out), "--allow-spend"])
     assert rc == 0
     assert not stale.exists()  # stale run files must not contaminate `score`
     assert not stale_progress.exists()
@@ -490,9 +548,9 @@ def test_cmd_run_clears_stale_files_and_flags_failures(
     assert sorted(p.name for p in out.glob("run-*.json")) == ["run-0.json", "run-1.json"]
 
     monkeypatch.setattr(bench_mod, "run_lane", lambda **kwargs: _fake_lane(ok=False))
-    assert main(["run", str(fixture_dir), "--runs", "1", "--out", str(out)]) == 1
+    assert main(["run", str(fixture_dir), "--runs", "1", "--out", str(out), "--allow-spend"]) == 1
 
-    assert main(["run", str(fixture_dir), "--runs", "0", "--out", str(out)]) == 1
+    assert main(["run", str(fixture_dir), "--runs", "0", "--out", str(out), "--allow-spend"]) == 1
 
 
 def test_cmd_run_wires_provider_data_policy_flags(
@@ -521,6 +579,7 @@ def test_cmd_run_wires_provider_data_policy_flags(
                 "--provider-data-collection",
                 "deny",
                 "--provider-zdr",
+                "--allow-spend",
             ]
         )
         == 0
@@ -529,7 +588,7 @@ def test_cmd_run_wires_provider_data_policy_flags(
     assert calls[0]["provider_zdr"] is True
 
     calls.clear()
-    assert main(["run", str(fixture_dir), "--out", str(out)]) == 0
+    assert main(["run", str(fixture_dir), "--out", str(out), "--allow-spend"]) == 0
     assert calls[0]["provider_data_collection"] == "deny"
     assert calls[0]["provider_zdr"] is True
 
@@ -544,6 +603,7 @@ def test_cmd_run_wires_provider_data_policy_flags(
                 "--provider-data-collection",
                 "allow",
                 "--no-provider-zdr",
+                "--allow-spend",
             ]
         )
         == 0
@@ -578,6 +638,7 @@ def test_cmd_run_wires_benchmark_lane_timeout(
                 str(out),
                 "--lane-timeout",
                 "1680",
+                "--allow-spend",
             ]
         )
         == 0
@@ -586,11 +647,11 @@ def test_cmd_run_wires_benchmark_lane_timeout(
 
     calls.clear()
     monkeypatch.setenv("OR_PR_REVIEW_BENCH_LANE_TIMEOUT_SECONDS", "1740")
-    assert main(["run", str(fixture_dir), "--out", str(out)]) == 0
+    assert main(["run", str(fixture_dir), "--out", str(out), "--allow-spend"]) == 0
     assert calls[0]["lane_timeout"] == 1740
 
     monkeypatch.setenv("OR_PR_REVIEW_BENCH_LANE_TIMEOUT_SECONDS", "invalid")
-    assert main(["run", str(fixture_dir), "--out", str(out)]) == 1
+    assert main(["run", str(fixture_dir), "--out", str(out), "--allow-spend"]) == 1
 
 
 def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
@@ -615,7 +676,7 @@ def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
         raise ActionError("interrupted")
 
     monkeypatch.setattr(bench_mod, "run_lane", interrupted)
-    assert main(["run", str(fixture_dir), "--out", str(out)]) == 1
+    assert main(["run", str(fixture_dir), "--out", str(out), "--allow-spend"]) == 1
     progress = json.loads((out / "progress-0.json").read_text(encoding="utf-8"))
     assert progress == {
         "schema": "or-pr-review/bench-progress/1",
@@ -696,6 +757,51 @@ def test_cmd_score_reports_means_and_skips_failed_runs(
     assert "| 3/3 | 1/4 | 4" in printed
 
 
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        (b"\xff", "not valid UTF-8"),
+        (b"{", "not valid JSON"),
+        (b"[]", "must contain a JSON object"),
+    ],
+)
+def test_cmd_score_reports_clean_json_read_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    contents: bytes,
+    message: str,
+) -> None:
+    fixture_dir = tmp_path / "fixture"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "run-0.json").write_bytes(contents)
+
+    assert main(["score", str(fixture_dir), str(out)]) == 1
+    assert message in capsys.readouterr().err
+
+
+def test_cmd_score_reports_json_read_os_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fixture_dir = tmp_path / "fixture"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    out.mkdir()
+    result = out / "run-0.json"
+    result.write_text("{}", encoding="utf-8")
+    original_read_bytes = Path.read_bytes
+
+    def fail_result_read(path: Path) -> bytes:
+        if path == result:
+            raise PermissionError("fixture is not readable")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_result_read)
+    assert main(["score", str(fixture_dir), str(out)]) == 1
+    assert "could not read JSON file" in capsys.readouterr().err
+
+
 def test_cmd_score_clean_fixture_reports_noise(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -726,6 +832,26 @@ def _expected_judge_output(fixture: JudgeFixture) -> list[dict]:
         }
         for expected in fixture.expected_issues
     ]
+
+
+def test_judge_fixture_hash_reuses_the_bytes_read_for_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture_path = JUDGE_FIXTURE_DIR / "ab-duplicates-complements.json"
+    expected_bytes = fixture_path.read_bytes()
+    original_read_bytes = Path.read_bytes
+    reads = 0
+
+    def counting_read(path: Path) -> bytes:
+        nonlocal reads
+        if path == fixture_path:
+            reads += 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read)
+    fixture = load_judge_fixture(fixture_path)
+    assert reads == 1
+    assert fixture.sha256 == hashlib.sha256(expected_bytes).hexdigest()
 
 
 def test_committed_judge_fixtures_cover_ab_abc_and_hygiene_cases() -> None:

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Rebuild judge issues from validated source evidence, severity, attribution and
+  anchors. Require the same file and exact line plus conservative title and body
+  agreement before grouping reports; preserve operators, ordering and quoted literals.
+- Forward the tool-turn policy to the reusable matrix judge so tools-disabled,
+  stubbed reviews remain partial.
+- Retain the strongest findings at the lane cap, persist omission counts, and
+  publish capped lanes as partial without an authoritative review ledger.
+- Include reported judge usage when an unusable answer falls back to the union;
+  attempted calls with unknown charges make the total visibly incomplete.
+
 ## 1.3.1 — 2026-09-04
 
 - Correct workspace safety classification to inspect repository-relative paths,

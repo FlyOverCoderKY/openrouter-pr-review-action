@@ -340,27 +340,29 @@ def _resolve_issues(
         return JudgeOutcome(
             issues,
             note,
-            None,
-            False,
+            getattr(exc, "cost_usd", None),
+            True,
             diagnostics,
         )
     except ActionError as exc:
         # Review lanes are the source evidence; a judge transport failure
         # falls back to their completed work. Judge schema failures use the
         # same explicit, cap-aware deterministic-union degradation above.
+        attempted = getattr(exc, "attempted", True)
+        stage = "transport" if attempted else "preparation"
         print(
-            f"warning: judge transport failed ({redact(str(exc))}); using the "
+            f"warning: judge {stage} failed ({redact(str(exc))}); using the "
             "cap-aware deterministic union",
             flush=True,
         )
         issues, note = _capped_union_note(
-            lane_payloads, f"`{judge_model}` (transport fallback: deterministic union)"
+            lane_payloads, f"`{judge_model}` ({stage} fallback: deterministic union)"
         )
         return JudgeOutcome(
             issues,
             note,
             None,
-            False,
+            attempted,
             diagnostics,
         )
     # Merge outcomes are visible on the posted review, not only in the job
@@ -941,6 +943,13 @@ def _finish(
     # so a tool-less run cannot honor it: stubs + max_tool_turns=0 stays a
     # partial review.
     truncation_partial = collected.truncation.forces_partial
+    for lane in successful:
+        if lane.dropped_findings:
+            truncation_partial = True
+            notices.append(
+                f"`{lane.model}` omitted {lane.dropped_findings} finding(s) at the lane cap; "
+                "the strongest severities were retained. This review is partial."
+            )
     if collected.truncation.stubbed_files and parse_max_tool_turns(env.get("MAX_TOOL_TURNS")) == 0:
         truncation_partial = True
         notices.append(

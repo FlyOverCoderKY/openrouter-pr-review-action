@@ -466,12 +466,15 @@ def run_lane(
                 )
                 progress_warning_emitted = True
 
+    parse_diagnostics: dict[str, int] = {}
+
     def _validate(content: str) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
         findings, resolutions, coverage = parse_lane_payload(
             content,
             model,
             expect_coverage=expect_coverage,
             expect_resolutions=expect_resolutions,
+            diagnostics=parse_diagnostics,
         )
         if expect_coverage and expected_paths:
             problem = validate_coverage(coverage, set(expected_paths))
@@ -531,6 +534,7 @@ def run_lane(
         provider=meta.get("provider"),
         resolutions=resolutions,
         coverage=coverage,
+        dropped_findings=parse_diagnostics.get("dropped_findings", 0),
     )
     _attach_stats(result, stats, usage)
     return result

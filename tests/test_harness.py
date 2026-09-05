@@ -132,6 +132,7 @@ def test_run_lane_reuses_its_validated_final_payload(
         *,
         expect_coverage: bool = False,
         expect_resolutions: bool = False,
+        diagnostics: dict[str, int] | None = None,
     ) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
         nonlocal calls
         calls += 1
@@ -140,6 +141,7 @@ def test_run_lane_reuses_its_validated_final_payload(
             model_id,
             expect_coverage=expect_coverage,
             expect_resolutions=expect_resolutions,
+            diagnostics=diagnostics,
         )
 
     monkeypatch.setattr(harness, "parse_lane_payload", count_parse)

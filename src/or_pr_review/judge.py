@@ -479,8 +479,8 @@ def _verify_coverage(
             # Attribution is a set, and ledger IDs are assigned at publication.
             # Neither ordering nor a ledger ID is an evidence repair.
             canonicalized += int(
-                replace(canonical, models=sorted(canonical.models), id=None)
-                != replace(issue, models=sorted(issue.models), id=None)
+                replace(canonical, models=sorted(canonical.models), id=None, prior_finding_id=None)
+                != replace(issue, models=sorted(issue.models), id=None, prior_finding_id=None)
             )
             kept.append(canonical)
             continue

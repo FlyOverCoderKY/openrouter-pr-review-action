@@ -147,7 +147,7 @@ def decide_loop_state(
     if review_mode == "initial" or ledger is None:
         return "initial", 1
     next_round = min(ledger.round_number + 1, MAX_ROUNDS_TRACKED)
-    # Event type selects diff scope in the caller, not whether memory is lost.
+    # Retain event_action for caller compatibility; it no longer resets memory.
     # Dispatches and reopened PRs continue too; only explicit initial resets.
     return "verify", next_round
 
@@ -225,8 +225,15 @@ def apply_round(
                 f"### Additional evidence: {issue.title}\n\n"
                 f"`{issue.file}:{issue.line}`\n\n{issue.body}"
             )
-            combined = f"{existing.body}\n\n{detail}" if existing else issue.body
-            if len(combined) <= MAX_BODY:
+            combined = (
+                f"{existing.body}\n\n{detail}"
+                if existing
+                else f"Original finding: {prior.title}\n\n{prior.evidence}\n\n{detail}"
+            )
+            ledger_evidence = f"{prior.evidence}\n\n{issue.title}: {issue.body}"
+            # Group only when the original and all new evidence fit in memory.
+            # Otherwise independent IDs preserve each finding's evidence budget.
+            if len(combined) <= MAX_BODY and len(ledger_evidence) <= MAX_EVIDENCE:
                 severity = max((prior.severity, issue.severity), key=SEVERITY_RANK.__getitem__)
                 models = list(dict.fromkeys((*prior.models, *issue.models)))
                 if existing:
@@ -234,12 +241,22 @@ def apply_round(
                     existing.severity = severity
                     existing.models = models
                 else:
-                    numbered.append(replace(issue, id=prior.id, severity=severity, models=models))
+                    numbered.append(
+                        replace(
+                            issue,
+                            id=prior.id,
+                            title=prior.title,
+                            body=combined,
+                            severity=severity,
+                            models=models,
+                        )
+                    )
                 carried[prior_index] = replace(
                     prior,
                     severity=severity,
                     models=tuple(models[:MAX_LEDGER_MODELS]),
-                    evidence=combined[:MAX_EVIDENCE],
+                    evidence=ledger_evidence,
+                    line=existing.line if existing else issue.line,
                 )
                 continue
         new_number += 1

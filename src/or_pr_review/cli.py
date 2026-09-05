@@ -606,7 +606,7 @@ def _coverage_expectations(
     unsatisfiable (the prompt demands every file while the parser caps the
     array), so enforcement degrades to unenforced with a visible notice.
     """
-    if state.mode != "initial":
+    if state.mode != "initial" and collected.plan.kind != "full-pr":
         return False, None
     paths = set(changed_paths_from_diff(collected.diff))
     if len(paths) > MAX_COVERAGE_ENTRIES:
@@ -972,7 +972,7 @@ def _finish(
             f"could not be inspected: {affected}. This review is partial and "
             "must not be treated as a clean pass."
         )
-    if loop.mode == "initial":
+    if loop.mode == "initial" or collected.plan.kind == "full-pr":
         diff_path_set = set(changed_paths_from_diff(collected.diff))
         for lane in lanes:
             if lane.ok and lane.coverage:

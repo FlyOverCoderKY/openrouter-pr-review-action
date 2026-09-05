@@ -298,14 +298,17 @@ during a latest-commit verification still requires a fresh initial review.
 Follow-up reviewers put incomplete fixes in the existing finding's resolution.
 Additional evidence can name `prior_finding_id` to retain that open finding's ID;
 same-file linked evidence from multiple lanes is published together with every
-body retained, within the normal body limit. Unknown, settled, cross-file, or
-oversized links remain separate visible findings. Distinct defects must not be
+body retained, only when the original and all additional evidence fit in the
+ledger's evidence budget as well as the publishing body limit. Malformed,
+unknown, settled, unanchored, cross-file, or oversized links remain separate
+visible findings. Distinct defects must not be
 linked merely because they share a file. Grouping is not proof of correctness;
 the fixing agent still evaluates the evidence.
 
 Agents polling GitHub must paginate **reviews, inline comments, and issue
-comments**. Thread replies can fill the first reviews page before the latest
-bot verdict appears. Match the bot author and explicit reviewed commit SHA,
+comments**. A busy review loop can fill the first reviews page before the latest
+bot verdict appears; inline replies are read from the separate comments endpoint.
+Match the bot author and explicit reviewed commit SHA,
 then read every continuation part: large reviews put their remaining findings
 in issue comments. A part-one count is not the total finding count. For example,
 `gh api --paginate repos/OWNER/REPO/pulls/NUMBER/reviews` reads every review page;

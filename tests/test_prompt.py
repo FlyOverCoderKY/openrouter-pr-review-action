@@ -182,7 +182,7 @@ def test_initial_prompt_requires_coverage_manifest() -> None:
     assert '"coverage"' in text
     assert "EVERY file in the embedded diff" in text
     verify_text = "\n".join(item["content"] for item in build_messages(_collected(mode="verify")))
-    assert '"coverage"' not in verify_text
+    assert '"coverage"' in verify_text  # Full-PR verify accounts for the same files.
 
 
 def test_initial_prompt_documents_rename_and_deletion_coverage_paths() -> None:

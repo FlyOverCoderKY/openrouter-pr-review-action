@@ -227,6 +227,15 @@ def _system_prompt(*, tone: str, mode: str, full_pr: bool = False) -> str:
             'If you find nothing after checking blast radius, return {"findings": []}\n'
             "plus the resolutions array."
         )
+        if full_pr:
+            coverage_block += (
+                '\nAlso return a "coverage" array: {"path": "repo/relative/path", '
+                '"findings": 0} for EVERY embedded-diff file, including zero-finding '
+                "and budget-stubbed files. Use the destination path for renames and "
+                "the source path for deletions. Read stubbed files with tools. "
+                "Coverage records what you checked; it does not replace resolutions.\n"
+            )
+            empty_case += " Include the coverage array even when findings is empty."
     else:
         task = (
             "This is the initial, exhaustive review (round 1) of an automated "

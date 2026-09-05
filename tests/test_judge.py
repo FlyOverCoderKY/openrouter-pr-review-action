@@ -63,8 +63,9 @@ def test_judge_canonicalization_keeps_lane_link_even_when_judge_omits_it():
     judge_row = MergedIssue(
         "Incomplete guard", "Caller still bypasses guard", "bug", "api.py", 3, ["model-a"]
     )
-    issues, _ = _verify_coverage([judge_row], [["0.0"]], False, lanes, sources)
+    issues, mode = _verify_coverage([judge_row], [["0.0"]], False, lanes, sources)
     assert issues[0].prior_finding_id == "r1-1"
+    assert mode == "merged"
 
 
 def test_parse_judge_issues_schema_mismatch_fail_closed() -> None:

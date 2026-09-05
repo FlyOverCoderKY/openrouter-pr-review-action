@@ -1601,6 +1601,37 @@ def test_auto_manual_corrupt_ledger_does_not_reset(tmp_path):
         cli._resolve_loop(env, github, 1)
 
 
+def test_full_pr_verify_requires_coverage_and_resolutions():
+    from dataclasses import replace
+
+    from or_pr_review import cli
+    from or_pr_review.collect import DiffPlan
+    from or_pr_review.errors import LaneError
+    from or_pr_review.loop import LoopState
+    from or_pr_review.schema import findings_json_schema, parse_lane_payload
+
+    collected = replace(_mk_collected(), mode="verify")
+    state = LoopState(mode="verify", round_number=2)
+    coverage, paths = cli._coverage_expectations(state, collected)
+    assert coverage is True
+    assert paths is not None
+    required = findings_json_schema(include_coverage=coverage, include_resolutions=True)["schema"][
+        "required"
+    ]
+    assert set(required) == {"findings", "coverage", "resolutions"}
+    with pytest.raises(LaneError, match="coverage is missing"):
+        parse_lane_payload(
+            {"findings": [], "resolutions": []},
+            "model-a",
+            expect_coverage=coverage,
+            expect_resolutions=True,
+        )
+    incremental = replace(
+        collected, plan=DiffPlan("latest-commit", "commit-range", "a" * 40, "b" * 40, None)
+    )
+    assert cli._coverage_expectations(state, incremental) == (False, None)
+
+
 def test_verify_round_folds_ledger_and_updates_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

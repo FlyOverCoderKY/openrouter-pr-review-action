@@ -352,8 +352,8 @@ def test_coverage_accepts_a_fully_accounted_merge() -> None:
             "model": "z-ai/glm-5.3-flash",
             "findings": [
                 {
-                    "title": "Bug A variant",
-                    "body": "same defect",
+                    "title": "Bug A",
+                    "body": "a",
                     "severity": "bug",
                     "file": "a.py",
                     "line": 1,

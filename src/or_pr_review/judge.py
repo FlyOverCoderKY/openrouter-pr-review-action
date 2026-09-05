@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from or_pr_review.errors import ActionError, SchemaError
+from or_pr_review.errors import ActionError, LaneError, SchemaError
 from or_pr_review.harness import (
     ChatFn,
     openrouter_chat,
@@ -51,6 +51,14 @@ from or_pr_review.schema import (
 
 # Keep the judge clerical and low-latency. Luna's adoption benchmark used this setting.
 JUDGE_REASONING = {"effort": "minimal"}
+
+
+class JudgeResponseError(SchemaError):
+    """An unusable paid response, with usage independent of its validity."""
+
+    def __init__(self, message: str, cost_usd: float | None) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
 
 
 def judge_json_schema() -> dict[str, Any]:
@@ -444,9 +452,19 @@ def _verify_coverage(
     # constituent findings verbatim.
     kept: list[MergedIssue] = []
     split = 0
+    canonicalized = 0
     for issue, issue_sources in zip(issues, sources, strict=True):
         if _legal_merge(issue_sources, input_ids):
-            kept.append(issue)
+            originals = [_issue_from_finding(*input_ids[fid]) for fid in issue_sources]
+            canonical = originals[0]
+            assert canonical is not None  # sources were partitioned and validated
+            for original in originals[1:]:
+                assert original is not None
+                absorb_merged_issue(canonical, original)
+            # Source IDs authorize grouping, never new evidence, attribution,
+            # severity or locations. The canonical lane text owns those fields.
+            canonicalized += int(canonical != issue)
+            kept.append(canonical)
             continue
         for fid in issue_sources:
             finding, lane_model = input_ids[fid]
@@ -465,7 +483,7 @@ def _verify_coverage(
             restored += 1
     kept, repair_duplicates = deduplicate_issues(kept)
     duplicate_count = judge_duplicates + repair_duplicates
-    if not split and not restored and not duplicate_count:
+    if not split and not restored and not duplicate_count and not canonicalized:
         return kept, "merged"
     parts = []
     if split:
@@ -474,6 +492,8 @@ def _verify_coverage(
         parts.append(f"restored {restored} unaccounted finding(s)")
     if duplicate_count:
         parts.append(f"suppressed {duplicate_count} duplicate issue(s)")
+    if canonicalized:
+        parts.append(f"restored canonical evidence for {canonicalized} issue(s)")
     print("judge coverage: " + "; ".join(parts))
     mode = "repaired"
     if split:
@@ -482,40 +502,22 @@ def _verify_coverage(
         mode += f"(+{restored})"
     if duplicate_count:
         mode += f"(deduped+{duplicate_count})"
+    if canonicalized:
+        mode += f"(canonical+{canonicalized})"
     capped, dropped = _capped(kept, "repair")
     return capped, _mode_with_cap(mode, dropped)
-
-
-# Adjacent reporting anchors for one defect can differ by a few lines (for
-# example, condition and use); a wider window risks joining separate defects.
-_MERGE_LINE_TOLERANCE = 5
 
 
 def _legal_merge(
     issue_sources: list[str], input_ids: dict[str, tuple[dict[str, Any], str]]
 ) -> bool:
-    """True when the merged sources plausibly describe ONE defect at ONE
-    location: every source shares the same file, and their line anchors sit
-    within a small window (all-null lines are allowed; mixing anchored and
-    unanchored findings is not a same-location merge)."""
-    if len(issue_sources) <= 1:
-        return True
-    files = set()
-    lines: list[int | None] = []
-    for fid in issue_sources:
-        finding, _model = input_ids[fid]
-        file_value = finding.get("file")
-        files.add(file_value if isinstance(file_value, str) else None)
-        line = finding.get("line")
-        lines.append(line if isinstance(line, int) and not isinstance(line, bool) else None)
-    if len(files) > 1:
-        return False
-    anchored = [line for line in lines if line is not None]
-    if not anchored:
-        return True
-    if len(anchored) != len(lines):
-        return False
-    return max(anchored) - min(anchored) <= _MERGE_LINE_TOLERANCE
+    """Group only sources whose location, title and evidence agree pairwise."""
+    originals = [_issue_from_finding(*input_ids[fid]) for fid in issue_sources]
+    return all(
+        left is not None and right is not None and same_merged_issue(left, right)
+        for index, left in enumerate(originals)
+        for right in originals[index + 1 :]
+    )
 
 
 def run_llm_judge(
@@ -566,18 +568,21 @@ def run_llm_judge(
         response = send(payload)
     except Exception as exc:  # noqa: BLE001
         raise ActionError(f"judge OpenRouter call failed: {redact(str(exc))}") from exc
+    cost = _response_cost(response)
     try:
         content = response_message_text(response)
-    except Exception as exc:  # noqa: BLE001
-        raise SchemaError(f"judge response shape is invalid: {exc}") from exc
-    if not content.strip():
-        raise SchemaError("judge returned an empty assistant message")
-    issues, sources, sources_invalid = _parse_with_sources(content, allowed_models=allowed)
-    merged, mode = _verify_coverage(issues, sources, sources_invalid, lanes, input_ids)
-    return merged, mode, _response_cost(response)
+        if not content.strip():
+            raise SchemaError("judge returned an empty assistant message")
+        issues, sources, sources_invalid = _parse_with_sources(content, allowed_models=allowed)
+        merged, mode = _verify_coverage(issues, sources, sources_invalid, lanes, input_ids)
+    except (ActionError, LaneError, AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise JudgeResponseError(f"judge response is invalid: {exc}", cost) from exc
+    return merged, mode, cost
 
 
 def _response_cost(response: dict[str, Any]) -> float | None:
+    if not isinstance(response, dict):
+        return None
     block = response.get("usage")
     if not isinstance(block, dict):
         return None

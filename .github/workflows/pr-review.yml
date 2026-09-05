@@ -267,5 +267,6 @@ jobs:
           review_scope: ${{ inputs.review_scope }}
           review_mode: ${{ inputs.review_mode }}
           bot_login: ${{ inputs.bot_login }}
+          max_tool_turns: ${{ inputs.max_tool_turns }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

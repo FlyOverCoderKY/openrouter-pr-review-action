@@ -251,7 +251,7 @@ def _fmt_cost(value: float, precision: int | None = None) -> str:
 def _cost_note(lanes: list[LaneResult], judge_cost: float | None, judge_ran: bool = False) -> str:
     lane_costs = [lane.cost_usd for lane in lanes if lane.cost_usd is not None]
     if not lane_costs and judge_cost is None:
-        return ""
+        return "unavailable — incomplete: judge cost unreported" if judge_ran else ""
     total = sum(lane_costs) + (judge_cost or 0.0)
     figures = [total, *lane_costs, *([judge_cost] if judge_cost is not None else [])]
     precision = 2 if min(figures) >= 0.1 else 4

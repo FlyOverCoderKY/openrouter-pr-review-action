@@ -340,8 +340,8 @@ def _resolve_issues(
         return JudgeOutcome(
             issues,
             note,
-            None,
-            False,
+            getattr(exc, "cost_usd", None),
+            True,
             diagnostics,
         )
     except ActionError as exc:
@@ -360,7 +360,7 @@ def _resolve_issues(
             issues,
             note,
             None,
-            False,
+            True,
             diagnostics,
         )
     # Merge outcomes are visible on the posted review, not only in the job
@@ -941,6 +941,13 @@ def _finish(
     # so a tool-less run cannot honor it: stubs + max_tool_turns=0 stays a
     # partial review.
     truncation_partial = collected.truncation.forces_partial
+    for lane in successful:
+        if lane.dropped_findings:
+            truncation_partial = True
+            notices.append(
+                f"`{lane.model}` omitted {lane.dropped_findings} finding(s) at the lane cap; "
+                "the strongest severities were retained. This review is partial."
+            )
     if collected.truncation.stubbed_files and parse_max_tool_turns(env.get("MAX_TOOL_TURNS")) == 0:
         truncation_partial = True
         notices.append(

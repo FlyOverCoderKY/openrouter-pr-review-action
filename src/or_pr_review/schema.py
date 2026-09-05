@@ -168,6 +168,7 @@ class LaneResult:
     thought_signature_tool_turns: int | None = None
     thought_signature_recoveries: int | None = None
     sanitized_tool_turns: int | None = None
+    dropped_findings: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -188,6 +189,7 @@ class LaneResult:
             "thought_signature_tool_turns": self.thought_signature_tool_turns,
             "thought_signature_recoveries": self.thought_signature_recoveries,
             "sanitized_tool_turns": self.sanitized_tool_turns,
+            "dropped_findings": self.dropped_findings,
             "head_sha": self.head_sha,
             "provider": self.provider,
             "resolutions": [resolution.to_dict() for resolution in self.resolutions],
@@ -287,6 +289,7 @@ def parse_lane_payload(
     *,
     expect_coverage: bool = False,
     expect_resolutions: bool = False,
+    diagnostics: dict[str, int] | None = None,
 ) -> tuple[list[Finding], list[Resolution], list[tuple[str, int]]]:
     """Parse findings plus the optional coverage manifest and resolutions.
 
@@ -303,18 +306,23 @@ def parse_lane_payload(
         raise LaneError("model output is missing a findings array")
     if not isinstance(findings_raw, list):
         raise LaneError("findings must be an array")
-    if len(findings_raw) > MAX_FINDINGS:
+    findings = [parse_finding(item, model_id) for item in findings_raw]
+    dropped = max(0, len(findings) - MAX_FINDINGS)
+    if dropped:
         # The response_format schema advertises maxItems, so only the
         # schema-free tool path can get here. Say so instead of silently
         # narrowing an "exhaustive" review.
         print(
             f"warning: model returned {len(findings_raw)} findings; keeping "
-            f"the first {MAX_FINDINGS}"
+            f"the strongest {MAX_FINDINGS} and omitting {dropped}"
         )
-        findings_raw = findings_raw[:MAX_FINDINGS]
-    findings = [parse_finding(item, model_id) for item in findings_raw]
+        findings = sorted(findings, key=lambda finding: -SEVERITY_RANK[finding.severity])[
+            :MAX_FINDINGS
+        ]
     coverage = _parse_coverage(payload.get("coverage"), required=expect_coverage)
     resolutions = _parse_resolutions(payload.get("resolutions"), required=expect_resolutions)
+    if diagnostics is not None:
+        diagnostics["dropped_findings"] = dropped
     return findings, resolutions, coverage
 
 
@@ -546,6 +554,9 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         except LaneError as exc:
             raise SchemaError(f"lane artifact finding is invalid: {exc}") from exc
     salvaged = payload.get("salvaged", False)
+    dropped = payload.get("dropped_findings", 0)
+    if isinstance(dropped, bool) or not isinstance(dropped, int) or dropped < 0:
+        raise SchemaError("lane artifact dropped_findings must be a nonnegative integer")
     if not isinstance(salvaged, bool):
         raise SchemaError("lane artifact salvaged must be a boolean")
     head_sha_value = payload.get("head_sha")
@@ -599,6 +610,7 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         provider=provider,
         resolutions=resolutions,
         coverage=coverage,
+        dropped_findings=dropped,
     )
 
 

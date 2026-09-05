@@ -13,7 +13,7 @@ First production use is a **single Grok 4.6 lane** beside the existing Grok acti
 - One invocation = one review. Callers own concurrency and merge gating.
 - `models` is a comma-separated list of OpenRouter slugs. **List length is the lane count** (hard-capped at **4**; the action fails clearly if you ask for more).
 - **One lane:** by default the judge is skipped and that lane’s structured findings are posted directly. Set `judge_needed: true` to force the configured judge for a single lane. The finding can still name the model that produced it.
-- **Two or more lanes:** parallel review lanes (same prompt on every lane in v1), then an OpenRouter **judge** union-merges them into **one** GitHub review when the shared job budget leaves a safe judge window. Every input finding is identity-tracked, the judge must account for every id, only same-file/nearby-line duplicates may merge, and any unaccounted or over-broadly merged finding is deterministically restored verbatim before the shared 80-finding publishing cap is applied. A judge transport/schema failure or an exhausted judge window posts the validated deterministic union and labels that degradation in the review instead of discarding completed lanes. If a repaired or fallback union exceeds the cap, its visible mode reports how many lower-severity findings were omitted. Attribution looks like:
+- **Two or more lanes:** parallel review lanes (same prompt on every lane in v1), then an OpenRouter **judge** union-merges them into **one** GitHub review when the shared job budget leaves a safe judge window. Every input finding is identity-tracked, the judge must account for every id, only duplicates whose source location, title and evidence agree may merge, and any unaccounted or over-broadly merged finding is deterministically restored verbatim before the shared 80-finding publishing cap is applied. A judge transport/schema failure or an exhausted judge window posts the validated deterministic union and labels that degradation in the review instead of discarding completed lanes. If a repaired or fallback union exceeds the cap, its visible mode reports how many lower-severity findings were omitted. Attribution looks like:
 
   ```text
   #### 🔴 Issue 1 — Missing auth check
@@ -156,7 +156,7 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-Two or more slugs schedule a judge; `judge_needed: true` can also force it for one configured lane. The default judge is `openai/gpt-5.6-luna`, selected by the repeatable synthetic judge benchmark after it retained 50/50 expected findings with 100% precision, zero duplicates, correct verdicts, and no repair/fallback across five runs per fixture. It is a coverage-checked **union-merge** of already-structured findings plus JSON schema — not a second reviewer and not a filter: identity-tracked coverage plus a same-location merge-legality check restore anything the judge drops or over-merges. Judged output preserves validated lane findings up to the shared 80-finding publishing cap; if a repaired or fallback union exceeds that cap, it retains the strongest severities and reports the omitted count in the visible judge mode. If only one of several configured lanes succeeds, that survivor posts directly because there is nothing to merge. Thinking/reasoning is pinned to `minimal`. In single-job `role: all`, lane deadlines reserve a meaningful judge window; if the lanes or caller's job deadline consume that window, the posted review explicitly uses the deterministic union. Give `role: all` callers at least a 25-minute job timeout (the reusable matrix workflow uses separate jobs and is not constrained by this shared envelope).
+Two or more slugs schedule a judge; `judge_needed: true` can also force it for one configured lane. The default judge is `openai/gpt-5.6-luna`, selected by the repeatable synthetic judge benchmark after it retained 50/50 expected findings with 100% precision, zero duplicates, correct verdicts, and no repair/fallback across five runs per fixture. It is a coverage-checked **union-merge** of already-structured findings plus JSON schema — not a second reviewer and not a filter: identity-tracked coverage plus a conservative source-evidence merge check restore anything the judge drops or over-merges. Judged output preserves validated lane findings up to the shared 80-finding publishing cap; if a repaired or fallback union exceeds that cap, it retains the strongest severities and reports the omitted count in the visible judge mode. If only one of several configured lanes succeeds, that survivor posts directly because there is nothing to merge. Thinking/reasoning is pinned to `minimal`. In single-job `role: all`, lane deadlines reserve a meaningful judge window; if the lanes or caller's job deadline consume that window, the posted review explicitly uses the deterministic union. Give `role: all` callers at least a 25-minute job timeout (the reusable matrix workflow uses separate jobs and is not constrained by this shared envelope).
 
 Alternatives (do not change the default unless you mean to):
 
@@ -239,3 +239,17 @@ pytest
 ## License
 
 [MIT](LICENSE). Copyright (c) 2026 Fly Over Coder.
+
+### Source evidence and incomplete output
+
+The judge proposes grouping; published text, severity, attribution and anchors are
+rebuilt from validated lane findings. Uncertain matches stay separate, which can
+produce more duplicate-looking comments than free-form semantic merging. Judge
+rewrites cannot downgrade a source bug or substitute unsupported evidence.
+
+Lane overflow retains the strongest severities, records `dropped_findings` in the
+artifact, and produces a visible partial review without an authoritative ledger.
+Malformed candidates anywhere in the response still fail validation. The separate
+union publishing cap remains visible in the judge mode. Reported judge charges
+are included even when its answer is unusable; unknown attempted charges are
+labeled incomplete.

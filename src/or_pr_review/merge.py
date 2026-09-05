@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from or_pr_review.schema import SEVERITY_RANK, Finding, LaneResult
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
+_EVIDENCE_TOKEN_RE = re.compile(r"""`[^`]*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\w+|[^\w\s]""")
 _REVIEW_ENVIRONMENT_RE = re.compile(
     r"\b(?:review|provided|temporary|inert)\s+"
     r"(?:checkout|workspace|environment|snapshot)\b"
@@ -174,17 +175,21 @@ def same_merged_issue(
 def _evidence_agrees(left: str, right: str) -> bool:
     """Strong, deterministic evidence agreement for duplicate suppression.
 
-    Exact normalized bodies are safe. The only non-exact allowance is a high
-    token overlap whose differences are all low-information articles or
-    qualifiers. Substantive token differences preserve both findings.
+    Keep word order, operators, case and quoted literals. A bag of words or
+    punctuation-stripped comparison can equate opposite failure mechanisms.
+    Only unquoted low-information articles/qualifiers may differ.
     """
-    if _normalize(left) == _normalize(right):
+    left_sequence = _EVIDENCE_TOKEN_RE.findall(left)
+    right_sequence = _EVIDENCE_TOKEN_RE.findall(right)
+    if left_sequence == right_sequence:
         return True
-    left_tokens = _tokens(left)
-    right_tokens = _tokens(right)
+    left_tokens = set(left_sequence)
+    right_tokens = set(right_sequence)
     if _jaccard(left_tokens, right_tokens) < 0.85:
         return False
-    return not ((left_tokens ^ right_tokens) - _DUPLICATE_NOISE_TOKENS)
+    return [t for t in left_sequence if t.lower() not in _DUPLICATE_NOISE_TOKENS] == [
+        t for t in right_sequence if t.lower() not in _DUPLICATE_NOISE_TOKENS
+    ]
 
 
 def absorb_merged_issue(existing: MergedIssue, incoming: MergedIssue) -> None:

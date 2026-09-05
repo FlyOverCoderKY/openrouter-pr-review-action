@@ -11,6 +11,7 @@ from or_pr_review.errors import LaneError, SchemaError
 from or_pr_review.harness import run_lane
 from or_pr_review.judge import run_llm_judge
 from or_pr_review.loop import LoopState
+from or_pr_review.merge import MergedIssue, deduplicate_issues
 from or_pr_review.publish import _cost_note
 from or_pr_review.schema import MAX_FINDINGS, LaneResult, parse_lane_artifact, parse_lane_payload
 
@@ -157,3 +158,28 @@ def test_matrix_judge_receives_the_lane_tool_policy():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/pr-review.yml").read_text()
     judge = workflow.split("\n  judge:", 1)[1]
     assert "max_tool_turns: ${{ inputs.max_tool_turns }}" in judge
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("The check uses x < 0.", "The check uses x > 0."),
+        ("It saves before validation.", "It validates before saving."),
+        (
+            "It sends before checking and retries after saving.",
+            "It checks before sending and saves after retrying.",
+        ),
+        ('The lookup uses "Key".', 'The lookup uses "key".'),
+        ('The field is "a".', 'The field is "the".'),
+        ("It runs save before check.", "It runs check before save."),
+    ],
+)
+def test_distinct_source_evidence_is_not_a_duplicate(left, right):
+    issues, absorbed = deduplicate_issues(
+        [
+            MergedIssue("Incorrect condition", body, "bug", "a.py", 1, ["example/a"])
+            for body in (left, right)
+        ]
+    )
+    assert absorbed == 0
+    assert {i.body for i in issues} == {left, right}

@@ -141,8 +141,8 @@ def test_decide_loop_state_matrix() -> None:
         4,
     )
     assert decide_loop_state(review_mode="auto", event_action="opened", ledger=ledger) == (
-        "initial",
-        1,
+        "verify",
+        4,
     )
 
 
@@ -182,6 +182,85 @@ def test_disputed_resolution_settles_a_finding() -> None:
     assert outcome.ledger.findings[0].status == "disputed"
     assert outcome.open_issue_count == 0
     assert "🤝" in outcome.resolution_lines[0]
+
+
+def test_followup_evidence_keeps_one_open_id_and_every_lane_body():
+    state = LoopState(mode="verify", round_number=3, prior_findings=(_finding(),))
+    issues = [
+        MergedIssue(
+            "Missing check in caller A",
+            "Caller A still bypasses auth.",
+            "risk",
+            "src/app.py",
+            10,
+            ["model-a"],
+            prior_finding_id="r1-1",
+        ),
+        MergedIssue(
+            "Missing check in caller B",
+            "Caller B still bypasses auth.",
+            "bug",
+            "src/app.py",
+            20,
+            ["model-b"],
+            prior_finding_id="r1-1",
+        ),
+    ]
+    outcome = apply_round(state, issues, {"r1-1": Resolution("r1-1", "not_fixed", "still open")})
+    assert outcome.open_issue_count == 1
+    assert outcome.open_bug_count == 1
+    assert len(outcome.issues) == 1
+    assert outcome.issues[0].id == "r1-1"
+    assert "Caller A" in outcome.issues[0].body and "Caller B" in outcome.issues[0].body
+    assert "the failure detail" in outcome.ledger.findings[0].evidence
+    assert "Caller A" in outcome.ledger.findings[0].evidence
+    assert "Caller B" in outcome.ledger.findings[0].evidence
+    assert outcome.issues[0].title == outcome.ledger.findings[0].title
+    assert outcome.issues[0].line == outcome.ledger.findings[0].line
+    assert set(outcome.ledger.findings[0].models) == {"x-ai/grok-4.6", "model-a", "model-b"}
+
+
+@pytest.mark.parametrize("status", ["fixed", "disputed"])
+def test_link_cannot_hide_a_new_finding_behind_settled_status(status):
+    state = LoopState(mode="verify", round_number=2, prior_findings=(_finding(),))
+    issue = MergedIssue(
+        "A new failure", "New evidence", "bug", "src/app.py", 3, prior_finding_id="r1-1"
+    )
+    outcome = apply_round(state, [issue], {"r1-1": Resolution("r1-1", status, "settled")})
+    assert outcome.issues[0].id == "r2-1"
+    assert outcome.open_issue_count == 1
+
+
+@pytest.mark.parametrize("prior_id,path", [("r9-9", "src/app.py"), ("r1-1", "other.py")])
+def test_unconfirmed_links_stay_independent(prior_id, path):
+    state = LoopState(mode="verify", round_number=2, prior_findings=(_finding(),))
+    issue = MergedIssue("Another failure", "Evidence", "bug", path, 3, prior_finding_id=prior_id)
+    outcome = apply_round(state, [issue], {})
+    assert outcome.issues[0].id == "r2-1"
+    assert outcome.open_issue_count == 2
+
+
+def test_unanchored_links_stay_independent():
+    from dataclasses import replace
+
+    state = LoopState(
+        mode="verify", round_number=2, prior_findings=(replace(_finding(), file=None),)
+    )
+    issue = MergedIssue("Another failure", "Evidence", "bug", None, None, prior_finding_id="r1-1")
+    outcome = apply_round(state, [issue], {})
+    assert outcome.open_issue_count == 2
+    assert outcome.issues[0].id == "r2-1"
+
+
+def test_linked_evidence_over_budget_stays_visible_as_separate_finding():
+    state = LoopState(mode="verify", round_number=2, prior_findings=(_finding(),))
+    issue = MergedIssue(
+        "Long evidence", "x" * 8000, "bug", "src/app.py", 3, prior_finding_id="r1-1"
+    )
+    outcome = apply_round(state, [issue, issue], {})
+    assert [row.id for row in outcome.issues] == ["r2-1", "r2-2"]
+    assert outcome.open_issue_count == 3
+    assert outcome.ledger.findings[0].evidence == "the failure detail"
 
 
 def test_apply_severity_floor_retires_nits_from_round_two() -> None:

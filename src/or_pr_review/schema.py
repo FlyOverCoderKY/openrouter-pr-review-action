@@ -79,6 +79,15 @@ def findings_json_schema(
         }
         schema["required"] = [*schema["required"], "coverage"]
     if include_resolutions:
+        finding_schema = schema["properties"]["findings"]["items"]
+        finding_schema["properties"]["prior_finding_id"] = {
+            "type": ["string", "null"],
+            "description": (
+                "Existing open finding ID for additional evidence of the same defect; "
+                "null for a new defect."
+            ),
+        }
+        finding_schema["required"].append("prior_finding_id")
         schema["properties"]["resolutions"] = {
             "type": "array",
             "items": {
@@ -123,6 +132,7 @@ class Finding:
     file: str | None
     line: int | None
     model_id: str
+    prior_finding_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -302,6 +312,13 @@ def parse_finding(raw: object, model_id: str) -> Finding:
         # Fail-open: keep the finding, drop the unsafe path (traversal,
         # backticks, control characters, absolute or oversized paths).
         path = normalize_review_path(path)
+    prior_id = raw.get("prior_finding_id")
+    if prior_id is not None and (
+        not isinstance(prior_id, str) or not re.fullmatch(r"r\d{1,3}-\d{1,3}", prior_id)
+    ):
+        # Linkage is advisory metadata. A malformed hint must not discard an
+        # otherwise valid finding (or fail every finding from this lane).
+        prior_id = None
     return Finding(
         title=title.strip()[:MAX_TITLE],
         body=body.strip()[:MAX_BODY],
@@ -309,6 +326,7 @@ def parse_finding(raw: object, model_id: str) -> Finding:
         file=path,
         line=_as_optional_line(raw.get("line")),
         model_id=model_id,
+        prior_finding_id=prior_id,
     )
 
 

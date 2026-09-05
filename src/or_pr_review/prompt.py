@@ -29,7 +29,9 @@ def build_messages(
 ) -> list[dict[str, str]]:
     # Keep the input for action compatibility; personas are not implemented in v1.
     _ = persona
-    system = _system_prompt(tone=tone, mode=collected.mode)
+    system = _system_prompt(
+        tone=tone, mode=collected.mode, full_pr=collected.plan.kind == "full-pr"
+    )
     user = _user_prompt(
         collected,
         custom_instructions=custom_instructions,
@@ -161,7 +163,7 @@ def looks_like_ci_or_docs_inventory_change(paths: list[str]) -> bool:
     return False
 
 
-def _system_prompt(*, tone: str, mode: str) -> str:
+def _system_prompt(*, tone: str, mode: str, full_pr: bool = False) -> str:
     tone_word = tone if tone in {"professional", "playful"} else "professional"
     if mode == "verify":
         task = (
@@ -176,6 +178,19 @@ def _system_prompt(*, tone: str, mode: str) -> str:
             "instead. Still use tools for blast radius of the new work "
             "before you return an empty findings list."
         )
+        if full_pr:
+            task = (
+                "This is a full-PR verification follow-up. Sweep every file and hunk "
+                "of the embedded full pull-request diff and its callers, including "
+                "unchanged parts of the PR. Also adjudicate every carried finding "
+                "using the current code and supplied replies. Report newly discovered "
+                "bugs and risks, but do not restart a nit sweep. For each candidate, "
+                "try to falsify it against current callers, guards, tests, "
+                "and framework guarantees; "
+                "uncertainty is not rejection; state material proof gaps. "
+                "A full-PR verification preserves the "
+                "review history; it is not a new initial review."
+            )
         coverage_block = (
             "\n"
             'This verification round must ALSO return a "resolutions" array with\n'
@@ -200,11 +215,27 @@ def _system_prompt(*, tone: str, mode: str) -> str:
             "disputed (settled)\n"
             "unless you have specific new evidence it is wrong; do not re-argue a\n"
             "settled dispute without new evidence.\n"
+            "An incomplete fix belongs in that finding's resolution, not in a new "
+            "finding with a reworded title. Put the remaining callers and failure "
+            "cases in its note. If additional evidence needs a findings entry, set "
+            "prior_finding_id to that OPEN finding's ID and use not_fixed or "
+            "fixed_incorrectly for its resolution. Otherwise set prior_finding_id "
+            "to null. Never link unrelated defects just because they share a file "
+            "or broad category. A genuinely new regression gets its own finding.\n"
         )
         empty_case = (
             'If you find nothing after checking blast radius, return {"findings": []}\n'
             "plus the resolutions array."
         )
+        if full_pr:
+            coverage_block += (
+                '\nAlso return a "coverage" array: {"path": "repo/relative/path", '
+                '"findings": 0} for EVERY embedded-diff file, including zero-finding '
+                "and budget-stubbed files. Use the destination path for renames and "
+                "the source path for deletions. Read stubbed files with tools. "
+                "Coverage records what you checked; it does not replace resolutions.\n"
+            )
+            empty_case += " Include the coverage array even when findings is empty."
     else:
         task = (
             "This is the initial, exhaustive review (round 1) of an automated "
@@ -313,6 +344,11 @@ Return a JSON object with a "findings" array. Each finding:
 - severity: bug | risk | nit
 - file: repository-relative path or null
 - line: 1-based line number if known, otherwise null
+
+Group instances of the same failure mechanism and repair into one finding,
+listing every affected caller and its evidence. Do not report the same missing
+implementation separately against its code, backlog checkbox, and PR description.
+Distinct triggers or fixes remain separate findings even when nearby.
 
 Write each body for a human skimming a review, not as one dense block: short
 paragraphs separated by blank lines (Markdown needs a blank line to break a

@@ -606,7 +606,7 @@ def _coverage_expectations(
     unsatisfiable (the prompt demands every file while the parser caps the
     array), so enforcement degrades to unenforced with a visible notice.
     """
-    if state.mode != "initial":
+    if state.mode != "initial" and collected.plan.kind != "full-pr":
         return False, None
     paths = set(changed_paths_from_diff(collected.diff))
     if len(paths) > MAX_COVERAGE_ENTRIES:
@@ -675,7 +675,7 @@ def _resolve_loop(
     scope = parse_scope(env.get("REVIEW_SCOPE") or "full-pr")
     repo = (env.get("GITHUB_REPOSITORY") or "").strip()
     ledger: Ledger | None = None
-    if mode_input == "verify" or (mode_input == "auto" and event_action == "synchronize"):
+    if mode_input in {"verify", "auto"}:
         bodies = github.list_bot_review_bodies(pr_number, _bot_login(env))
         ledger = latest_ledger(bodies, repo=repo, pr_number=pr_number)
         if ledger is None and mode_input == "verify":
@@ -972,7 +972,7 @@ def _finish(
             f"could not be inspected: {affected}. This review is partial and "
             "must not be treated as a clean pass."
         )
-    if loop.mode == "initial":
+    if loop.mode == "initial" or collected.plan.kind == "full-pr":
         diff_path_set = set(changed_paths_from_diff(collected.diff))
         for lane in lanes:
             if lane.ok and lane.coverage:

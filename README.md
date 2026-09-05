@@ -142,7 +142,7 @@ jobs:
           pr_number: ${{ github.event.pull_request.number }}
           models: x-ai/grok-4.6
           review_scope: full-pr
-          review_mode: initial
+          review_mode: auto
           fail_on: never
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -286,6 +286,34 @@ If your coding agent creates PRs or pushes fixes from a workflow using `GITHUB_T
 
 ## Troubleshooting
 
+### Reruns and finding continuity
+
+Use `review_mode: auto` with `review_scope: full-pr` for a manual recheck. It
+reviews the whole PR while retaining the existing ledger, finding IDs, and
+rebuttals. With no ledger it seeds an initial review. A corrupt newest ledger
+fails visibly; it never silently starts over. Use `review_mode: initial`
+explicitly only when you intend to reset history. A divergent history detected
+during a latest-commit verification still requires a fresh initial review.
+
+Follow-up reviewers put incomplete fixes in the existing finding's resolution.
+Additional evidence can name `prior_finding_id` to retain that open finding's ID;
+same-file linked evidence from multiple lanes is published together with every
+body retained, only when the original and all additional evidence fit in the
+ledger's evidence budget as well as the publishing body limit. Malformed,
+unknown, settled, unanchored, cross-file, or oversized links remain separate
+visible findings. Distinct defects must not be
+linked merely because they share a file. Grouping is not proof of correctness;
+the fixing agent still evaluates the evidence.
+
+Agents polling GitHub must paginate **reviews, inline comments, and issue
+comments**. A busy review loop can fill the first reviews page before the latest
+bot verdict appears; inline replies are read from the separate comments endpoint.
+Match the bot author and explicit reviewed commit SHA,
+then read every continuation part: large reviews put their remaining findings
+in issue comments. A part-one count is not the total finding count. For example,
+`gh api --paginate repos/OWNER/REPO/pulls/NUMBER/reviews` reads every review page;
+also paginate `pulls/NUMBER/comments` and `issues/NUMBER/comments`.
+
 | Symptom | What to check |
 | --- | --- |
 | Review jobs are skipped | The examples exclude drafts, fork PRs, and Dependabot PRs. Mark an eligible draft ready to start its initial review. These exclusions need to be accounted for in merge policy. |
@@ -331,7 +359,7 @@ Account data policies still apply; a route pin does not override them.
 | `max_diff_kb` | `300` | Embedded diff cap. Over-budget diffs go through **diff-budget triage**: generated/vendored/lock-class files (the reviewed commit's `.gitattributes` `linguist-generated`/`linguist-vendored`, lockfile heuristics, large committed JSON snapshots, `generated_paths`) demote to stubs first, then the largest hand-written files, so hand-written hunks keep the budget. A stubbed file stays in the embedded diff (header + counts + first-hunk reference), is materialized into the inert checkout for the tools even past the normal 1 MB cap (up to 8 MB), and still requires a coverage entry — so a fully stubbed-or-embedded diff keeps its real verdict and review-loop continuity. `.gitattributes` is repository content (PR-author-controlled); honoring it only shifts packing priority — a demoted file keeps its stub, coverage obligation, and tool access, which is strictly safer than the raw byte cut it replaces (where tail files vanished entirely). Files dropped entirely, an unparseable diff's raw byte cut, or stubs with tools disabled (`max_tool_turns: 0`) ⇒ `partial`, never clean. |
 | `generated_paths` | _empty_ | Extra globs (JSON array of strings) classified as generated/vendored during diff-budget triage. Demotion only shifts packing priority — never excludes a file from review. Trusted workflow config only — never interpolate PR content. Max 8,000 UTF-8 bytes, 200 globs. |
 | `review_scope` | `full-pr` | `full-pr` \| `latest-commit`. Initial rounds require `full-pr`. |
-| `review_mode` | `auto` | `auto` (opened = initial, synchronize = verify) \| `initial` \| `verify`. |
+| `review_mode` | `auto` | `auto` continues an existing ledger on any event, or seeds an initial review when none exists. `initial` explicitly resets history; `verify` requires an existing ledger. |
 | `effort` | _empty_ | Optional OpenRouter reasoning effort for **review lanes**. |
 | `max_tool_turns` | `50` | Read-only tool rounds against the inert checkout. `0` disables tools. First-pass default matches the sibling Grok `max_turns`. Follow-up jobs may pass `30`. |
 | `openrouter_timeout_seconds` | `180` | Per-request OpenRouter timeout; 1–600 seconds. |

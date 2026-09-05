@@ -117,8 +117,8 @@ inputs:
     default: "full-pr"
   review_mode:
     description: >-
-      Loop position: auto (opened = initial, synchronize = verify), or force
-      initial / verify.
+      Loop position: auto continues an existing ledger for any event and seeds
+      an initial review otherwise. initial explicitly resets; verify requires a ledger.
     required: false
     default: "auto"
   effort:

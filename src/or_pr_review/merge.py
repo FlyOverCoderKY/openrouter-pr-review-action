@@ -52,6 +52,7 @@ class MergedIssue:
     line: int | None
     models: list[str] = field(default_factory=list)
     id: str | None = None  # ledger finding id (r<round>-<n>), assigned at finish
+    prior_finding_id: str | None = None
 
 
 def identified_by(models: list[str]) -> str:
@@ -77,6 +78,8 @@ def format_issue_block(number: int, issue: MergedIssue) -> str:
     heading = (
         f"#### {severity_emoji(issue.severity)} Issue {number} — {neutralize_mentions(issue.title)}"
     )
+    if issue.id and issue.id == issue.prior_finding_id:
+        heading += f" (updates `{issue.id}`)"
     meta = [f"`{issue.severity}`"]
     if issue.file and issue.line:
         meta.insert(0, f"`{issue.file}:{issue.line}`")
@@ -101,6 +104,7 @@ def merged_issue_from_finding(finding: Finding, *, fallback_model: str = "") -> 
         file=finding.file,
         line=finding.line,
         models=[model] if model else [],
+        prior_finding_id=finding.prior_finding_id,
     )
 
 
@@ -153,6 +157,8 @@ def same_merged_issue(
     both title and evidence text. This catches clerical judge duplication
     without folding two different defects that merely live on the same line.
     """
+    if left.prior_finding_id != right.prior_finding_id:
+        return False
     file_left = (left.file or "").strip()
     file_right = (right.file or "").strip()
     if file_left != file_right or left.line != right.line:
@@ -232,6 +238,7 @@ def deduplicate_issues(
             line=issue.line,
             models=list(issue.models),
             id=issue.id,
+            prior_finding_id=issue.prior_finding_id,
         )
         for existing in merged:
             if same_merged_issue(existing, candidate):

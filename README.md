@@ -242,13 +242,19 @@ authoritative ledger. Every available lane must agree on its context, model slot
 and reviewed commit; mismatches fail before judging or posting. Missing sibling
 jobs still fail open when another lane supplied a valid context.
 
-Use the same action revision for matrix lanes and judge. Legacy or `role: all`
-artifacts without this context cannot be replayed through `role: judge`; rerun the
-matrix lanes. Contexts are limited to 16 MiB per lane and checked before model
+Use the same action revision for lanes and judge. Legacy artifacts without this
+context cannot be replayed through `role: judge`; rerun the lanes. Current
+`role: all` artifacts also carry this context for recovery. Contexts are limited
+to 16 MiB per lane and checked before model
 execution. They contain repository content and must remain trusted workflow
 artifacts. Their checksum detects inconsistency, not malicious replacement.
 Lane collection is still independent: a metadata or ledger change between lanes
 is detected and requires a rerun rather than silently choosing one lane's state.
+Pin `head_sha` to the original reviewed commit in both lane and judge jobs (as the
+reusable workflow does). It declares the job's intended target; it is not a live
+head lookup. If the final live-head lookup fails, publication is partial with no
+new ledger. A missing or invalid context fails the job and posts a best-effort
+incomplete status instead of reconstructing review state.
 
 ## Recommended caller concurrency
 

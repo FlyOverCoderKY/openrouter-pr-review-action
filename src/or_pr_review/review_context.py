@@ -90,6 +90,10 @@ def restore_context(envelope: object) -> ReviewContext:
         raise SchemaError("review context digest mismatch")
     context = _decode(ReviewContext, envelope["payload"])
     collected, loop = context.collected, context.loop
+    try:
+        embedded_bytes = len(collected.diff.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise SchemaError("review context diff is not valid UTF-8 text") from exc
     if (
         not re.fullmatch(r"[^/\s]+/[^/\s]+", context.repository)
         or collected.pr_number < 1
@@ -98,11 +102,11 @@ def restore_context(envelope: object) -> ReviewContext:
         or loop.mode != collected.mode
         or loop.mode not in {"initial", "verify"}
         or not 1 <= loop.round_number <= 999
-        or not re.fullmatch(r"(?:[0-9a-f]{12})?", loop.generation)
+        or not re.fullmatch(r"[0-9a-f]{0,12}", loop.generation)
         or not 0 <= context.max_tool_turns <= 1000
         or collected.truncation.max_diff_kb < 1
         or collected.truncation.original_bytes < 0
-        or collected.truncation.embedded_bytes != len(collected.diff.encode("utf-8"))
+        or collected.truncation.embedded_bytes != embedded_bytes
         or collected.truncation.original_bytes < collected.truncation.embedded_bytes
     ):
         raise SchemaError("review context contains inconsistent publication metadata")

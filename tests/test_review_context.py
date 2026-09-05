@@ -69,7 +69,7 @@ def env(directory):
     }
 
 
-@pytest.mark.parametrize("live_head", [HEAD, "c" * 40])
+@pytest.mark.parametrize("live_head", [HEAD, "c" * 40, None])
 def test_matrix_uses_saved_state_without_recollection(tmp_path, monkeypatch, live_head):
     save_lane(tmp_path)
     posted = []
@@ -100,6 +100,53 @@ def test_matrix_uses_saved_state_without_recollection(tmp_path, monkeypatch, liv
         assert ledger.generation == state().generation
         assert ledger.findings == ()
         assert ledger.round_number == 2
+
+
+def test_all_role_artifacts_can_be_recovered_by_judge(tmp_path, monkeypatch):
+    captured = []
+    monkeypatch.setattr(cli, "_collect_with_loop", lambda _: (collected(), state(), ""))
+    monkeypatch.setattr(cli, "_prepare_workspace", lambda *a: None)
+    monkeypatch.setattr(cli, "_messages", lambda *a: [])
+    monkeypatch.setattr(cli, "_maybe_status", lambda *a: None)
+    monkeypatch.setattr(
+        cli, "_invoke_lane", lambda _env, model, *a, **k: LaneResult(1, True, model)
+    )
+
+    def finish(_env, lanes, **kwargs):
+        captured.append((lanes, kwargs))
+        return 0
+
+    monkeypatch.setattr(cli, "_finish", finish)
+    settings = {**env(tmp_path), "MODELS": "x/model,y/model", "ALL_LANE_RESULTS_DIR": str(tmp_path)}
+    assert cli.main(["all"], settings) == 0
+    monkeypatch.setattr(
+        cli, "_collect_with_loop", lambda *a, **k: pytest.fail("no fresh collection")
+    )
+    assert cli.main(["judge"], settings) == 0
+    assert captured[0][1] == captured[1][1] == {"collected": collected(), "loop": state()}
+
+
+@pytest.mark.parametrize("generation", ["", "a", "a" * 11, "a" * 12])
+def test_snapshot_preserves_ledger_v1_generation_compatibility(generation):
+    original = replace(state(), generation=generation)
+    assert restore_context(freeze_context(REPO, collected(), original, 50)).loop == original
+
+
+def test_invalid_unicode_is_a_schema_failure():
+    invalid = replace(collected(), truncation=Truncation("\ud800", False, 1, 1, 300))
+    with pytest.raises(SchemaError, match="UTF-8"):
+        freeze_context(REPO, invalid, state(), 50)
+
+
+def test_empty_matrix_reports_incomplete_without_recollection(tmp_path, monkeypatch):
+    notices = []
+    monkeypatch.setattr(
+        cli, "_collect_with_loop", lambda *a, **k: pytest.fail("no context available")
+    )
+    monkeypatch.setattr(cli, "_best_effort_incomplete", lambda _env, **kw: notices.append(kw))
+    assert cli.main(["judge"], env(tmp_path)) == 1
+    assert notices[0]["stage"] == "judge"
+    assert "no matrix publication context" in notices[0]["reason"]
 
 
 def test_same_head_different_ledger_rejected_before_judge(tmp_path, monkeypatch):

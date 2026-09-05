@@ -302,7 +302,7 @@ def test_judge_schema_mismatch_fail_closed(tmp_path: Path) -> None:
     assert main(["judge"], env) == 1
 
 
-def test_judge_missing_lane_fail_opens_then_errors_if_none_ok(
+def test_empty_matrix_fails_closed_without_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from or_pr_review import cli as cli_mod
@@ -902,7 +902,10 @@ def test_fail_on_bugs_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
         FAIL_ON="bugs",
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 1
+    assert "verdict=issues" in (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "bug_count=1" in (tmp_path / "out.txt").read_text(encoding="utf-8")
 
 
 def test_lane_keeps_matrix_index_when_models_is_single_slug(
@@ -2046,6 +2049,11 @@ def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.Monk
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
     )
+    _save_matrix_context(env)
+    from or_pr_review.errors import SchemaError
+
+    with pytest.raises(SchemaError, match="model or reviewed head"):
+        cli_mod._role_judge(env)
     assert main(["judge"], env) == 1
 
 

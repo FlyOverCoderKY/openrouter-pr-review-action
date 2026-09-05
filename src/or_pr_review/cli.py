@@ -141,6 +141,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         raise ActionError(f"unknown role {role!r}; expected setup, lane, judge, or all")
     except SchemaError as exc:
         _error(f"schema mismatch (fail-closed): {exc}")
+        _best_effort_incomplete(environ, stage=role, reason=redact(str(exc)))
         return 1
     except ActionError as exc:
         _error(redact(str(exc)))
@@ -414,6 +415,12 @@ def _role_all(env: dict[str, str]) -> int:
     # emitted once by _finish alongside the other public result outputs.
     _write_lane_setup_outputs(slugs)
     collected, state, agent_replies = _collect_with_loop(env)
+    context = freeze_context(
+        (env.get("GITHUB_REPOSITORY") or "").strip(),
+        collected,
+        state,
+        parse_max_tool_turns(env.get("MAX_TOOL_TURNS")),
+    )
     _maybe_status(
         env,
         collected.pr_number,
@@ -450,6 +457,7 @@ def _role_all(env: dict[str, str]) -> int:
     if len(slugs) == 1:
         lane = _one(slugs[0])
         lane.head_sha = collected.head_sha
+        lane.review_context = context
         _persist_lane_artifact(lane_dir, 0, lane)
         lanes.append(lane)
     else:
@@ -478,7 +486,7 @@ def _role_all(env: dict[str, str]) -> int:
                     except Exception as exc:  # noqa: BLE001
                         lane = failed_lane(model, redact(str(exc)))
                     by_index[i] = lane
-                    _persist_and_log_lane(lane_dir, i, model, lane, collected.head_sha)
+                    _persist_and_log_lane(lane_dir, i, model, lane, collected.head_sha, context)
             except FutureTimeoutError:
                 timed_out = True
                 completed = len(by_index)
@@ -497,7 +505,7 @@ def _role_all(env: dict[str, str]) -> int:
                             f"salvaging {completed}/{len(slugs)} completed lane(s)",
                         )
                     by_index[i] = lane
-                    _persist_and_log_lane(lane_dir, i, slugs[i], lane, collected.head_sha)
+                    _persist_and_log_lane(lane_dir, i, slugs[i], lane, collected.head_sha, context)
         finally:
             pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
         lanes = [by_index[i] for i in range(len(slugs))]
@@ -939,7 +947,13 @@ def _finish(
     github = _github(env)
     stale_notice: str | None = None
     live_head = _live_head(github, collected.pr_number)
-    if live_head and live_head != reviewed_sha:
+    if live_head is None:
+        stale_notice = (
+            "The current PR head could not be confirmed. "
+            f"This review is pinned to commit {reviewed_sha[:12]} and is partial; "
+            "it cannot publish authoritative loop state until the live head is verified."
+        )
+    elif live_head != reviewed_sha:
         stale_notice = (
             "The PR head advanced after this review's diff was collected. "
             f"This review is pinned to commit {reviewed_sha[:12]} and does not "
@@ -1207,9 +1221,15 @@ def _persist_lane_artifact(directory: Path, index: int, result: LaneResult) -> P
 
 
 def _persist_and_log_lane(
-    directory: Path, index: int, model: str, lane: LaneResult, head_sha: str
+    directory: Path,
+    index: int,
+    model: str,
+    lane: LaneResult,
+    head_sha: str,
+    context: dict[str, Any],
 ) -> None:
     lane.head_sha = head_sha
+    lane.review_context = context
     _persist_lane_artifact(directory, index, lane)
     print(
         f"lane {index} `{model}` persisted ({'ok' if lane.ok else 'failed-open'})",

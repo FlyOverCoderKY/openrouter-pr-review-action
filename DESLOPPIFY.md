@@ -1,7 +1,7 @@
 # Desloppify Backlog
 
 Implementation follow-up: R1, R2, R3 and R5 are addressed on `codex/review-loop-hardening`.
-R4 is addressed by durable, validated matrix publication snapshots (545 tests passed,
+R4 is addressed by durable, validated publication snapshots (553 tests passed,
 2 platform skips). R6 and R7 remain open. The separate runner
 already supplies the stronger benchmark scoring/provenance used for model comparisons;
 R6/R7 are native action-benchmark limitations and do not require repeating paid runs.

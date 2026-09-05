@@ -137,3 +137,15 @@ def test_base_chat_payload_applies_protocol_and_shared_fields() -> None:
         "reasoning": {"effort": "minimal"},
         "provider": {"data_collection": "deny"},
     }
+
+
+def test_base_chat_payload_optionally_requests_service_tier() -> None:
+    plain, _ = base_chat_payload(model="example/model", response_schema={"name": "result"})
+    requested, _ = base_chat_payload(
+        model="example/model",
+        response_schema={"name": "result"},
+        service_tier="flex",
+    )
+
+    assert "service_tier" not in plain
+    assert requested["service_tier"] == "flex"

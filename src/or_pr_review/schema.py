@@ -169,9 +169,20 @@ class LaneResult:
     thought_signature_recoveries: int | None = None
     sanitized_tool_turns: int | None = None
     dropped_findings: int = 0
+    # Conservative cost and service-tier telemetry. Older artifacts omit these
+    # keys; parse_lane_artifact accepts the absence as unknown/incomplete.
+    known_cost_usd: float | None = None
+    attempted_requests: int | None = None
+    cost_observed_responses: int | None = None
+    cost_complete: bool | None = None
+    requested_service_tier: str | None = None
+    served_service_tiers: list[str | None] = field(default_factory=list)
+    service_tier_observed_responses: int | None = None
+    service_tier_complete: bool | None = None
+    service_tier_confirmed: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema_version": self.schema_version,
             "ok": self.ok,
             "model": self.model,
@@ -195,6 +206,25 @@ class LaneResult:
             "resolutions": [resolution.to_dict() for resolution in self.resolutions],
             "coverage": [{"path": path, "findings": count} for path, count in self.coverage],
         }
+        if self.known_cost_usd is not None:
+            payload["known_cost_usd"] = self.known_cost_usd
+        if self.attempted_requests is not None:
+            payload["attempted_requests"] = self.attempted_requests
+        if self.cost_observed_responses is not None:
+            payload["cost_observed_responses"] = self.cost_observed_responses
+        if self.cost_complete is not None:
+            payload["cost_complete"] = self.cost_complete
+        if self.requested_service_tier is not None:
+            payload["requested_service_tier"] = self.requested_service_tier
+        if self.served_service_tiers:
+            payload["served_service_tiers"] = list(self.served_service_tiers)
+        if self.service_tier_observed_responses is not None:
+            payload["service_tier_observed_responses"] = self.service_tier_observed_responses
+        if self.service_tier_complete is not None:
+            payload["service_tier_complete"] = self.service_tier_complete
+        if self.service_tier_confirmed is not None:
+            payload["service_tier_confirmed"] = self.service_tier_confirmed
+        return payload
 
 
 def normalize_review_path(value: str) -> str | None:
@@ -580,6 +610,8 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         coverage = _parse_coverage(payload.get("coverage"), required=False)
     except LaneError as exc:
         raise SchemaError(f"lane artifact is invalid: {exc}") from exc
+    served_tiers = _parse_served_service_tiers(payload.get("served_service_tiers"))
+    requested_tier = _parse_requested_service_tier(payload.get("requested_service_tier"))
     return LaneResult(
         schema_version=SCHEMA_VERSION,
         ok=ok,
@@ -611,7 +643,67 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         resolutions=resolutions,
         coverage=coverage,
         dropped_findings=dropped,
+        known_cost_usd=_optional_float(payload.get("known_cost_usd"), field="known_cost_usd"),
+        attempted_requests=_optional_int(
+            payload.get("attempted_requests"), field="attempted_requests"
+        ),
+        cost_observed_responses=_optional_int(
+            payload.get("cost_observed_responses"), field="cost_observed_responses"
+        ),
+        cost_complete=_optional_bool(payload.get("cost_complete"), field="cost_complete"),
+        requested_service_tier=requested_tier,
+        served_service_tiers=served_tiers,
+        service_tier_observed_responses=_optional_int(
+            payload.get("service_tier_observed_responses"),
+            field="service_tier_observed_responses",
+        ),
+        service_tier_complete=_optional_bool(
+            payload.get("service_tier_complete"), field="service_tier_complete"
+        ),
+        service_tier_confirmed=_optional_bool(
+            payload.get("service_tier_confirmed"), field="service_tier_confirmed"
+        ),
     )
+
+
+_SERVICE_TIERS = frozenset({"default", "flex", "priority"})
+
+
+def _parse_requested_service_tier(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in _SERVICE_TIERS:
+        raise SchemaError(
+            f"lane artifact requested_service_tier must be one of {sorted(_SERVICE_TIERS)} or null"
+        )
+    return value
+
+
+def _parse_served_service_tiers(value: object) -> list[str | None]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise SchemaError("lane artifact served_service_tiers must be an array or null")
+    served: list[str | None] = []
+    for item in value:
+        if item is None:
+            served.append(None)
+            continue
+        if not isinstance(item, str) or item not in _SERVICE_TIERS:
+            raise SchemaError(
+                "lane artifact served_service_tiers entries must be one of "
+                f"{sorted(_SERVICE_TIERS)} or null"
+            )
+        served.append(item)
+    return served
+
+
+def _optional_bool(value: object, *, field: str) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise SchemaError(f"lane artifact {field} must be a boolean or null")
+    return value
 
 
 def _optional_int(value: object, *, field: str) -> int | None:

@@ -30,6 +30,17 @@ python -m or_pr_review.bench run bench/fixtures/planted-mini \
 python -m or_pr_review.bench score bench/fixtures/planted-mini /tmp/bench-out
 ```
 
+To prepare an Astra standard-versus-Flex comparison, add
+`--service-tier default` or `--service-tier flex` to otherwise identical
+**opt-in live** runs. This flag is intentionally benchmark-only and does not
+change the action's defaults. It requests OpenRouter's top-level
+`service_tier`; it does not prove that tier was served. The run artifact and
+the aggregate progress checkpoint record the requested tier separately from
+the distinct response-reported served tiers, the number of observed tier
+responses, completeness, and confirmation (only every served value matching
+the request confirms it). Missing, `null`, mixed, or interrupted response
+telemetry must not be treated as confirmation of Flex.
+
 `run` makes no request unless both `--allow-spend` is present and
 `OPENROUTER_API_KEY` is set. Lanes are nondeterministic — `run` defaults to 3
 runs, and `score` prints a mean row across the successful runs. During each
@@ -51,6 +62,13 @@ adjudication verdict that fired or `UNADJUDICATED` for triage.
 
 Completed `run-N.json` files contain finding bodies and file paths. For real-PR
 fixtures, keep `--out` outside this repository as well as the fixture itself.
+
+Cost telemetry is conservative: `known_cost_usd` retains valid per-response
+spend for budgeting, while `cost_usd` is present only when every attempted
+request reported a valid cost. A timeout, HTTP error, or response without a
+valid cost leaves the total incomplete; it is never silently counted as $0.
+The focused service-tier and accounting tests use injected synthetic responses
+only. They make no provider call and require no OpenRouter credentials.
 
 ## Label format
 

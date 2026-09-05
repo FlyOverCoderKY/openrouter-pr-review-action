@@ -399,3 +399,34 @@ def test_lane_artifact_roundtrip_with_coverage_and_resolutions() -> None:
     assert parsed.thought_signature_tool_turns == 7
     assert parsed.thought_signature_recoveries == 1
     assert parsed.sanitized_tool_turns == 2
+
+
+def test_lane_artifact_roundtrip_with_cost_and_service_tier_telemetry() -> None:
+    from or_pr_review.schema import SCHEMA_VERSION, LaneResult, parse_lane_artifact
+
+    lane = LaneResult(
+        schema_version=SCHEMA_VERSION,
+        ok=True,
+        model="x-ai/grok-4.6",
+        findings=[],
+        error=None,
+        known_cost_usd=0.004,
+        attempted_requests=2,
+        cost_observed_responses=1,
+        cost_complete=False,
+        requested_service_tier="flex",
+        served_service_tiers=["flex", None],
+        service_tier_observed_responses=1,
+        service_tier_complete=False,
+        service_tier_confirmed=False,
+    )
+    parsed = parse_lane_artifact(lane.to_dict())
+    assert parsed.known_cost_usd == pytest.approx(0.004)
+    assert parsed.attempted_requests == 2
+    assert parsed.cost_observed_responses == 1
+    assert parsed.cost_complete is False
+    assert parsed.requested_service_tier == "flex"
+    assert parsed.served_service_tiers == ["flex", None]
+    assert parsed.service_tier_observed_responses == 1
+    assert parsed.service_tier_complete is False
+    assert parsed.service_tier_confirmed is False

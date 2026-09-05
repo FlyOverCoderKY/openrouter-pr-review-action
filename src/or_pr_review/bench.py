@@ -81,7 +81,7 @@ from or_pr_review.judge import (
 from or_pr_review.models import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL, parse_slug
 from or_pr_review.prompt import build_messages, changed_paths_from_diff, parse_path_profiles
 from or_pr_review.redaction import redact
-from or_pr_review.schema import MAX_COVERAGE_ENTRIES, SEVERITIES
+from or_pr_review.schema import MAX_COVERAGE_ENTRIES, SEVERITIES, LaneResult
 
 LABEL_CONTEXTS = ("diff", "file", "repo")
 ADJUDICATION_VERDICTS = ("false_positive", "true_positive_unlabeled")
@@ -511,7 +511,7 @@ def score_run(
 def _write_progress(
     progress_path: Path,
     model: str,
-    payload: dict[str, int | float | str],
+    payload: dict[str, Any],
 ) -> None:
     """Atomically save aggregate-only progress for one paid lane."""
     record: dict[str, Any] = {
@@ -522,6 +522,12 @@ def _write_progress(
     pending = progress_path.with_suffix(".tmp")
     pending.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     os.replace(pending, progress_path)
+
+
+def _lane_run_payload(lane: LaneResult) -> dict[str, Any]:
+    """Serialize a completed lane run for offline bench scoring."""
+
+    return lane.to_dict()
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -599,11 +605,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
             ),
             provider_data_collection=args.provider_data_collection or None,
             provider_zdr=args.provider_zdr,
+            service_tier=args.service_tier,
             expect_coverage=True,
             expected_paths=expected_paths,
             progress=partial(_write_progress, progress_path, args.model),
         )
-        payload = lane.to_dict()
+        payload = _lane_run_payload(lane)
         out_path = out_dir / f"run-{index}.json"
         out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         progress_path.unlink(missing_ok=True)
@@ -1231,6 +1238,13 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="require an OpenRouter zero-data-retention endpoint per request "
         "(default: enabled; use --no-provider-zdr only for non-private bake-offs)",
+    )
+    run_parser.add_argument(
+        "--service-tier",
+        choices=("default", "flex", "priority"),
+        default=None,
+        help="request an OpenRouter service tier for this benchmark; response telemetry records "
+        "the tier actually served",
     )
     run_parser.add_argument(
         "--allow-spend",

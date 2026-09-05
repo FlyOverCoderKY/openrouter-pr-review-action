@@ -660,6 +660,60 @@ def test_cmd_run_wires_provider_data_policy_flags(
     assert calls[0]["provider_zdr"] is False
 
 
+def test_cmd_run_wires_service_tier_and_writes_tier_telemetry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import bench as bench_mod
+
+    fixture_dir = tmp_path / "f"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    calls: list[dict] = []
+
+    def successful(**kwargs):
+        calls.append(kwargs)
+        lane = _fake_lane(ok=True)
+        lane.known_cost_usd = 0.003
+        lane.attempted_requests = 2
+        lane.cost_observed_responses = 2
+        lane.cost_complete = True
+        lane.requested_service_tier = "flex"
+        lane.served_service_tiers = ["flex", "priority"]
+        lane.service_tier_observed_responses = 2
+        lane.service_tier_complete = True
+        lane.service_tier_confirmed = False
+        return lane
+
+    monkeypatch.setattr(bench_mod, "run_lane", successful)
+    assert (
+        main(
+            [
+                "run",
+                str(fixture_dir),
+                "--out",
+                str(out),
+                "--service-tier",
+                "flex",
+                "--allow-spend",
+            ]
+        )
+        == 0
+    )
+    assert calls[0]["service_tier"] == "flex"
+    payload = json.loads((out / "run-0.json").read_text(encoding="utf-8"))
+    assert payload["attempted_requests"] == 2
+    assert payload["requested_service_tier"] == "flex"
+    assert payload["served_service_tiers"] == ["flex", "priority"]
+    assert payload["service_tier_observed_responses"] == 2
+    assert payload["service_tier_complete"] is True
+    assert payload["service_tier_confirmed"] is False
+
+    calls.clear()
+    assert main(["run", str(fixture_dir), "--out", str(out), "--allow-spend"]) == 0
+    assert calls[0]["service_tier"] is None
+
+
 def test_cmd_run_wires_benchmark_lane_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -716,9 +770,17 @@ def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
         kwargs["progress"](
             {
                 "elapsed_ms": 123,
-                "cost_usd": 0.004,
+                "known_cost_usd": 0.004,
+                "attempted_requests": 2,
+                "cost_observed_responses": 1,
+                "cost_complete": False,
                 "requests": 2,
                 "provider": "example",
+                "requested_service_tier": "flex",
+                "served_service_tiers": ["flex"],
+                "service_tier_observed_responses": 1,
+                "service_tier_complete": False,
+                "service_tier_confirmed": False,
             }
         )
         raise ActionError("interrupted")
@@ -730,9 +792,17 @@ def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
         "schema": "or-pr-review/bench-progress/1",
         "model": "x-ai/grok-4.6",
         "elapsed_ms": 123,
-        "cost_usd": 0.004,
+        "known_cost_usd": 0.004,
+        "attempted_requests": 2,
+        "cost_observed_responses": 1,
+        "cost_complete": False,
         "requests": 2,
         "provider": "example",
+        "requested_service_tier": "flex",
+        "served_service_tiers": ["flex"],
+        "service_tier_observed_responses": 1,
+        "service_tier_complete": False,
+        "service_tier_confirmed": False,
     }
 
 
@@ -866,6 +936,19 @@ def test_cmd_score_clean_fixture_reports_noise(
     printed = capsys.readouterr().out
     assert "clean fixture (no labels): the noise column is the score" in printed
     assert "| 1/1 | 1" in printed  # noise 1/1, findings 1
+
+
+def test_cmd_score_accepts_legacy_run_artifact_without_tier_or_cost_telemetry(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fixture_dir = tmp_path / "legacy"
+    _write_fixture(fixture_dir, [])
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "run-0.json").write_text(json.dumps({"ok": True, "findings": []}), encoding="utf-8")
+
+    assert main(["score", str(fixture_dir), str(out)]) == 0
+    assert "1 scored run(s), 0 failed run(s)" in capsys.readouterr().out
 
 
 def _expected_judge_output(fixture: JudgeFixture) -> list[dict]:

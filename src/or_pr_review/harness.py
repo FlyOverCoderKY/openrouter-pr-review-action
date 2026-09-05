@@ -116,7 +116,7 @@ MAX_TOOL_CALL_SECONDS = 30
 
 ChatFn = Callable[[dict[str, Any]], dict[str, Any]]
 SleepFn = Callable[[float], None]
-ProgressFn = Callable[[dict[str, int | float | str]], None]
+ProgressFn = Callable[[dict[str, Any]], None]
 
 
 class _LoopPhase(Enum):
@@ -249,6 +249,8 @@ def openrouter_chat(
     attempt = 0
     while True:
         attempt += 1
+        if stats is not None and attempt > 1:
+            stats["attempted_requests"] = stats.get("attempted_requests", 0) + 1
         request_timeout = _bounded_request_timeout(timeout, deadline)
         request = urllib.request.Request(
             OPENROUTER_URL,
@@ -401,6 +403,7 @@ def run_lane(
     provider_order: list[str] | None = None,
     provider_data_collection: str | None = None,
     provider_zdr: bool = False,
+    service_tier: str | None = None,
     # Anchor-gate reference tree for tool-less runs (workspace None): a full
     # checkout of the reviewed head, used only for path/line existence checks.
     anchor_root: Path | None = None,
@@ -432,27 +435,56 @@ def run_lane(
     conversation = list(messages)
     tools = list(READ_ONLY_TOOLS) if workspace is not None and max_tool_turns > 0 else None
     usage: dict[str, int | float] = {}
-    meta: dict[str, str] = {}
+    meta: dict[str, Any] = {}
+    if service_tier is not None:
+        meta["requested_service_tier"] = service_tier
     progress_warning_emitted = False
 
     def emit_progress() -> None:
         nonlocal progress_warning_emitted
         if progress is None:
             return
-        snapshot: dict[str, int | float | str] = {
+        snapshot: dict[str, Any] = {
             "elapsed_ms": elapsed_ms(started),
         }
-        for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cost_usd"):
+        for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "known_cost_usd"):
             value = usage.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 snapshot[key] = value
+        attempts = _attempted_requests(stats)
+        snapshot["attempted_requests"] = attempts
+        cost_observed = stats.get("cost_observed_responses", 0)
+        snapshot["cost_observed_responses"] = cost_observed
+        snapshot["cost_complete"] = attempts > 0 and attempts == cost_observed
+        if attempts > 0 and attempts == cost_observed:
+            known_cost = usage.get("known_cost_usd", 0.0)
+            if isinstance(known_cost, (int, float)) and not isinstance(known_cost, bool):
+                snapshot["cost_usd"] = known_cost
         for key in ("requests", "tool_rounds", "retries"):
             value = stats.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
                 snapshot[key] = value
         provider = meta.get("provider")
-        if provider:
+        if isinstance(provider, str) and provider:
             snapshot["provider"] = provider
+        requested_tier = meta.get("requested_service_tier")
+        if isinstance(requested_tier, str):
+            snapshot["requested_service_tier"] = requested_tier
+        served = meta.get("served_service_tiers")
+        if isinstance(served, list) and served:
+            snapshot["served_service_tiers"] = list(served)
+        if isinstance(requested_tier, str) or (isinstance(served, list) and served):
+            tier_observed = stats.get("service_tier_observed_responses", 0)
+            snapshot["service_tier_observed_responses"] = tier_observed
+            served_list = served if isinstance(served, list) else []
+            snapshot["service_tier_complete"] = (
+                attempts > 0 and attempts == tier_observed and None not in served_list
+            )
+            snapshot["service_tier_confirmed"] = (
+                snapshot["service_tier_complete"]
+                and isinstance(requested_tier, str)
+                and served_list == [requested_tier]
+            )
         try:
             progress(snapshot)
         except Exception:
@@ -505,6 +537,7 @@ def run_lane(
             provider_order=provider_order,
             provider_data_collection=provider_data_collection,
             provider_zdr=provider_zdr,
+            service_tier=service_tier,
             response_schema=findings_json_schema(
                 include_coverage=expect_coverage,
                 include_resolutions=expect_resolutions,
@@ -519,7 +552,9 @@ def run_lane(
     except LaneError as exc:
         failed = failed_lane(model, redact(str(exc)), elapsed_ms=elapsed_ms(started))
         _attach_stats(failed, stats, usage)
-        failed.provider = meta.get("provider")
+        provider = meta.get("provider")
+        failed.provider = provider if isinstance(provider, str) else None
+        _attach_service_tier_telemetry(failed, stats, meta)
         return failed
 
     result = LaneResult(
@@ -531,31 +566,77 @@ def run_lane(
         elapsed_ms=elapsed_ms(started),
         prompt_tokens=usage.get("prompt_tokens"),
         completion_tokens=usage.get("completion_tokens"),
-        provider=meta.get("provider"),
+        provider=meta.get("provider") if isinstance(meta.get("provider"), str) else None,
         resolutions=resolutions,
         coverage=coverage,
         dropped_findings=parse_diagnostics.get("dropped_findings", 0),
     )
     _attach_stats(result, stats, usage)
+    _attach_service_tier_telemetry(result, stats, meta)
     return result
+
+
+def _attempted_requests(stats: dict[str, int]) -> int:
+    attempted = stats.get("attempted_requests")
+    if attempted is None:
+        attempted = stats.get("requests", 0)
+    return attempted
 
 
 def _attach_stats(result: LaneResult, stats: dict[str, int], usage: dict[str, int | float]) -> None:
     result.requests = stats.get("requests")
+    attempted = _attempted_requests(stats)
+    result.attempted_requests = attempted
     result.tool_rounds = stats.get("tool_rounds")
     result.retries = stats.get("retries")
     result.thought_signature_tool_turns = stats.get("thought_signature_tool_turns")
     result.thought_signature_recoveries = stats.get("thought_signature_recoveries")
     result.sanitized_tool_turns = stats.get("sanitized_tool_turns")
     result.cached_tokens = usage.get("cached_tokens")
-    cost = usage.get("cost_usd")
-    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-        result.cost_usd = float(cost)
+    known_cost = usage.get("known_cost_usd")
+    result.known_cost_usd = (
+        float(known_cost)
+        if isinstance(known_cost, (int, float)) and not isinstance(known_cost, bool)
+        else None
+    )
+    cost_observed = stats.get("cost_observed_responses", 0)
+    result.cost_observed_responses = cost_observed
+    result.cost_complete = bool(attempted and attempted == cost_observed)
+    if result.cost_complete:
+        result.cost_usd = result.known_cost_usd if result.known_cost_usd is not None else 0.0
     result.salvaged = bool(stats.get("salvaged"))
     if result.prompt_tokens is None:
         result.prompt_tokens = usage.get("prompt_tokens")
     if result.completion_tokens is None:
         result.completion_tokens = usage.get("completion_tokens")
+
+
+def _attach_service_tier_telemetry(
+    result: LaneResult,
+    stats: dict[str, int],
+    meta: dict[str, Any],
+) -> None:
+    """Attach benchmark-only tier telemetry without changing action artifacts.
+
+    A requested tier is routing intent. OpenRouter reports the served tier on
+    each response, and missing, null, or mixed values must remain visible
+    rather than being inferred from that request intent.
+    """
+
+    requested = meta.get("requested_service_tier")
+    result.requested_service_tier = requested if isinstance(requested, str) else None
+    served = meta.get("served_service_tiers", [])
+    result.served_service_tiers = list(served) if isinstance(served, list) else []
+    observed = stats.get("service_tier_observed_responses", 0)
+    result.service_tier_observed_responses = observed
+    attempted = _attempted_requests(stats)
+    result.service_tier_complete = bool(
+        attempted and attempted == observed and None not in result.served_service_tiers
+    )
+    result.service_tier_confirmed = bool(
+        result.service_tier_complete
+        and result.served_service_tiers == [result.requested_service_tier]
+    )
 
 
 def _run_loop(
@@ -569,10 +650,11 @@ def _run_loop(
     send: ChatFn,
     usage: dict[str, int | float],
     stats: dict[str, int] | None = None,
-    meta: dict[str, str] | None = None,
+    meta: dict[str, Any] | None = None,
     provider_order: list[str] | None = None,
     provider_data_collection: str | None = None,
     provider_zdr: bool = False,
+    service_tier: str | None = None,
     response_schema: dict[str, Any] | None = None,
     validate_final: Callable[[str], tuple[list[Finding], list[Resolution], list[tuple[str, int]]]]
     | None = None,
@@ -587,6 +669,7 @@ def _run_loop(
             provider_order=provider_order,
             provider_data_collection=provider_data_collection,
             provider_zdr=provider_zdr,
+            service_tier=service_tier,
         )
     except ValueError as exc:
         raise LaneError(str(exc)) from exc
@@ -697,10 +780,16 @@ def _run_loop(
                     payload["parallel_tool_calls"] = False
             if stats is not None:
                 stats["requests"] = stats.get("requests", 0) + 1
+                stats["attempted_requests"] = stats.get("attempted_requests", 0) + 1
+            # Persist before sending: a transport interruption can happen
+            # after OpenRouter accepts and bills the request but before this
+            # process receives a response with cost telemetry.
+            if progress is not None:
+                progress()
             try:
                 response = send(payload)
                 state.successful_responses += 1
-                _absorb_usage(usage, response, meta)
+                _absorb_usage(usage, response, meta, stats)
                 if progress is not None:
                     progress()
                 # In-body errors (HTTP 200 whose JSON carries an error object,
@@ -711,10 +800,8 @@ def _run_loop(
                 if isinstance(exc, OpenRouterHTTPError):
                     if exc.provider and meta is not None:
                         meta["provider"] = exc.provider
-                    if state.successful_responses == 0 and "cost_usd" not in usage:
-                        usage["cost_usd"] = 0.0
-                    if progress is not None:
-                        progress()
+                if progress is not None:
+                    progress()
                 if state.signature_finalizing:
                     # An unsigned tool turn gets one safe, tool-free finish.
                     # Retrying it with another transcript mutation would no
@@ -1198,13 +1285,25 @@ def _run_one_tool(
 def _absorb_usage(
     usage: dict[str, int | float],
     response: dict[str, Any],
-    meta: dict[str, str] | None = None,
+    meta: dict[str, Any] | None = None,
+    stats: dict[str, int] | None = None,
 ) -> None:
     if meta is not None:
         provider = response.get("provider")
         if isinstance(provider, str) and provider.strip():
             # Last response wins; OpenRouter may reroute between requests.
             meta["provider"] = provider.strip()
+        if "service_tier" in response:
+            tier = response.get("service_tier")
+            if tier is None or (isinstance(tier, str) and tier in {"default", "flex", "priority"}):
+                if stats is not None:
+                    stats["service_tier_observed_responses"] = (
+                        stats.get("service_tier_observed_responses", 0) + 1
+                    )
+                if meta is not None:
+                    tiers = meta.setdefault("served_service_tiers", [])
+                    if isinstance(tiers, list) and tier not in tiers:
+                        tiers.append(tier)
     block = response.get("usage")
     if not isinstance(block, dict):
         return
@@ -1214,7 +1313,9 @@ def _absorb_usage(
             usage[key] = usage.get(key, 0) + value
     spend = response_spend(block)
     if spend is not None:
-        usage["cost_usd"] = usage.get("cost_usd", 0) + spend
+        usage["known_cost_usd"] = usage.get("known_cost_usd", 0) + spend
+        if stats is not None:
+            stats["cost_observed_responses"] = stats.get("cost_observed_responses", 0) + 1
     details = block.get("prompt_tokens_details")
     if isinstance(details, dict):
         cached = details.get("cached_tokens")

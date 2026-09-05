@@ -46,6 +46,27 @@ def test_parse_judge_issues_happy_path() -> None:
     assert issues[0].models == ["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"]
 
 
+def test_judge_canonicalization_keeps_lane_link_even_when_judge_omits_it():
+    from or_pr_review.judge import _annotated_lanes, _verify_coverage
+    from or_pr_review.merge import MergedIssue
+
+    finding = {
+        "title": "Incomplete guard",
+        "body": "Caller still bypasses guard",
+        "severity": "bug",
+        "file": "api.py",
+        "line": 3,
+        "prior_finding_id": "r1-1",
+    }
+    lanes = [{"model": "model-a", "findings": [finding]}]
+    _, sources = _annotated_lanes(lanes)
+    judge_row = MergedIssue(
+        "Incomplete guard", "Caller still bypasses guard", "bug", "api.py", 3, ["model-a"]
+    )
+    issues, _ = _verify_coverage([judge_row], [["0.0"]], False, lanes, sources)
+    assert issues[0].prior_finding_id == "r1-1"
+
+
 def test_parse_judge_issues_schema_mismatch_fail_closed() -> None:
     with pytest.raises(SchemaError, match="missing an issues array"):
         parse_judge_issues({"findings": []}, allowed_models=["x-ai/grok-4.6"])

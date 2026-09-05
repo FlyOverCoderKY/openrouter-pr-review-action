@@ -316,7 +316,9 @@ def parse_finding(raw: object, model_id: str) -> Finding:
     if prior_id is not None and (
         not isinstance(prior_id, str) or not re.fullmatch(r"r\d{1,3}-\d{1,3}", prior_id)
     ):
-        raise LaneError("prior_finding_id must be a finding ID or null")
+        # Linkage is advisory metadata. A malformed hint must not discard an
+        # otherwise valid finding (or fail every finding from this lane).
+        prior_id = None
     return Finding(
         title=title.strip()[:MAX_TITLE],
         body=body.strip()[:MAX_BODY],

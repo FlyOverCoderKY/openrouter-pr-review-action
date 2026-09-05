@@ -51,8 +51,9 @@ def test_prior_finding_link_survives_artifact_and_judge_boundaries():
         "items"
     ]
     assert "prior_finding_id" in item["required"]
-    with pytest.raises(LaneError, match="prior_finding_id"):
-        parse_finding({**finding.to_dict(), "prior_finding_id": []}, "model-a")
+    unlinked = parse_finding({**finding.to_dict(), "prior_finding_id": []}, "model-a")
+    assert unlinked.prior_finding_id is None
+    assert unlinked.body == finding.body
 
 
 def test_parse_finding_accepts_path_alias_and_null_location() -> None:

@@ -189,6 +189,29 @@ def test_list_bot_review_bodies_filters_author() -> None:
     assert gh.list_bot_review_bodies(1, "github-actions[bot]") == ["mine"]
 
 
+def test_newest_ledger_after_reply_filled_first_page_is_recovered():
+    from or_pr_review.loop import Ledger, encode_ledger, latest_ledger
+
+    old = encode_ledger(Ledger(1, (), "a" * 40, "a" * 12), repo="o/r", pr_number=1)
+    new = encode_ledger(Ledger(3, (), "b" * 40, "a" * 12), repo="o/r", pr_number=1)
+    pages = [
+        [{"user": {"login": "github-actions[bot]"}, "body": old}]
+        + [{"user": {"login": "developer"}, "body": "fixed"}] * 29,
+        [{"user": {"login": "github-actions[bot]"}, "body": new}],
+    ]
+
+    def runner(cmd, **kwargs):
+        assert "--paginate" in cmd and "--slurp" in cmd
+        return json.dumps(pages)
+
+    github = GitHub(token="t", repository="o/r", runner=runner)
+    ledger = latest_ledger(
+        github.list_bot_review_bodies(1, "github-actions[bot]"), repo="o/r", pr_number=1
+    )
+    assert ledger.reviewed_sha == "b" * 40
+    assert ledger.round_number == 3
+
+
 def test_create_review_falls_back_without_comments() -> None:
     calls: list[dict] = []
 

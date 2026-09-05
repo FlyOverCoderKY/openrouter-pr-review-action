@@ -136,7 +136,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: FlyOverCoderKY/openrouter-pr-review-action@d01d16c4581e2de9110192382637c277587ad5a2
+      - uses: FlyOverCoderKY/openrouter-pr-review-action@2f551f1a028dc916a54a2b7aaf4c3cebb61add08
         with:
           github_token: ${{ github.token }}
           pr_number: ${{ github.event.pull_request.number }}
@@ -169,7 +169,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: FlyOverCoderKY/openrouter-pr-review-action@d01d16c4581e2de9110192382637c277587ad5a2
+      - uses: FlyOverCoderKY/openrouter-pr-review-action@2f551f1a028dc916a54a2b7aaf4c3cebb61add08
         with:
           github_token: ${{ github.token }}
           pr_number: ${{ github.event.pull_request.number }}
@@ -182,7 +182,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-The examples pin the review-integrity implementation at `d01d16c4581e2de9110192382637c277587ad5a2`; a branch push does not update existing consumers' pins. Do not put first-pass and follow-up in one concurrency group that `synchronize` can cancel.
+The examples pin the review-integrity implementation at `2f551f1a028dc916a54a2b7aaf4c3cebb61add08`; a branch push does not update existing consumers' pins. Do not put first-pass and follow-up in one concurrency group that `synchronize` can cancel.
 
 `latest-commit` never silently falls back to the full PR diff. If `before...after` is missing or the compare fails, the action embeds the **single latest head commit** and says so. For `full-pr`, if GitHub rejects `gh pr diff` because the patch exceeds its line limit, the action computes the complete `git diff base...head` from the full-depth workflow checkout before applying the normal diff-budget triage. A truncated diff posts a visible **partial** verdict and is never treated as clean.
 
@@ -209,7 +209,7 @@ jobs:
     concurrency:
       group: or-review-first-pass-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
-    uses: FlyOverCoderKY/openrouter-pr-review-action/.github/workflows/pr-review.yml@d01d16c4581e2de9110192382637c277587ad5a2
+    uses: FlyOverCoderKY/openrouter-pr-review-action/.github/workflows/pr-review.yml@2f551f1a028dc916a54a2b7aaf4c3cebb61add08
     permissions:
       contents: read
       pull-requests: write

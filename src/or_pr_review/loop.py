@@ -219,7 +219,7 @@ def apply_round(
         # A model-supplied link is only a grouping hint. Never let it hide a
         # finding behind a fixed/disputed/unknown ID, or merge unrelated files.
         prior = carried[prior_index] if prior_index is not None else None
-        if prior is not None and prior.status == "open" and prior.file == issue.file:
+        if prior is not None and prior.status == "open" and prior.file and prior.file == issue.file:
             existing = next((row for row in numbered if row.id == prior.id), None)
             detail = (
                 f"### Additional evidence: {issue.title}\n\n"

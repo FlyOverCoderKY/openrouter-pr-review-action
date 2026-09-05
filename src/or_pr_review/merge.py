@@ -78,6 +78,8 @@ def format_issue_block(number: int, issue: MergedIssue) -> str:
     heading = (
         f"#### {severity_emoji(issue.severity)} Issue {number} — {neutralize_mentions(issue.title)}"
     )
+    if issue.id and issue.id == issue.prior_finding_id:
+        heading += f" (updates `{issue.id}`)"
     meta = [f"`{issue.severity}`"]
     if issue.file and issue.line:
         meta.insert(0, f"`{issue.file}:{issue.line}`")

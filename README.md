@@ -142,7 +142,7 @@ jobs:
           pr_number: ${{ github.event.pull_request.number }}
           models: x-ai/grok-4.6
           review_scope: full-pr
-          review_mode: initial
+          review_mode: auto
           fail_on: never
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

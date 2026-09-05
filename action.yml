@@ -23,6 +23,14 @@ inputs:
       One model = one lane; the judge is skipped unless judge_needed is true.
     required: false
     default: "x-ai/grok-4.6"
+  model_routes:
+    description: >-
+      Trusted JSON object keyed by exact review model slug, each with optional
+      provider (pinned without fallbacks) and service_tier (default, flex, priority).
+      Applies only to matching review lanes, not the judge. Maximum four entries
+      and 8,000 UTF-8 bytes. Never interpolate PR content into this input.
+    required: false
+    default: ""
   judge_model:
     description: >-
       OpenRouter slug for the merge/de-dupe judge (independent of models).
@@ -221,6 +229,7 @@ runs:
         PYTHONPATH: ${{ github.action_path }}/src
         ROLE: ${{ inputs.role }}
         MODELS: ${{ inputs.models }}
+        MODEL_ROUTES: ${{ inputs.model_routes }}
         JUDGE_MODEL: ${{ inputs.judge_model }}
         JUDGE_NEEDED: ${{ inputs.judge_needed }}
         GITHUB_TOKEN: ${{ inputs.github_token }}

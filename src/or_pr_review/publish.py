@@ -144,6 +144,9 @@ def render_review_parts(
                 )
             if lane.provider:
                 extra += f", via {lane.provider}"
+            if lane.requested_service_tier:
+                confirmation = "confirmed" if lane.service_tier_confirmed else "unconfirmed"
+                extra += f", {lane.requested_service_tier} tier {confirmation}"
             cost_frag = _lane_cost_fragment(lane)
             if cost_frag:
                 extra += f", {cost_frag}"

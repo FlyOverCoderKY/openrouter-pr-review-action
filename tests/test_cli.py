@@ -48,6 +48,54 @@ def test_setup_one_lane_skips_judge(tmp_path: Path) -> None:
     assert "judge_needed=false" in text
 
 
+@pytest.mark.parametrize("model", ["openai/gpt-6-astra", "x-ai/grok-4.6", "z-ai/glm-5.3-flash"])
+def test_model_route_reaches_only_its_lane(tmp_path, monkeypatch, model):
+    from or_pr_review import cli
+    from or_pr_review.schema import failed_lane
+
+    captured = {}
+
+    def run(**kwargs):
+        captured.update(kwargs)
+        return failed_lane(model, "test")
+
+    monkeypatch.setattr(cli, "run_lane", run)
+    env = _base_env(
+        tmp_path,
+        OPENROUTER_API_KEY="test-key",
+        MODEL_ROUTES=json.dumps(
+            {"openai/gpt-6-astra": {"provider": "openai/flex", "service_tier": "flex"}}
+        ),
+    )
+    cli._invoke_lane(env, model, [], tmp_path)
+    if model == "openai/gpt-6-astra":
+        assert captured["provider_order"] == ["openai/flex"]
+        assert captured["service_tier"] == "flex"
+    else:
+        assert "provider_order" not in captured
+        assert "service_tier" not in captured
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[]",
+        "null",
+        "broken",
+        '{"bad-slug": {"service_tier": "flex"}}',
+        '{"openai/gpt-6-astra": {"service_tier": []}}',
+        '{"openai/gpt-6-astra": {"service_tier": "typo"}}',
+        '{"openai/gpt-6-astra": {"provider": ""}}',
+        '{"openai/gpt-6-astra": {"allow_fallbacks": true}}',
+    ],
+)
+def test_invalid_model_route_fails_before_collection(tmp_path, monkeypatch, raw):
+    from or_pr_review import cli
+
+    monkeypatch.setattr(cli, "_collect_with_loop", lambda *_: pytest.fail("must validate first"))
+    assert main(["all"], _base_env(tmp_path, MODEL_ROUTES=raw)) == 1
+
+
 def test_setup_honors_explicit_judge_override_once(tmp_path: Path) -> None:
     env = _base_env(
         tmp_path,

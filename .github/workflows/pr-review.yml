@@ -7,6 +7,10 @@ on:
         description: Comma-separated OpenRouter review-lane slugs (cap 4).
         type: string
         default: x-ai/grok-4.6
+      model_routes:
+        description: Trusted JSON per-model provider and service_tier overrides; review lanes only.
+        type: string
+        default: ""
       judge_model:
         description: OpenRouter judge slug. Used when judging is enabled.
         type: string
@@ -140,6 +144,7 @@ jobs:
         with:
           role: setup
           models: ${{ inputs.models }}
+          model_routes: ${{ inputs.model_routes }}
           judge_model: ${{ inputs.judge_model }}
           github_timeout_seconds: ${{ inputs.github_timeout_seconds }}
           openrouter_timeout_seconds: ${{ inputs.openrouter_timeout_seconds }}
@@ -184,6 +189,7 @@ jobs:
         with:
           role: lane
           models: ${{ matrix.model }}
+          model_routes: ${{ inputs.model_routes }}
           lane_index: ${{ matrix.index }}
           judge_needed: ${{ needs.setup.outputs.judge_needed }}
           judge_model: ${{ inputs.judge_model }}
@@ -247,6 +253,7 @@ jobs:
         with:
           role: judge
           models: ${{ inputs.models }}
+          model_routes: ${{ inputs.model_routes }}
           judge_model: ${{ inputs.judge_model }}
           judge_needed: "true"
           lane_results_dir: ${{ runner.temp }}/or-pr-review-lanes

@@ -35,6 +35,23 @@ def test_all_lanes_failed_is_error() -> None:
     assert decide_verdict(issues=[], truncated=False, successful_lanes=0) == "error"
 
 
+def test_review_discloses_requested_tier_confirmation() -> None:
+    lane = LaneResult(
+        SCHEMA_VERSION,
+        True,
+        "openai/gpt-6-astra",
+        [],
+        None,
+        requested_service_tier="flex",
+        service_tier_confirmed=True,
+    )
+    text = render_review(collected=_collected(), lanes=[lane], issues=[], verdict="clean")
+    assert "flex tier confirmed" in text
+    lane.service_tier_confirmed = False
+    text = render_review(collected=_collected(), lanes=[lane], issues=[], verdict="clean")
+    assert "flex tier unconfirmed" in text
+
+
 def test_fail_on_policies() -> None:
     bug = MergedIssue("a", "b", "bug", None, None, ["m"])
     nit = MergedIssue("a", "b", "nit", None, None, ["m"])

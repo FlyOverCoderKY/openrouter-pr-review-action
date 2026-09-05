@@ -58,6 +58,42 @@ def model_protocol_profile(model: str) -> ModelProtocolProfile:
     )
 
 
+def parse_model_routes(raw: str | None) -> dict[str, dict[str, Any]]:
+    """Validate trusted per-model routing; never apply one lane's tier to another."""
+    if not raw or not raw.strip():
+        return {}
+    if len(raw.encode("utf-8")) > 8_000:
+        raise ActionError("model_routes exceeds 8,000 UTF-8 bytes")
+    try:
+        routes = json.loads(raw)
+    except ValueError as exc:
+        raise ActionError("model_routes must be a JSON object") from exc
+    if not isinstance(routes, dict) or len(routes) > LANE_CAP:
+        raise ActionError("model_routes must be an object with at most four model keys")
+    parsed: dict[str, dict[str, Any]] = {}
+    for model, route in routes.items():
+        slug = parse_slug(model, what="model_routes key")
+        if slug != model:
+            raise ActionError("model_routes keys must not contain surrounding whitespace")
+        if not isinstance(route, dict) or not route or set(route) - {"provider", "service_tier"}:
+            raise ActionError("each model_routes entry accepts only provider and service_tier")
+        kwargs: dict[str, Any] = {}
+        if "provider" in route:
+            provider = route["provider"]
+            if not isinstance(provider, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._/-]{0,99}", provider
+            ):
+                raise ActionError("model_routes provider must be an OpenRouter provider slug")
+            kwargs["provider_order"] = [provider]
+        if "service_tier" in route:
+            tier = route["service_tier"]
+            if not isinstance(tier, str) or tier not in {"default", "flex", "priority"}:
+                raise ActionError("model_routes service_tier must be default, flex, or priority")
+            kwargs["service_tier"] = tier
+        parsed[slug] = kwargs
+    return parsed
+
+
 def provider_policy(
     *,
     order: list[str] | None = None,

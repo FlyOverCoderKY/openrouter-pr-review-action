@@ -81,6 +81,8 @@ def test_action_yml_default_max_tool_turns_is_fifty() -> None:
     # PAT/App-token callers must be able to keep the review loop working.
     assert workflow.count("bot_login: ${{ inputs.bot_login }}") == 2
     assert self_review.count(f"models: {DEFAULT_MODEL}") == 2
+    assert workflow.count("model_routes: ${{ inputs.model_routes }}") == 3
+    assert "MODEL_ROUTES: ${{ inputs.model_routes }}" in action
     assert f'.user.login == "{DEFAULT_BOT_LOGIN}"' in self_review
     assert f'contains("{LEDGER_PREFIX}")' in self_review
     assert "| `max_tool_turns` | `50` |" in readme

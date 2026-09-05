@@ -60,6 +60,7 @@ from or_pr_review.models import (
     matrix_json,
     models_json,
     parse_judge_model,
+    parse_model_routes,
     parse_models,
     parse_slug,
 )
@@ -219,6 +220,7 @@ def _role_judge(env: dict[str, str]) -> int:
 
 def _validate_inputs(env: dict[str, str]) -> list[str]:
     slugs = parse_models(env.get("MODELS"))
+    parse_model_routes(env.get("MODEL_ROUTES"))
     _job_budget_seconds(env)
     _env_flag(env, "JUDGE_NEEDED", judge_is_needed(slugs))
     _env_flag(env, "STATUS_COMMENTS", True)
@@ -525,7 +527,7 @@ def _invoke_lane(
 ) -> LaneResult:
     try:
         key = require_openrouter_key(env)
-        lane_kwargs: dict[str, Any] = {}
+        lane_kwargs: dict[str, Any] = parse_model_routes(env.get("MODEL_ROUTES")).get(model, {})
         if lane_timeout is not None:
             lane_kwargs["lane_timeout"] = lane_timeout
         return run_lane(

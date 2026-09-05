@@ -277,10 +277,23 @@ If your coding agent creates PRs or pushes fixes from a workflow using `GITHUB_T
 
 ## Inputs
 
+To run a Flex lane alongside normally routed models, set `models` to include
+`openai/gpt-6-astra` and use this trusted workflow configuration:
+
+```yaml
+model_routes: '{"openai/gpt-6-astra":{"provider":"openai/flex","service_tier":"flex"}}'
+```
+
+This pins Astra to OpenAI Flex without provider fallbacks. The other review
+lanes and merge judge keep their existing routing. Flex can have lower availability;
+the review reports whether the requested tier was confirmed on every response.
+Account data policies still apply; a route pin does not override them.
+
 | Input | Default | Notes |
 | --- | --- | --- |
 | `role` | `all` | `all` (collect + lanes + optional judge + post) \| `setup` (parse matrix) \| `lane` \| `judge` |
 | `models` | `x-ai/grok-4.6` | Comma-separated OpenRouter slugs. Length = lane count. Cap 4. |
+| `model_routes` | empty | Trusted JSON keyed by exact review model slug, with optional `provider` and `service_tier` (`default`, `flex`, `priority`). Provider pins disable fallbacks. At most four entries and 8,000 UTF-8 bytes. Unlisted lanes and the judge retain their existing routing. Never interpolate PR content. |
 | `judge_model` | `openai/gpt-5.6-luna` | Independent of `models`. Used whenever judging is enabled. |
 | `judge_needed` | _empty_ | `true` enables the judge (and forces it for one configured lane); `false` skips it. Empty infers from `models`. A sole survivor from a multi-lane run posts directly. |
 | `github_token` | `${{ github.token }}` | Needs `pull-requests: write` to post the review. |

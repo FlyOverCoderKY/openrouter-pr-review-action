@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 
 from or_pr_review.schema import SEVERITY_RANK, Finding, LaneResult
 
-_WORD_RE = re.compile(r"[a-z0-9]+")
 _EVIDENCE_TOKEN_RE = re.compile(r"""`[^`]*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\w+|[^\w\s]""")
 _REVIEW_ENVIRONMENT_RE = re.compile(
     r"\b(?:review|provided|temporary|inert)\s+"
@@ -159,33 +158,40 @@ def same_merged_issue(
     if file_left != file_right or left.line != right.line:
         return False
 
-    title_left = _normalize(left.title)
-    title_right = _normalize(right.title)
+    title_left = _evidence_sequence(left.title)
+    title_right = _evidence_sequence(right.title)
     if title_left == title_right:
         return _evidence_agrees(left.body, right.body)
     if not file_left or left.line is None:
         return False
-    if _jaccard(_tokens(left.title), _tokens(right.title)) < 0.8:
-        return False
-    if (_tokens(left.title) ^ _tokens(right.title)) - _DUPLICATE_NOISE_TOKENS:
+    if not _evidence_agrees(left.title, right.title, minimum_overlap=0.8):
         return False
     return _evidence_agrees(left.body, right.body)
 
 
-def _evidence_agrees(left: str, right: str) -> bool:
+def _evidence_sequence(text: str) -> list[str]:
+    # Normalize only unquoted noise words: case in identifiers and literals
+    # remains meaningful, while "The" and "the" are the same article.
+    return [
+        token.lower() if token.lower() in _DUPLICATE_NOISE_TOKENS else token
+        for token in _EVIDENCE_TOKEN_RE.findall(text)
+    ]
+
+
+def _evidence_agrees(left: str, right: str, *, minimum_overlap: float = 0.85) -> bool:
     """Strong, deterministic evidence agreement for duplicate suppression.
 
     Keep word order, operators, case and quoted literals. A bag of words or
     punctuation-stripped comparison can equate opposite failure mechanisms.
     Only unquoted low-information articles/qualifiers may differ.
     """
-    left_sequence = _EVIDENCE_TOKEN_RE.findall(left)
-    right_sequence = _EVIDENCE_TOKEN_RE.findall(right)
+    left_sequence = _evidence_sequence(left)
+    right_sequence = _evidence_sequence(right)
     if left_sequence == right_sequence:
         return True
     left_tokens = set(left_sequence)
     right_tokens = set(right_sequence)
-    if _jaccard(left_tokens, right_tokens) < 0.85:
+    if _jaccard(left_tokens, right_tokens) < minimum_overlap:
         return False
     return [t for t in left_sequence if t.lower() not in _DUPLICATE_NOISE_TOKENS] == [
         t for t in right_sequence if t.lower() not in _DUPLICATE_NOISE_TOKENS
@@ -235,14 +241,6 @@ def deduplicate_issues(
         else:
             merged.append(candidate)
     return merged, absorbed
-
-
-def _normalize(text: str) -> str:
-    return " ".join(_WORD_RE.findall(text.lower()))
-
-
-def _tokens(text: str) -> set[str]:
-    return set(_WORD_RE.findall(text.lower()))
 
 
 def _jaccard(left: set[str], right: set[str]) -> float:

@@ -5,8 +5,9 @@ R4 (durable matrix review context), R6 and R7 remain open. The separate runner
 already supplies the stronger benchmark scoring/provenance used for model comparisons;
 R6/R7 are native action-benchmark limitations and do not require repeating paid runs.
 
-Validation: 473 tests passed, 2 platform skips, plus Ruff and whitespace checks.
-No model calls or live workflow runs. Canonical source reconstruction intentionally
+Validation after PR #29 follow-up: 484 tests passed, 2 platform skips, plus Ruff
+and whitespace checks. Local verification made no model calls; the PR self-review
+ran separately. Canonical source reconstruction intentionally
 keeps uncertain duplicate matches separate. The original scan below remains the
 record of the starting defects; checked items describe behavior before these fixes.
 

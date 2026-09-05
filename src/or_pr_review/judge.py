@@ -18,6 +18,7 @@ other action-wide contract failures remain fail-closed.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 from or_pr_review.errors import ActionError, LaneError, SchemaError
@@ -59,6 +60,14 @@ class JudgeResponseError(SchemaError):
     def __init__(self, message: str, cost_usd: float | None) -> None:
         super().__init__(message)
         self.cost_usd = cost_usd
+
+
+class JudgeRequestError(ActionError):
+    """Whether a failed judge request reached the dispatch boundary."""
+
+    def __init__(self, message: str, *, attempted: bool) -> None:
+        super().__init__(message)
+        self.attempted = attempted
 
 
 def judge_json_schema() -> dict[str, Any]:
@@ -172,14 +181,19 @@ def _build_judge_messages(annotated_lanes: list[dict[str, Any]]) -> list[dict[st
                 "must ACCOUNT FOR EVERY input id exactly once: each output issue "
                 "lists the input ids it covers in `sources`, and the union of all "
                 "`sources` must equal the set of input ids. Merge two findings "
-                "into one issue ONLY when they describe the same defect at the "
-                "same location; when unsure whether two findings are the same "
-                "defect, keep them as separate issues. Never drop a finding for "
+                "into one issue ONLY when every pair has the same file and exact "
+                "line, with matching titles and evidence. Preserve word order, "
+                "operators, identifier case and quoted literals in both titles "
+                "and bodies. Only minor unquoted article/qualifier differences "
+                "may be ignored when the remaining text matches; paraphrases "
+                "are not sufficient. When unsure, keep separate issues. "
+                "Never drop a finding for "
                 "importance, severity, redundancy of theme, style, or quality — "
                 "recall was already decided by the lanes. Do not invent issues "
                 "(no output issue may have empty or unknown sources). For a "
-                "merged duplicate keep the strongest severity, prefer the "
-                "clearest body, and list every lane model that reported it in "
+                "merged duplicate keep the strongest severity, copy the title "
+                "and anchor of the first listed source and the longest source "
+                "body verbatim (first source on ties), and list every lane model in "
                 "`models`.\n\n"
                 'Return JSON only: {"issues": [{"title", "body", "severity", '
                 '"file", "line", "models", "sources"}]}. severity is bug, '
@@ -445,11 +459,9 @@ def _verify_coverage(
         fallback, dropped = deterministic_union_with_cap(lanes)
         return fallback, _mode_with_cap("union-fallback", dropped)
 
-    # Merge LEGALITY: the contract is same-defect-same-LOCATION, so an issue
-    # whose sources span different files or distant lines cannot be a true
-    # duplicate merge — the model is compressing distinct findings while
-    # keeping its accounting "legal". Split such issues back into their
-    # constituent findings verbatim.
+    # A group must agree pairwise on exact location, title and evidence.
+    # Source accounting alone does not establish that findings are duplicates.
+    # Split unsupported groups back into their constituent findings verbatim.
     kept: list[MergedIssue] = []
     split = 0
     canonicalized = 0
@@ -463,7 +475,12 @@ def _verify_coverage(
                 absorb_merged_issue(canonical, original)
             # Source IDs authorize grouping, never new evidence, attribution,
             # severity or locations. The canonical lane text owns those fields.
-            canonicalized += int(canonical != issue)
+            # Attribution is a set, and ledger IDs are assigned at publication.
+            # Neither ordering nor a ledger ID is an evidence repair.
+            canonicalized += int(
+                replace(canonical, models=sorted(canonical.models), id=None)
+                != replace(issue, models=sorted(issue.models), id=None)
+            )
             kept.append(canonical)
             continue
         for fid in issue_sources:
@@ -562,12 +579,14 @@ def run_llm_judge(
             provider_zdr=provider_zdr,
         )
     except ValueError as exc:
-        raise ActionError(str(exc)) from exc
+        raise JudgeRequestError(str(exc), attempted=False) from exc
     payload["messages"] = _build_judge_messages(annotated_lanes)
     try:
         response = send(payload)
     except Exception as exc:  # noqa: BLE001
-        raise ActionError(f"judge OpenRouter call failed: {redact(str(exc))}") from exc
+        raise JudgeRequestError(
+            f"judge OpenRouter call failed: {redact(str(exc))}", attempted=True
+        ) from exc
     cost = _response_cost(response)
     try:
         content = response_message_text(response)

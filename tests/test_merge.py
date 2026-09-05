@@ -139,7 +139,7 @@ def test_deduplicate_issues_absorbs_conservative_near_match() -> None:
         ),
         MergedIssue(
             title=(
-                "Both new fixtures re-pin neighboring tests and include tautological not assertions"
+                "Both new fixtures re-pin neighboring tests and include tautological not-assertions"
             ),
             body=(
                 "Both fixtures repeat the neighboring assertions and add tautological "

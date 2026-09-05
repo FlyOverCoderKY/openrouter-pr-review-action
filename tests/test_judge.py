@@ -400,7 +400,10 @@ def test_judge_contract_is_identity_tracked_union_merge() -> None:
     system, user = messages[0]["content"], messages[1]["content"]
     assert "UNION-MERGE" in system
     assert "ACCOUNT FOR EVERY input id" in system
-    assert "keep them as separate issues" in system
+    assert "keep separate issues" in system
+    assert "same file and exact line" in system
+    assert "paraphrases are not sufficient" in system
+    assert "longest source body verbatim" in system
     assert "Never drop" in system
     # The user message must not carry the old filter-style order.
     assert "de-dupe" not in user.lower()
@@ -576,7 +579,7 @@ def test_judge_suppresses_conservative_near_duplicate_rows() -> None:
                 {
                     "title": (
                         "Both new fixtures re-pin neighboring tests and include tautological "
-                        "not assertions"
+                        "not-assertions"
                     ),
                     "body": (
                         "Both fixtures repeat the neighboring assertions and add tautological "
@@ -603,7 +606,7 @@ def test_judge_suppresses_conservative_near_duplicate_rows() -> None:
                             '"severity":"nit","file":"src/fixture.test.ts","line":284,'
                             '"models":["z-ai/glm-5.3-flash"],"sources":["0.0"]},'
                             '{"title":"Both new fixtures re-pin neighboring tests and include '
-                            'tautological not assertions","body":"Both fixtures repeat the '
+                            'tautological not-assertions","body":"Both fixtures repeat the '
                             'neighboring assertions and add tautological negative checks.",'
                             '"severity":"risk","file":"src/fixture.test.ts","line":284,'
                             '"models":["z-ai/glm-5.3-flash"],"sources":["0.1"]}'

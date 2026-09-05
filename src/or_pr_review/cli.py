@@ -348,19 +348,21 @@ def _resolve_issues(
         # Review lanes are the source evidence; a judge transport failure
         # falls back to their completed work. Judge schema failures use the
         # same explicit, cap-aware deterministic-union degradation above.
+        attempted = getattr(exc, "attempted", True)
+        stage = "transport" if attempted else "preparation"
         print(
-            f"warning: judge transport failed ({redact(str(exc))}); using the "
+            f"warning: judge {stage} failed ({redact(str(exc))}); using the "
             "cap-aware deterministic union",
             flush=True,
         )
         issues, note = _capped_union_note(
-            lane_payloads, f"`{judge_model}` (transport fallback: deterministic union)"
+            lane_payloads, f"`{judge_model}` ({stage} fallback: deterministic union)"
         )
         return JudgeOutcome(
             issues,
             note,
             None,
-            True,
+            attempted,
             diagnostics,
         )
     # Merge outcomes are visible on the posted review, not only in the job

@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Rebuild judge issues from validated source evidence, severity, attribution and
-  anchors. Require conservative evidence agreement before grouping nearby reports.
+  anchors. Require the same file and exact line plus conservative title and body
+  agreement before grouping reports; preserve operators, ordering and quoted literals.
 - Forward the tool-turn policy to the reusable matrix judge so tools-disabled,
   stubbed reviews remain partial.
 - Retain the strongest findings at the lane cap, persist omission counts, and

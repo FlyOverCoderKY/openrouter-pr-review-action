@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from or_pr_review import cli
+from or_pr_review import cli, judge
 from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
 from or_pr_review.errors import LaneError, SchemaError
 from or_pr_review.harness import run_lane
@@ -183,3 +183,89 @@ def test_distinct_source_evidence_is_not_a_duplicate(left, right):
     )
     assert absorbed == 0
     assert {i.body for i in issues} == {left, right}
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("Off-by-one: i < n", "Off-by-one: i > n"),
+        ("save before check", "check before save"),
+        ("Wrong value: x - y", "Wrong value: x y"),
+        ('Wrong key "Key"', 'Wrong key "key"'),
+        ('Wrong field "a"', 'Wrong field "the"'),
+        ("Check Foo before Bar", "Check Bar before Foo"),
+    ],
+)
+def test_distinct_titles_survive_union_and_judge_grouping(left, right):
+    sources = [finding(title, "The boundary check is incorrect.") for title in (left, right)]
+    lanes = [dict(model="example/a", findings=sources)]
+    proposed = {**sources[0], "models": ["example/a"], "sources": ["0.0", "0.1"]}
+    union = judge.deterministic_union(lanes)
+    issues, mode, _ = run_llm_judge(
+        model="example/judge",
+        lanes=lanes,
+        api_key="unused",
+        chat=lambda _: response({"issues": [proposed]}),
+    )
+    assert {i.title for i in union} == {left, right}
+    assert {i.title for i in issues} == {left, right}
+    assert "split+2" in mode
+
+
+@pytest.mark.parametrize("field", ["title", "body"])
+def test_unquoted_article_case_does_not_prevent_deduplication(field):
+    first = MergedIssue("The check failed.", "The check failed.", "bug", "a.py", 1)
+    second = MergedIssue("The check failed.", "The check failed.", "bug", "a.py", 1)
+    setattr(second, field, "the check failed.")
+    _, absorbed = deduplicate_issues([first, second])
+    assert absorbed == 1
+    setattr(first, field, '"The" check failed.')
+    setattr(second, field, '"the" check failed.')
+    _, absorbed = deduplicate_issues([first, second])
+    assert absorbed == 0
+
+
+def test_model_order_is_not_reported_as_an_evidence_repair():
+    source = finding()
+    lanes = [dict(model=f"example/{m}", findings=[source]) for m in ("a", "b")]
+    proposed = {**source, "models": ["example/b", "example/a"], "sources": ["0.0", "1.0"]}
+    issues, mode, _ = run_llm_judge(
+        model="example/judge",
+        lanes=lanes,
+        api_key="unused",
+        chat=lambda _: response({"issues": [proposed]}),
+    )
+    assert mode == "merged"
+    assert issues[0].models == ["example/a", "example/b"]
+
+
+@pytest.mark.parametrize("preparation_failure", [True, False])
+def test_judge_cost_distinguishes_preparation_from_attempted_dispatch(
+    monkeypatch, preparation_failure
+):
+    dispatched = []
+
+    def send(_):
+        dispatched.append(True)
+        raise TimeoutError("response timed out; charge unknown")
+
+    if preparation_failure:
+
+        def invalid_payload(**_):
+            raise ValueError("invalid provider policy")
+
+        monkeypatch.setattr(judge, "base_chat_payload", invalid_payload)
+
+    monkeypatch.setattr(cli, "run_llm_judge", lambda **kw: run_llm_judge(**kw, chat=send))
+    lanes = [LaneResult(1, True, f"example/{x}", cost_usd=0.1) for x in ("a", "b")]
+    outcome = cli._resolve_issues(
+        {"OPENROUTER_API_KEY": "unused", "JUDGE_MODEL": "example/judge"},
+        [lane.model for lane in lanes],
+        lanes,
+        lanes,
+    )
+    assert bool(dispatched) is not preparation_failure
+    assert outcome.ran is not preparation_failure
+    assert outcome.cost is None
+    assert ("incomplete" in _cost_note(lanes, outcome.cost, outcome.ran)) is not preparation_failure
+    assert ("preparation fallback" in outcome.note) is preparation_failure

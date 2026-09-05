@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Carry bounded, versioned publication context in matrix lane artifacts. The judge
+  restores the reviewed diff and prior ledger instead of recollecting live state;
+  a new push now reaches stale partial publication without discarding completed
+  lanes. Reject mismatched contexts, model slots, heads, and duplicate lane files.
+  Replay requires context-bearing artifacts from matching action revisions;
+  single-job artifacts also carry context. Unknown live heads stay partial, and
+  context failures produce best-effort incomplete status. Preserve ledger-v1
+  generation compatibility when freezing prior state.
+
 - Add trusted `model_routes` action/reusable input for per-review-model provider
   pins and service tiers, leaving other lanes and the judge unchanged. Validate
   keys against the full roster before starting reviews and disclose requested-tier

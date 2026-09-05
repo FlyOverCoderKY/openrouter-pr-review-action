@@ -234,6 +234,28 @@ Alternatives (do not change the default unless you mean to):
 
 A judge schema or transport failure is labeled on the posted review and falls back to the deterministic coverage-preserving union, subject to the same visible 80-finding publishing cap. Invalid lane artifacts or action-wide contract errors still fail closed.
 
+Matrix lane artifacts carry a versioned publication context: the collected PR metadata,
+diff and completeness accounting, prior loop state, and tool-turn policy. The judge
+uses that saved context without fetching the diff or prior ledger again. A newer
+push produces a stale, commit-pinned partial summary with no inline comments or new
+authoritative ledger. Every available lane must agree on its context, model slot,
+and reviewed commit; mismatches fail before judging or posting. Missing sibling
+jobs still fail open when another lane supplied a valid context.
+
+Use the same action revision for lanes and judge. Legacy artifacts without this
+context cannot be replayed through `role: judge`; rerun the lanes. Current
+`role: all` artifacts also carry this context for recovery. Contexts are limited
+to 16 MiB per lane and checked before model
+execution. They contain repository content and must remain trusted workflow
+artifacts. Their checksum detects inconsistency, not malicious replacement.
+Lane collection is still independent: a metadata or ledger change between lanes
+is detected and requires a rerun rather than silently choosing one lane's state.
+Pin `head_sha` to the original reviewed commit in both lane and judge jobs (as the
+reusable workflow does). It declares the job's intended target; it is not a live
+head lookup. If the final live-head lookup fails, publication is partial with no
+new ledger. A missing or invalid context fails the job and posts a best-effort
+incomplete status instead of reconstructing review state.
+
 ## Recommended caller concurrency
 
 This action runs **one review per invocation**. It does not implement workflow concurrency or org-specific merge gates (those belong in your reusable caller).

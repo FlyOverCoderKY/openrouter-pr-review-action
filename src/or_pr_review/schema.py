@@ -180,6 +180,8 @@ class LaneResult:
     service_tier_observed_responses: int | None = None
     service_tier_complete: bool | None = None
     service_tier_confirmed: bool | None = None
+    # Required by the matrix publisher, optional for older/offline lane consumers.
+    review_context: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -224,6 +226,8 @@ class LaneResult:
             payload["service_tier_complete"] = self.service_tier_complete
         if self.service_tier_confirmed is not None:
             payload["service_tier_confirmed"] = self.service_tier_confirmed
+        if self.review_context is not None:
+            payload["review_context"] = self.review_context
         return payload
 
 
@@ -612,6 +616,9 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         raise SchemaError(f"lane artifact is invalid: {exc}") from exc
     served_tiers = _parse_served_service_tiers(payload.get("served_service_tiers"))
     requested_tier = _parse_requested_service_tier(payload.get("requested_service_tier"))
+    context = payload.get("review_context")
+    if context is not None and not isinstance(context, dict):
+        raise SchemaError("lane artifact review_context must be an object or null")
     return LaneResult(
         schema_version=SCHEMA_VERSION,
         ok=ok,
@@ -663,6 +670,7 @@ def parse_lane_artifact(payload: object) -> LaneResult:
         service_tier_confirmed=_optional_bool(
             payload.get("service_tier_confirmed"), field="service_tier_confirmed"
         ),
+        review_context=context,
     )
 
 

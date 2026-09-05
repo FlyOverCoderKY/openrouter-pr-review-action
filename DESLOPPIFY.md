@@ -1,7 +1,8 @@
 # Desloppify Backlog
 
 Implementation follow-up: R1, R2, R3 and R5 are addressed on `codex/review-loop-hardening`.
-R4 (durable matrix review context), R6 and R7 remain open. The separate runner
+R4 is addressed by durable, validated publication snapshots (553 tests passed,
+2 platform skips). R6 and R7 remain open. The separate runner
 already supplies the stronger benchmark scoring/provenance used for model comparisons;
 R6/R7 are native action-benchmark limitations and do not require repeating paid runs.
 
@@ -39,7 +40,7 @@ Original audit: **7 findings: 3 high-priority correctness issues and 4 medium-pr
 
 ## Medium Cleanup Items
 
-- [ ] R4 [P2] Publish completed matrix lanes from the context they actually reviewed
+- [x] R4 [P2] Publish completed matrix lanes from the context they actually reviewed
   - Where: `src/or_pr_review/cli.py:211-219`, `:879-891` (`_finish` re-collects before processing artifacts); `src/or_pr_review/collect.py:405-412` (live-head confirmation); `src/or_pr_review/schema.py:144-195` (artifact context).
   - Why it matters: A new push after full-PR lanes finish causes the judge's fresh collection to reject the old pinned head before it can use the completed findings. The intended stale-review publication path later in `_finish` is never reached. Collection also reloads the loop ledger rather than carrying the exact prior state used by the lanes. In an agentic loop with frequent pushes, this discards usable paid review work and makes publication depend on unrelated fresh reads. Offline control-flow check confirmed that a collection head-change error prevents any merge attempt despite two completed lanes.
   - Recommendation: Persist a bounded review context with the matrix artifacts (reviewed commit, diff/scope/completeness, prior ledger generation/round and context identity). Validate all lanes against it; use the live head only to decide whether publication is stale, and withhold authoritative new state when stale. Avoid recollecting the full review input just to publish it.

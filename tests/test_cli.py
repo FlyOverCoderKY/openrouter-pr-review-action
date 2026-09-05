@@ -21,9 +21,31 @@ def _base_env(tmp_path: Path, **extra: str) -> dict[str, str]:
         "MAX_DIFF_KB": "300",
         "GITHUB_OUTPUT": str(tmp_path / "out.txt"),
         "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_REPOSITORY": "FlyOverCoderKY/openrouter-pr-review-action",
     }
     env.update(extra)
     return env
+
+
+def _save_matrix_context(env: dict[str, str]) -> None:
+    """Simulate lane-time collection for these existing publication fixtures."""
+    from dataclasses import replace
+
+    from or_pr_review import cli
+    from or_pr_review.harness import parse_max_tool_turns
+    from or_pr_review.review_context import freeze_context
+
+    collected, loop, _ = cli._collect_with_loop(env, with_replies=False)
+    # The legacy _collect mock predates resolved-mode metadata.
+    collected = replace(collected, mode=loop.mode)
+    context = freeze_context(
+        env["GITHUB_REPOSITORY"], collected, loop, parse_max_tool_turns(env.get("MAX_TOOL_TURNS"))
+    )
+    for path in Path(env["LANE_RESULTS_DIR"]).glob("lane-*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["review_context"] = context
+        payload.setdefault("head_sha", collected.head_sha)
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def test_setup_writes_matrix(tmp_path: Path) -> None:
@@ -280,7 +302,7 @@ def test_judge_schema_mismatch_fail_closed(tmp_path: Path) -> None:
     assert main(["judge"], env) == 1
 
 
-def test_judge_missing_lane_fail_opens_then_errors_if_none_ok(
+def test_empty_matrix_fails_closed_without_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from or_pr_review import cli as cli_mod
@@ -388,6 +410,7 @@ def test_one_lane_posts_without_judge(tmp_path: Path, monkeypatch: pytest.Monkey
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
         OPENROUTER_API_KEY="should-not-be-used-for-judge",
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     assert judge_calls["n"] == 0
     assert posted
@@ -577,6 +600,7 @@ def test_two_lanes_require_judge_and_attribution(
         OPENROUTER_API_KEY="sk-test",
         SOURCE_WORKSPACE=str(source),
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     assert judge_calls["n"] == 1
     assert posted
@@ -663,6 +687,7 @@ def test_two_lanes_judge_schema_mismatch_uses_validated_union(
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
         OPENROUTER_API_KEY="sk-test",
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     assert posted
     assert "schema fallback: deterministic union" in posted[0]
@@ -748,6 +773,7 @@ def test_judge_merges_valid_artifacts(tmp_path: Path, monkeypatch: pytest.Monkey
         FAIL_ON="never",
         OPENROUTER_API_KEY="sk-test",
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     assert posted
     assert "Issue 1 — Missing auth check" in posted[0]
@@ -876,7 +902,10 @@ def test_fail_on_bugs_exits_nonzero(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
         FAIL_ON="bugs",
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 1
+    assert "verdict=issues" in (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "bug_count=1" in (tmp_path / "out.txt").read_text(encoding="utf-8")
 
 
 def test_lane_keeps_matrix_index_when_models_is_single_slug(
@@ -1316,6 +1345,7 @@ def test_stale_head_marks_review_partial(tmp_path: Path, monkeypatch: pytest.Mon
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     body, commit_id = posted[0]
     assert commit_id == "a" * 40
@@ -1381,6 +1411,7 @@ def test_long_findings_lists_post_continuation_comments(
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     assert len(reviews) == 1
     assert comments, "long findings lists must continue in comments, not truncate"
@@ -1444,6 +1475,7 @@ def test_initial_coverage_count_mismatch_posts_note(
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     assert "claims 2 finding(s)" in posted[0]
     out = (tmp_path / "out.txt").read_text(encoding="utf-8")
@@ -1545,7 +1577,9 @@ def test_verify_round_folds_ledger_and_updates_marker(
         ),
         encoding="utf-8",
     )
-    assert main(["judge"], _verify_env(tmp_path, lane_dir, repo)) == 0
+    env = _verify_env(tmp_path, lane_dir, repo)
+    _save_matrix_context(env)
+    assert main(["judge"], env) == 0
     body = github.posted[0]
     assert "### Round 2 resolution" in body
     assert "✅" in body and "r1-1" in body
@@ -1589,7 +1623,9 @@ def test_verify_round_carries_unfixed_finding(
         ),
         encoding="utf-8",
     )
-    assert main(["judge"], _verify_env(tmp_path, lane_dir, repo)) == 0
+    env = _verify_env(tmp_path, lane_dir, repo)
+    _save_matrix_context(env)
+    assert main(["judge"], env) == 0
     body = github.posted[0]
     assert "❌" in body
     updated = extract_ledger(body, repo=repo, pr_number=1)
@@ -1727,7 +1763,9 @@ def test_verify_round_retires_carried_nits_via_severity_floor(
         ),
         encoding="utf-8",
     )
-    assert main(["judge"], _verify_env(tmp_path, lane_dir, repo)) == 0
+    env = _verify_env(tmp_path, lane_dir, repo)
+    _save_matrix_context(env)
+    assert main(["judge"], env) == 0
     body = github.posted[0]
     assert "2 nit finding(s) from earlier rounds retired" in body
     assert "severity floor" in body
@@ -1805,6 +1843,7 @@ def test_initial_round_embeds_marker_and_inline_comments(
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY=repo,
     )
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     body = github.posted[0]
     updated = extract_ledger(body, repo=repo, pr_number=1)
@@ -2010,6 +2049,11 @@ def test_mixed_lane_commits_fail_closed(tmp_path: Path, monkeypatch: pytest.Monk
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY="FlyOverCoderKY/openrouter-pr-review-action",
     )
+    _save_matrix_context(env)
+    from or_pr_review.errors import SchemaError
+
+    with pytest.raises(SchemaError, match="model or reviewed head"):
+        cli_mod._role_judge(env)
     assert main(["judge"], env) == 1
 
 
@@ -2077,6 +2121,7 @@ def test_stubbed_files_with_tools_disabled_stay_partial(
     )
     # Tools disabled: the stub contract cannot be honored -> partial.
     env = _base_env(tmp_path, MAX_TOOL_TURNS="0", **common)
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     out = (tmp_path / "out.txt").read_text(encoding="utf-8")
     assert "verdict=partial" in out
@@ -2085,6 +2130,7 @@ def test_stubbed_files_with_tools_disabled_stay_partial(
     # Tools available: stub-only truncation keeps the real verdict.
     (tmp_path / "out.txt").write_text("", encoding="utf-8")
     env = _base_env(tmp_path, MAX_TOOL_TURNS="50", **common)
+    _save_matrix_context(env)
     assert main(["judge"], env) == 0
     out = (tmp_path / "out.txt").read_text(encoding="utf-8")
     assert "verdict=clean" in out

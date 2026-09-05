@@ -154,8 +154,11 @@ def render_review_parts(
         else:
             spent = _lane_cost_spent_fragment(lane)
             recovery = ""
+            if lane.requested_service_tier:
+                confirmation = "confirmed" if lane.service_tier_confirmed else "unconfirmed"
+                recovery += f"; {lane.requested_service_tier} tier {confirmation}"
             if lane.thought_signature_recoveries:
-                recovery = (
+                recovery += (
                     f"; {lane.thought_signature_recoveries} thought-signature "
                     f"{'recovery' if lane.thought_signature_recoveries == 1 else 'recoveries'}"
                 )

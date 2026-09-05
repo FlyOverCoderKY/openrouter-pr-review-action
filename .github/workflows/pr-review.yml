@@ -8,7 +8,9 @@ on:
         type: string
         default: x-ai/grok-4.6
       model_routes:
-        description: Trusted JSON per-model provider and service_tier overrides; review lanes only.
+        description: >-
+          Trusted JSON per-model provider and service_tier overrides; review lanes only.
+          Maximum four entries and 8,000 UTF-8 bytes. Never interpolate PR content.
         type: string
         default: ""
       judge_model:

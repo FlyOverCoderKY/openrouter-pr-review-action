@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add trusted `model_routes` action/reusable input for per-review-model provider
+  pins and service tiers, leaving other lanes and the judge unchanged. Validate
+  keys against the full roster before starting reviews and disclose requested-tier
+  confirmation for successful and failed lanes.
+
 - Rebuild judge issues from validated source evidence, severity, attribution and
   anchors. Require the same file and exact line plus conservative title and body
   agreement before grouping reports; preserve operators, ordering and quoted literals.

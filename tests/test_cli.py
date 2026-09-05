@@ -48,6 +48,38 @@ def test_setup_one_lane_skips_judge(tmp_path: Path) -> None:
     assert "judge_needed=false" in text
 
 
+@pytest.mark.parametrize("role", ["setup", "all"])
+def test_full_roster_rejects_unmatched_routes(tmp_path, monkeypatch, role):
+    from or_pr_review import cli
+
+    monkeypatch.setattr(cli, "_collect_with_loop", lambda *_: pytest.fail("must validate first"))
+    env = _base_env(tmp_path, MODEL_ROUTES='{"openai/gpt-6-astr":{"service_tier":"flex"}}')
+    assert main([role], env) == 1
+
+
+def test_single_matrix_lane_accepts_sibling_routes(tmp_path):
+    from or_pr_review import cli
+
+    env = _base_env(tmp_path, MODEL_ROUTES='{"openai/gpt-6-astra":{"service_tier":"flex"}}')
+    assert cli._validate_inputs(env) == ["x-ai/grok-4.6"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        " " * 8_000 + "{}",
+        json.dumps({f"openai/model-{i}": {"service_tier": "flex"} for i in range(5)}),
+        '{" openai/gpt-6-astra":{"service_tier":"flex"}}',
+    ],
+)
+def test_model_route_limits(raw):
+    from or_pr_review.errors import ActionError
+    from or_pr_review.models import parse_model_routes
+
+    with pytest.raises(ActionError):
+        parse_model_routes(raw)
+
+
 @pytest.mark.parametrize("model", ["openai/gpt-6-astra", "x-ai/grok-4.6", "z-ai/glm-5.3-flash"])
 def test_model_route_reaches_only_its_lane(tmp_path, monkeypatch, model):
     from or_pr_review import cli

@@ -50,6 +50,10 @@ def test_review_discloses_requested_tier_confirmation() -> None:
     lane.service_tier_confirmed = False
     text = render_review(collected=_collected(), lanes=[lane], issues=[], verdict="clean")
     assert "flex tier unconfirmed" in text
+    lane.ok = False
+    lane.error = "capacity unavailable"
+    text = render_review(collected=_collected(), lanes=[lane], issues=[], verdict="error")
+    assert "flex tier unconfirmed" in text
 
 
 def test_fail_on_policies() -> None:

@@ -27,7 +27,8 @@ inputs:
     description: >-
       Trusted JSON object keyed by exact review model slug, each with optional
       provider (pinned without fallbacks) and service_tier (default, flex, priority).
-      Applies only to matching review lanes, not the judge. Maximum four entries.
+      Applies only to matching review lanes, not the judge. Maximum four entries
+      and 8,000 UTF-8 bytes. Never interpolate PR content into this input.
     required: false
     default: ""
   judge_model:

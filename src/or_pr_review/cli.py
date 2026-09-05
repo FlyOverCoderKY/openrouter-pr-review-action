@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
 
 
 def _role_setup(env: dict[str, str]) -> int:
-    slugs = _validate_inputs(env)
+    slugs = _validate_inputs(env, full_roster=True)
     needed = _judge_needed(env, slugs)
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
     _write_setup_outputs(slugs, needed, judge_model)
@@ -218,9 +218,11 @@ def _role_judge(env: dict[str, str]) -> int:
     return _finish(env, lanes)
 
 
-def _validate_inputs(env: dict[str, str]) -> list[str]:
+def _validate_inputs(env: dict[str, str], *, full_roster: bool = False) -> list[str]:
     slugs = parse_models(env.get("MODELS"))
-    parse_model_routes(env.get("MODEL_ROUTES"))
+    routes = parse_model_routes(env.get("MODEL_ROUTES"))
+    if full_roster and set(routes) - set(slugs):
+        raise ActionError("model_routes keys must match configured models")
     _job_budget_seconds(env)
     _env_flag(env, "JUDGE_NEEDED", judge_is_needed(slugs))
     _env_flag(env, "STATUS_COMMENTS", True)
@@ -389,7 +391,7 @@ def _capped_union_note(lanes: list[dict[str, Any]], note: str) -> tuple[list[Mer
 
 
 def _role_all(env: dict[str, str]) -> int:
-    slugs = _validate_inputs(env)
+    slugs = _validate_inputs(env, full_roster=True)
     needed = _judge_needed(env, slugs)
     # role=all needs the matrix metadata immediately, but judge outputs are
     # emitted once by _finish alongside the other public result outputs.

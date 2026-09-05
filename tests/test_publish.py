@@ -204,7 +204,7 @@ def test_cost_line_omitted_when_unreported() -> None:
         issues=[],
         verdict="clean",
     )
-    assert "**Cost:**" not in text
+    assert "**Cost:** unavailable — incomplete: no cost reported for `x-ai/grok-4.6`" in text
 
 
 def test_inline_comments_carry_severity_emoji() -> None:
@@ -238,6 +238,136 @@ def test_incomplete_cost_totals_are_labeled() -> None:
     )
     assert "**Cost:** $0.31" in text
     assert "incomplete: no cost reported for `z-ai/glm-5.3-flash`, the judge" in text
+
+
+def test_single_known_partial_cost_renders_as_at_least_incomplete() -> None:
+    lane = LaneResult(
+        SCHEMA_VERSION,
+        True,
+        "x-ai/grok-4.6",
+        [],
+        None,
+        known_cost_usd=0.004,
+    )
+    text = render_review(
+        collected=_collected(),
+        lanes=[lane],
+        issues=[],
+        verdict="clean",
+    )
+    assert "**Cost:** at least $0.0040 (incomplete)" in text
+    assert "at least $0.0040 (incomplete)" in text
+
+
+def test_mixed_complete_partial_and_judge_costs_do_not_double_count() -> None:
+    lane_complete = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None, cost_usd=0.31)
+    lane_partial = LaneResult(
+        SCHEMA_VERSION,
+        True,
+        "z-ai/glm-5.3-flash",
+        [],
+        None,
+        known_cost_usd=0.05,
+    )
+    text = render_review(
+        collected=_collected(),
+        lanes=[lane_complete, lane_partial],
+        issues=[],
+        verdict="clean",
+        judge_note="`google/gemini-3.1-flash-lite`",
+        judge_cost=0.01,
+    )
+    assert (
+        "**Cost:** $0.3200 (lanes $0.3100 + judge $0.0100) + at least $0.0500 (incomplete)" in text
+    )
+    assert ", $0.31)" in text
+    assert "at least $0.0500 (incomplete)" in text
+    assert "$0.37" not in text
+
+
+def test_all_unknown_costs_remain_incomplete_without_zero_total() -> None:
+    lanes = [
+        LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None),
+        LaneResult(SCHEMA_VERSION, True, "z-ai/glm-5.3-flash", [], None),
+    ]
+    text = render_review(
+        collected=_collected(),
+        lanes=lanes,
+        issues=[],
+        verdict="clean",
+        judge_note="`google/gemini-3.1-flash-lite`",
+        judge_cost=None,
+        judge_ran=True,
+    )
+    assert "**Cost:** unavailable — incomplete:" in text
+    assert "`x-ai/grok-4.6`" in text
+    assert "`z-ai/glm-5.3-flash`" in text
+    assert "the judge" in text
+    assert "$0.00" not in text
+
+
+def test_all_unknown_costs_without_judge_show_unavailable() -> None:
+    lanes = [
+        LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None),
+        LaneResult(SCHEMA_VERSION, True, "z-ai/glm-5.3-flash", [], None),
+    ]
+    text = render_review(
+        collected=_collected(),
+        lanes=lanes,
+        issues=[],
+        verdict="clean",
+    )
+    assert "**Cost:** unavailable — incomplete:" in text
+    assert "`x-ai/grok-4.6`" in text
+    assert "`z-ai/glm-5.3-flash`" in text
+    assert "the judge" not in text
+    assert "$0.00" not in text
+
+
+def test_zero_partial_cost_renders_incomplete_with_and_without_judge() -> None:
+    lane_partial = LaneResult(
+        SCHEMA_VERSION,
+        True,
+        "z-ai/glm-5.3-flash",
+        [],
+        None,
+        known_cost_usd=0.0,
+    )
+    without_judge = render_review(
+        collected=_collected(),
+        lanes=[lane_partial],
+        issues=[],
+        verdict="clean",
+    )
+    assert "**Cost:** at least $0.0000 (incomplete)" in without_judge
+    assert "at least $0.0000 (incomplete)" in without_judge
+
+    lane_complete = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None, cost_usd=0.31)
+    with_judge = render_review(
+        collected=_collected(),
+        lanes=[lane_complete, lane_partial],
+        issues=[],
+        verdict="clean",
+        judge_note="`google/gemini-3.1-flash-lite`",
+        judge_cost=0.01,
+    )
+    assert (
+        "**Cost:** $0.3200 (lanes $0.3100 + judge $0.0100) + at least $0.0000 (incomplete)"
+        in with_judge
+    )
+
+
+def test_explicit_zero_complete_with_unknown_lane() -> None:
+    lane_complete = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None, cost_usd=0.0)
+    lane_unknown = LaneResult(SCHEMA_VERSION, True, "z-ai/glm-5.3-flash", [], None)
+    text = render_review(
+        collected=_collected(),
+        lanes=[lane_complete, lane_unknown],
+        issues=[],
+        verdict="clean",
+    )
+    assert "**Cost:** $0.0000 — incomplete: no cost reported for `z-ai/glm-5.3-flash`" in text
+    assert ", $0.0000)" in text
 
 
 def _stub_collected() -> CollectedReview:

@@ -90,6 +90,7 @@ def base_chat_payload(
     provider_order: list[str] | None = None,
     provider_data_collection: str | None = None,
     provider_zdr: bool = False,
+    service_tier: str | None = None,
 ) -> tuple[dict[str, Any], ModelProtocolProfile]:
     """Build fields shared by lane and judge chat-completion requests."""
 
@@ -110,6 +111,8 @@ def base_chat_payload(
     )
     if policy is not None:
         payload["provider"] = policy
+    if service_tier is not None:
+        payload["service_tier"] = service_tier
     return payload, profile
 
 

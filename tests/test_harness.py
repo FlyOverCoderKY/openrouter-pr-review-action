@@ -1744,7 +1744,7 @@ def test_lane_preserves_terminal_http_provider_and_nonbillable_cost() -> None:
 
     assert result.ok is False
     assert result.provider == "Google"
-    assert result.cost_usd == 0.0
+    assert result.cost_usd is None
 
 
 def test_terminal_http_error_does_not_hide_prior_unknown_cost(tmp_path: Path) -> None:
@@ -2154,7 +2154,9 @@ def test_failed_lane_still_reports_usage_and_stats(tmp_path: Path) -> None:
     assert result.prompt_tokens == 7
     assert result.completion_tokens == 3
     assert result.cached_tokens == 5
-    assert result.cost_usd == 0.001
+    assert result.known_cost_usd == 0.001
+    assert result.cost_usd is None
+    assert result.cost_complete is False
     assert result.salvaged is True
     assert result.requests == 3
     assert result.tool_rounds == 1
@@ -2371,7 +2373,7 @@ def test_lane_artifact_roundtrip_with_stats_fields() -> None:
 
 def test_run_lane_sums_byok_upstream_cost_and_requests_usage(tmp_path: Path) -> None:
     payloads: list[dict] = []
-    progress: list[dict[str, int | float | str]] = []
+    progress: list[dict[str, int | float | str | bool]] = []
 
     def chat(payload: dict) -> dict:
         payloads.append(payload)
@@ -2401,11 +2403,21 @@ def test_run_lane_sums_byok_upstream_cost_and_requests_usage(tmp_path: Path) -> 
     assert result.ok
     assert result.cost_usd == pytest.approx(0.011)  # 0.009 upstream + 0.002 BYOK fee
     assert payloads[0]["usage"] == {"include": True}
-    assert len(progress) == 1
-    assert progress[0]["elapsed_ms"] >= 0
-    assert {key: value for key, value in progress[0].items() if key != "elapsed_ms"} == {
+    assert len(progress) == 2
+    pre_send = progress[0]
+    post_response = progress[-1]
+    assert pre_send["elapsed_ms"] >= 0
+    assert pre_send["attempted_requests"] == 1
+    assert pre_send["cost_observed_responses"] == 0
+    assert pre_send["cost_complete"] is False
+    assert "cost_usd" not in pre_send
+    assert {key: value for key, value in post_response.items() if key != "elapsed_ms"} == {
         "prompt_tokens": 5,
         "completion_tokens": 5,
+        "known_cost_usd": pytest.approx(0.011),
+        "attempted_requests": 1,
+        "cost_observed_responses": 1,
+        "cost_complete": True,
         "cost_usd": pytest.approx(0.011),
         "requests": 1,
     }
@@ -2478,3 +2490,393 @@ def test_response_spend_policy() -> None:
     assert response_spend({"cost": 0.0, "is_byok": True}) is None
     # Free non-BYOK routes legitimately cost $0.
     assert response_spend({"cost": 0}) == 0.0
+
+
+def test_run_lane_forwards_requested_service_tier_through_tool_and_finish(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    payloads: list[dict] = []
+    responses = iter(
+        [
+            {
+                **_tool_reply(),
+                "service_tier": "flex",
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "cost": 0.001},
+            },
+            {
+                "service_tier": "priority",
+                "choices": [{"message": {"content": '{"findings": []}'}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "cost": 0.002},
+            },
+        ]
+    )
+
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=1,
+        service_tier="flex",
+        chat=lambda payload: payloads.append(payload) or next(responses),
+    )
+
+    assert result.ok
+    assert [payload["service_tier"] for payload in payloads] == ["flex", "flex"]
+    assert result.requested_service_tier == "flex"
+    assert result.served_service_tiers == ["flex", "priority"]
+    assert result.service_tier_observed_responses == 2
+    assert result.service_tier_complete is True
+    assert result.service_tier_confirmed is False
+
+
+def test_run_lane_forwards_service_tier_during_schema_repair(tmp_path: Path) -> None:
+    payloads: list[dict] = []
+
+    def chat(payload: dict) -> dict:
+        payloads.append(payload)
+        if len(payloads) == 1:
+            raise LaneError("response_format rejected")
+        return {
+            "service_tier": "flex",
+            "choices": [{"message": {"content": '{"findings": []}'}}],
+            "usage": {"cost": 0},
+        }
+
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        max_tool_turns=0,
+        service_tier="flex",
+        chat=chat,
+    )
+
+    assert result.ok
+    assert len(payloads) == 2
+    assert all(payload["service_tier"] == "flex" for payload in payloads)
+    assert result.service_tier_observed_responses == 1
+    assert result.service_tier_complete is False
+
+
+def test_run_lane_forwards_service_tier_during_finalization_repair(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    payloads: list[dict] = []
+    responses = iter(
+        [
+            {**_tool_reply(), "service_tier": "flex", "usage": {"cost": 0}},
+            {
+                "service_tier": "flex",
+                "choices": [{"message": {"content": "not valid findings JSON"}}],
+                "usage": {"cost": 0},
+            },
+            {
+                "service_tier": "flex",
+                "choices": [{"message": {"content": '{"findings": []}'}}],
+                "usage": {"cost": 0},
+            },
+        ]
+    )
+
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=1,
+        service_tier="flex",
+        chat=lambda payload: payloads.append(payload) or next(responses),
+    )
+
+    assert result.ok
+    assert len(payloads) == 3
+    assert all(payload["service_tier"] == "flex" for payload in payloads)
+    assert "response_format" in payloads[1]
+    assert "response_format" in payloads[2]
+    assert result.service_tier_confirmed is True
+
+
+def test_run_lane_keeps_missing_and_mixed_served_tier_telemetry_distinct(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    responses = iter(
+        [
+            {
+                **_tool_reply(),
+                "service_tier": "flex",
+                "usage": {"cost": 0.001},
+            },
+            {
+                "choices": [{"message": {"content": '{"findings": []}'}}],
+                "usage": {"cost": 0.001},
+            },
+        ]
+    )
+    missing = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=1,
+        service_tier="flex",
+        chat=lambda _payload: next(responses),
+    )
+
+    assert missing.served_service_tiers == ["flex"]
+    assert missing.service_tier_observed_responses == 1
+    assert missing.service_tier_complete is False
+    assert missing.service_tier_confirmed is False
+
+    mixed_responses = iter(
+        [
+            {**_tool_reply(), "service_tier": "default", "usage": {"cost": 0.001}},
+            {
+                "service_tier": "priority",
+                "choices": [{"message": {"content": '{"findings": []}'}}],
+                "usage": {"cost": 0.001},
+            },
+        ]
+    )
+    mixed = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=1,
+        service_tier="flex",
+        chat=lambda _payload: next(mixed_responses),
+    )
+
+    assert mixed.served_service_tiers == ["default", "priority"]
+    assert mixed.service_tier_complete is True
+    assert mixed.requested_service_tier == "flex"
+    assert mixed.service_tier_confirmed is False
+
+
+def test_run_lane_keeps_partial_cost_but_withholds_incomplete_total(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    responses = iter(
+        [
+            {**_tool_reply(), "usage": {"cost": 0.001}},
+            {"choices": [{"message": {"content": '{"findings": []}'}}], "usage": {}},
+        ]
+    )
+
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=1,
+        chat=lambda _payload: next(responses),
+    )
+
+    assert result.ok
+    assert result.known_cost_usd == pytest.approx(0.001)
+    assert result.cost_usd is None
+    assert result.cost_observed_responses == 1
+    assert result.cost_complete is False
+
+
+def test_run_lane_failed_call_after_known_cost_keeps_total_unknown(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    calls = 0
+
+    def chat(_payload: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {**_tool_reply(), "usage": {"cost": 0.001}}
+        raise LaneError("transport failed")
+
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=1,
+        chat=chat,
+    )
+
+    assert not result.ok
+    assert result.known_cost_usd == pytest.approx(0.001)
+    assert result.cost_usd is None
+    assert result.cost_complete is False
+
+
+def test_run_lane_progress_marks_unaccounted_request_before_interruption(tmp_path: Path) -> None:
+    progress: list[dict[str, int | float | str | bool]] = []
+
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        chat=lambda _payload: (_ for _ in ()).throw(LaneError("interrupted")),
+        progress=progress.append,
+    )
+
+    assert not result.ok
+    assert progress[-1]["requests"] == 1
+    assert progress[-1]["attempted_requests"] == 1
+    assert progress[-1]["cost_observed_responses"] == 0
+    assert progress[-1]["cost_complete"] is False
+    assert "cost_usd" not in progress[-1]
+
+
+def test_openrouter_chat_internal_retry_counts_one_logical_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import harness
+
+    calls = 0
+    success_body = json.dumps(
+        {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.001},
+        }
+    ).encode()
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _http_error(429, body=b'{"error":{"message":"rate limited"}}')
+
+        class _SuccessResponse(_FakeResponse):
+            def read(self) -> bytes:
+                return success_body
+
+        return _SuccessResponse()
+
+    stats: dict[str, int] = {}
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    response = harness.openrouter_chat(
+        "sk-test",
+        {"model": "example/model"},
+        timeout=5,
+        sleep=lambda _delay: None,
+        stats=stats,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "ok"
+    assert calls == 2
+    assert stats["attempted_requests"] == 1
+    assert stats["retries"] == 1
+
+
+def test_run_lane_openrouter_retry_keeps_total_cost_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    success_body = json.dumps(
+        {
+            "choices": [{"message": {"content": '{"findings": []}'}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.001},
+        }
+    ).encode()
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _http_error(429, body=b'{"error":{"message":"rate limited"}}')
+
+        class _SuccessResponse(_FakeResponse):
+            def read(self) -> bytes:
+                return success_body
+
+        return _SuccessResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+    )
+
+    assert result.ok
+    assert calls == 2
+    assert result.attempted_requests == 2
+    assert result.cost_observed_responses == 1
+    assert result.known_cost_usd == pytest.approx(0.001)
+    assert result.cost_complete is False
+    assert result.cost_usd is None
+
+
+def test_run_lane_openrouter_retry_progress_counts_inflight_before_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    progress: list[dict[str, int | float | str | bool]] = []
+    urlopen_calls = 0
+    tool_body = json.dumps(
+        {
+            **_tool_reply(),
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.001},
+        }
+    ).encode()
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        nonlocal urlopen_calls
+        urlopen_calls += 1
+        if urlopen_calls == 1:
+
+            class _ToolResponse(_FakeResponse):
+                def read(self) -> bytes:
+                    return tool_body
+
+            return _ToolResponse()
+        if urlopen_calls == 2:
+            raise _http_error(429, body=b'{"error":{"message":"rate limited"}}')
+        checkpoint = progress[-1]
+        assert checkpoint["attempted_requests"] == 3
+        assert checkpoint["known_cost_usd"] == pytest.approx(0.001)
+        assert checkpoint["cost_observed_responses"] == 1
+        assert checkpoint["cost_complete"] is False
+        assert "cost_usd" not in checkpoint
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(KeyboardInterrupt):
+        run_lane(
+            model="example/model",
+            messages=[{"role": "user", "content": "review"}],
+            api_key="sk-test",
+            workspace=tmp_path,
+            max_tool_turns=1,
+            progress=progress.append,
+        )
+
+    assert urlopen_calls == 3
+    assert progress[-1]["attempted_requests"] == 3
+    assert progress[-1]["known_cost_usd"] == pytest.approx(0.001)
+    assert progress[-1]["cost_observed_responses"] == 1
+    assert progress[-1]["cost_complete"] is False
+    assert "cost_usd" not in progress[-1]
+
+
+def test_run_lane_records_served_tier_without_request(tmp_path: Path) -> None:
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        max_tool_turns=0,
+        chat=lambda _payload: {
+            "service_tier": "priority",
+            "choices": [{"message": {"content": '{"findings": []}'}}],
+            "usage": {"cost": 0.001},
+        },
+    )
+
+    assert result.ok
+    assert result.requested_service_tier is None
+    assert result.served_service_tiers == ["priority"]
+    assert result.service_tier_observed_responses == 1
+    assert result.service_tier_complete is True
+    assert result.service_tier_confirmed is False

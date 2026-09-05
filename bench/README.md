@@ -30,6 +30,17 @@ python -m or_pr_review.bench run bench/fixtures/planted-mini \
 python -m or_pr_review.bench score bench/fixtures/planted-mini /tmp/bench-out
 ```
 
+To prepare an Astra standard-versus-Flex comparison, add
+`--service-tier default` or `--service-tier flex` to otherwise identical
+**opt-in live** runs. This flag is intentionally benchmark-only and does not
+change the action's defaults. It requests OpenRouter's top-level
+`service_tier`; it does not prove that tier was served. The run artifact and
+the aggregate progress checkpoint record the requested tier separately from
+the distinct response-reported served tiers, the number of observed tier
+responses, completeness, and confirmation (only every served value matching
+the request confirms it). Missing, `null`, mixed, or interrupted response
+telemetry must not be treated as confirmation of Flex.
+
 `run` makes no request unless both `--allow-spend` is present and
 `OPENROUTER_API_KEY` is set. Lanes are nondeterministic — `run` defaults to 3
 runs, and `score` prints a mean row across the successful runs. During each
@@ -51,6 +62,33 @@ adjudication verdict that fired or `UNADJUDICATED` for triage.
 
 Completed `run-N.json` files contain finding bodies and file paths. For real-PR
 fixtures, keep `--out` outside this repository as well as the fixture itself.
+
+Cost telemetry is conservative: `known_cost_usd` retains valid per-response
+spend for budgeting, while numeric `cost_usd` is present only when every
+attempted HTTP request reported a valid cost. A timeout, HTTP error, or
+response without a valid cost leaves the total incomplete; it is never
+silently counted as $0. When spend is only partially known, checkpoints and
+published totals surface it as “at least $X (incomplete)” rather than a
+definitive run total.
+
+During each paid lane, `run` writes an aggregate-only `progress-N.json`
+checkpoint before each HTTP send (including internal retries) and after
+each OpenRouter response. Checkpoints include elapsed time, usage,
+`attempted_requests` (HTTP attempts, including internal retries), `requests`
+(logical lane requests), tool counts, provider, `known_cost_usd`, and tier
+flags when observed. They omit `cost_usd` until accounting is complete. A
+completed `run-N.json` replaces that checkpoint; completed artifacts may
+carry `cost_usd: null` when spend remains incomplete, while progress
+snapshots omit the key entirely until a valid total exists.
+
+Service-tier flags (`requested_service_tier`, `served_service_tiers`,
+`service_tier_observed_responses`, `service_tier_complete`,
+`service_tier_confirmed`) record what was requested versus what each response
+reported. Missing, `null`, mixed, or interrupted tier telemetry must not be
+treated as confirmation that a requested tier was served.
+
+The focused service-tier and accounting tests use injected synthetic responses
+only. They make no provider call and require no OpenRouter credentials.
 
 ## Label format
 

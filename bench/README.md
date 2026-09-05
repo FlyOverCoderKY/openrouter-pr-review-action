@@ -72,14 +72,14 @@ published totals surface it as “at least $X (incomplete)” rather than a
 definitive run total.
 
 During each paid lane, `run` writes an aggregate-only `progress-N.json`
-checkpoint after every completed OpenRouter response (pre-send, before the
-next request). Checkpoints include elapsed time, usage, `attempted_requests`
-(every logical lane request, not each internal HTTP retry), request/tool
-counts, provider, `known_cost_usd`, and tier flags when observed. They omit
-`cost_usd` until accounting is complete. A completed `run-N.json` replaces
-that checkpoint; completed artifacts may carry `cost_usd: null` when spend
-remains incomplete, while progress snapshots omit the key entirely until a
-valid total exists.
+checkpoint before each HTTP send (including internal retries) and after
+each OpenRouter response. Checkpoints include elapsed time, usage,
+`attempted_requests` (HTTP attempts, including internal retries), `requests`
+(logical lane requests), tool counts, provider, `known_cost_usd`, and tier
+flags when observed. They omit `cost_usd` until accounting is complete. A
+completed `run-N.json` replaces that checkpoint; completed artifacts may
+carry `cost_usd: null` when spend remains incomplete, while progress
+snapshots omit the key entirely until a valid total exists.
 
 Service-tier flags (`requested_service_tier`, `served_service_tiers`,
 `service_tier_observed_responses`, `service_tier_complete`,

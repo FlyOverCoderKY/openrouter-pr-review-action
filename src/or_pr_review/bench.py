@@ -1243,8 +1243,9 @@ def main(argv: list[str] | None = None) -> int:
         "--service-tier",
         choices=("default", "flex", "priority"),
         default=None,
-        help="request an OpenRouter service tier for this benchmark; response telemetry records "
-        "the tier actually served",
+        help="request an OpenRouter service tier for this benchmark run; returned "
+        "observations may be missing or incomplete — inspect confirmation telemetry "
+        "in the saved artifact",
     )
     run_parser.add_argument(
         "--allow-spend",

@@ -244,6 +244,7 @@ def openrouter_chat(
     sleep: SleepFn = time.sleep,
     stats: dict[str, int] | None = None,
     deadline: float | None = None,
+    progress_callback: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     attempt = 0
@@ -251,6 +252,8 @@ def openrouter_chat(
         attempt += 1
         if stats is not None and attempt > 1:
             stats["attempted_requests"] = stats.get("attempted_requests", 0) + 1
+            if progress_callback is not None:
+                progress_callback()
         request_timeout = _bounded_request_timeout(timeout, deadline)
         request = urllib.request.Request(
             OPENROUTER_URL,
@@ -430,6 +433,7 @@ def run_lane(
             timeout=timeout,
             stats=stats,
             deadline=clock.request_deadline,
+            progress_callback=emit_progress,
         )
     )
     conversation = list(messages)
@@ -616,11 +620,12 @@ def _attach_service_tier_telemetry(
     stats: dict[str, int],
     meta: dict[str, Any],
 ) -> None:
-    """Attach benchmark-only tier telemetry without changing action artifacts.
+    """Attach optional service-tier telemetry on durable lane artifacts.
 
-    A requested tier is routing intent. OpenRouter reports the served tier on
-    each response, and missing, null, or mixed values must remain visible
-    rather than being inferred from that request intent.
+    Routing defaults are unchanged; this only records what was requested and
+    what each response reported. A requested tier is routing intent. OpenRouter
+    reports the served tier on each response, and missing, null, or mixed values
+    must remain visible rather than being inferred from that request intent.
     """
 
     requested = meta.get("requested_service_tier")

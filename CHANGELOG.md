@@ -11,6 +11,15 @@
   publish capped lanes as partial without an authoritative review ledger.
 - Include reported judge usage when an unusable answer falls back to the union;
   attempted calls with unknown charges make the total visibly incomplete.
+- Benchmark `run` accepts an opt-in `--service-tier` request (`default`, `flex`,
+  or `priority`); saved lane artifacts and progress checkpoints now carry
+  optional service-tier telemetry (requested tier, served tiers, observed
+  response count, completeness, and confirmation) without changing action
+  routing defaults.
+- Lane artifacts and published review costs distinguish complete totals from
+  partial known spend: numeric `cost_usd` appears only when every attempted
+  request reported a valid charge; otherwise known partial amounts render as
+  “at least $X (incomplete)” and never as a fabricated zero total.
 
 ## 1.3.1 — 2026-09-04
 

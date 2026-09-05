@@ -2726,7 +2726,7 @@ def test_run_lane_progress_marks_unaccounted_request_before_interruption(tmp_pat
     assert "cost_usd" not in progress[-1]
 
 
-def test_openrouter_chat_retry_success_counts_each_http_attempt(
+def test_openrouter_chat_internal_retry_counts_one_logical_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from or_pr_review import harness
@@ -2806,6 +2806,58 @@ def test_run_lane_openrouter_retry_keeps_total_cost_incomplete(
     assert result.known_cost_usd == pytest.approx(0.001)
     assert result.cost_complete is False
     assert result.cost_usd is None
+
+
+def test_run_lane_openrouter_retry_progress_counts_inflight_before_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    progress: list[dict[str, int | float | str | bool]] = []
+    urlopen_calls = 0
+    tool_body = json.dumps(
+        {
+            **_tool_reply(),
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.001},
+        }
+    ).encode()
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        nonlocal urlopen_calls
+        urlopen_calls += 1
+        if urlopen_calls == 1:
+
+            class _ToolResponse(_FakeResponse):
+                def read(self) -> bytes:
+                    return tool_body
+
+            return _ToolResponse()
+        if urlopen_calls == 2:
+            raise _http_error(429, body=b'{"error":{"message":"rate limited"}}')
+        checkpoint = progress[-1]
+        assert checkpoint["attempted_requests"] == 3
+        assert checkpoint["known_cost_usd"] == pytest.approx(0.001)
+        assert checkpoint["cost_observed_responses"] == 1
+        assert checkpoint["cost_complete"] is False
+        assert "cost_usd" not in checkpoint
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(KeyboardInterrupt):
+        run_lane(
+            model="example/model",
+            messages=[{"role": "user", "content": "review"}],
+            api_key="sk-test",
+            workspace=tmp_path,
+            max_tool_turns=1,
+            progress=progress.append,
+        )
+
+    assert urlopen_calls == 3
+    assert progress[-1]["attempted_requests"] == 3
+    assert progress[-1]["known_cost_usd"] == pytest.approx(0.001)
+    assert progress[-1]["cost_observed_responses"] == 1
+    assert progress[-1]["cost_complete"] is False
+    assert "cost_usd" not in progress[-1]
 
 
 def test_run_lane_records_served_tier_without_request(tmp_path: Path) -> None:

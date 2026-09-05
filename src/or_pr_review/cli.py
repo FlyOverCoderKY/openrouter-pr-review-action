@@ -675,7 +675,7 @@ def _resolve_loop(
     scope = parse_scope(env.get("REVIEW_SCOPE") or "full-pr")
     repo = (env.get("GITHUB_REPOSITORY") or "").strip()
     ledger: Ledger | None = None
-    if mode_input == "verify" or (mode_input == "auto" and event_action == "synchronize"):
+    if mode_input in {"verify", "auto"}:
         bodies = github.list_bot_review_bodies(pr_number, _bot_login(env))
         ledger = latest_ledger(bodies, repo=repo, pr_number=pr_number)
         if ledger is None and mode_input == "verify":

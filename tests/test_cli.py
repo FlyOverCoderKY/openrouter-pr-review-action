@@ -17,7 +17,7 @@ def _base_env(tmp_path: Path, **extra: str) -> dict[str, str]:
         "FAIL_ON": "never",
         "ROAST_LEVEL": "professional",
         "REVIEW_SCOPE": "full-pr",
-        "REVIEW_MODE": "auto",
+        "REVIEW_MODE": "initial",
         "MAX_DIFF_KB": "300",
         "GITHUB_OUTPUT": str(tmp_path / "out.txt"),
         "RUNNER_TEMP": str(tmp_path),
@@ -1547,6 +1547,58 @@ def _verify_env(tmp_path: Path, lane_dir: Path, repo: str) -> dict[str, str]:
         GITHUB_REPOSITORY=repo,
         REVIEW_MODE="verify",
     )
+
+
+@pytest.mark.parametrize("event_action", ["", "opened", "reopened", "ready_for_review"])
+def test_auto_full_pr_rerun_preserves_ledger_and_replies(tmp_path, monkeypatch, event_action):
+    from dataclasses import replace
+
+    from or_pr_review import cli
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+    monkeypatch.setattr(cli, "_github", lambda env: github)
+    seen = {}
+
+    def collect(env):
+        seen.update(env)
+        return replace(_mk_collected(), mode=env["REVIEW_MODE"])
+
+    monkeypatch.setattr(cli, "_collect", collect)
+    env = _base_env(tmp_path, REVIEW_MODE="auto", PR_NUMBER="1", EVENT_ACTION=event_action)
+    collected, loop, replies = cli._collect_with_loop(env)
+    assert collected.mode == "verify"
+    assert seen["REVIEW_SCOPE"] == "full-pr"
+    assert loop.round_number == 2
+    assert loop.generation == "1234567890ab"
+    assert loop.prior_findings[0].id == "r1-1"
+    assert "added the check" in replies
+
+
+def test_auto_manual_seed_and_explicit_reset(tmp_path, monkeypatch):
+    from or_pr_review import cli
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub("")
+    env = _base_env(tmp_path, REVIEW_MODE="auto", PR_NUMBER="1")
+    _, loop = cli._resolve_loop(env, github, 1)
+    assert loop.mode == "initial"
+    github.marker = _prior_ledger_marker(repo)
+    _, loop = cli._resolve_loop({**env, "REVIEW_MODE": "initial"}, github, 1)
+    assert loop.mode == "initial"
+    assert loop.prior_findings == ()
+    assert loop.generation == ""
+
+
+def test_auto_manual_corrupt_ledger_does_not_reset(tmp_path):
+    from or_pr_review import cli
+    from or_pr_review.errors import ActionError
+    from or_pr_review.loop import LEDGER_PREFIX
+
+    github = _LoopGitHub(LEDGER_PREFIX + "broken -->")
+    env = _base_env(tmp_path, REVIEW_MODE="auto", PR_NUMBER="1")
+    with pytest.raises(ActionError, match="corrupted"):
+        cli._resolve_loop(env, github, 1)
 
 
 def test_verify_round_folds_ledger_and_updates_marker(

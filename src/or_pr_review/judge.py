@@ -330,6 +330,7 @@ def _issue_from_finding(finding: dict[str, Any], lane_model: str) -> MergedIssue
         file=path,
         line=line_n,
         model_id=lane_model,
+        prior_finding_id=finding.get("prior_finding_id"),
     )
     return merged_issue_from_finding(normalized)
 

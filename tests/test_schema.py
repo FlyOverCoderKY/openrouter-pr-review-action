@@ -30,6 +30,31 @@ def test_parse_finding_happy_path() -> None:
     assert finding.model_id == "x-ai/grok-4.6"
 
 
+def test_prior_finding_link_survives_artifact_and_judge_boundaries():
+    from or_pr_review.judge import deterministic_union
+    from or_pr_review.schema import Finding, LaneResult, findings_json_schema
+
+    finding = Finding(
+        "Incomplete check",
+        "Caller still bypasses guard",
+        "bug",
+        "api.py",
+        3,
+        "model-a",
+        prior_finding_id="r1-1",
+    )
+    artifact = LaneResult(schema_version=1, ok=True, model="model-a", findings=[finding]).to_dict()
+    restored = parse_lane_artifact(artifact)
+    assert restored.findings[0].prior_finding_id == "r1-1"
+    assert deterministic_union([restored.to_dict()])[0].prior_finding_id == "r1-1"
+    item = findings_json_schema(include_resolutions=True)["schema"]["properties"]["findings"][
+        "items"
+    ]
+    assert "prior_finding_id" in item["required"]
+    with pytest.raises(LaneError, match="prior_finding_id"):
+        parse_finding({**finding.to_dict(), "prior_finding_id": []}, "model-a")
+
+
 def test_parse_finding_accepts_path_alias_and_null_location() -> None:
     finding = parse_finding(
         {

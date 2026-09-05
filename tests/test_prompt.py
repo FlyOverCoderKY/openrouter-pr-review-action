@@ -48,6 +48,15 @@ def test_changed_paths_from_workflow_diff() -> None:
     assert looks_like_ci_or_docs_inventory_change(paths)
 
 
+def test_full_pr_verify_sweeps_full_diff_without_resetting_history():
+    system = build_messages(_collected(mode="verify"))[0]["content"]
+    assert "Sweep every file and hunk" in system
+    assert "unchanged parts of the PR" in system
+    assert "do not restart a nit sweep" in system
+    assert "prior_finding_id" in system
+    assert "Focus on the embedded latest-commit" not in system
+
+
 def test_quoted_non_ascii_diff_headers_are_parsed() -> None:
     diff = (
         'diff --git "a/docs/na\\303\\257ve.md" "b/docs/na\\303\\257ve.md"\n'

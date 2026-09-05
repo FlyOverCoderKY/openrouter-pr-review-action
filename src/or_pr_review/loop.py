@@ -24,6 +24,7 @@ from dataclasses import dataclass, replace
 from or_pr_review.errors import ActionError
 from or_pr_review.merge import MergedIssue, neutralize_mentions
 from or_pr_review.schema import (
+    MAX_BODY,
     RESOLUTION_STATUSES,
     SEVERITIES,
     SEVERITY_RANK,
@@ -146,11 +147,9 @@ def decide_loop_state(
     if review_mode == "initial" or ledger is None:
         return "initial", 1
     next_round = min(ledger.round_number + 1, MAX_ROUNDS_TRACKED)
-    if review_mode == "verify":
-        return "verify", next_round
-    if (event_action or "").strip().lower() == "synchronize":
-        return "verify", next_round
-    return "initial", 1
+    # Event type selects diff scope in the caller, not whether memory is lost.
+    # Dispatches and reopened PRs continue too; only explicit initial resets.
+    return "verify", next_round
 
 
 def apply_severity_floor(
@@ -213,8 +212,38 @@ def apply_round(
     carried.extend(state.disputed_prior)
 
     numbered: list[MergedIssue] = []
+    carried_by_id = {finding.id: index for index, finding in enumerate(carried)}
+    new_number = 0
     for issue in issues:
-        numbered.append(replace(issue, id=f"r{state.round_number}-{len(numbered) + 1}"))
+        prior_index = carried_by_id.get(issue.prior_finding_id or "")
+        # A model-supplied link is only a grouping hint. Never let it hide a
+        # finding behind a fixed/disputed/unknown ID, or merge unrelated files.
+        prior = carried[prior_index] if prior_index is not None else None
+        if prior is not None and prior.status == "open" and prior.file == issue.file:
+            existing = next((row for row in numbered if row.id == prior.id), None)
+            detail = (
+                f"### Additional evidence: {issue.title}\n\n"
+                f"`{issue.file}:{issue.line}`\n\n{issue.body}"
+            )
+            combined = f"{existing.body}\n\n{detail}" if existing else issue.body
+            if len(combined) <= MAX_BODY:
+                severity = max((prior.severity, issue.severity), key=SEVERITY_RANK.__getitem__)
+                models = list(dict.fromkeys((*prior.models, *issue.models)))
+                if existing:
+                    existing.body = combined
+                    existing.severity = severity
+                    existing.models = models
+                else:
+                    numbered.append(replace(issue, id=prior.id, severity=severity, models=models))
+                carried[prior_index] = replace(
+                    prior,
+                    severity=severity,
+                    models=tuple(models[:MAX_LEDGER_MODELS]),
+                    evidence=combined[:MAX_EVIDENCE],
+                )
+                continue
+        new_number += 1
+        numbered.append(replace(issue, id=f"r{state.round_number}-{new_number}"))
     carried.extend(
         LedgerFinding(
             id=issue.id,
@@ -227,6 +256,7 @@ def apply_round(
             models=tuple(issue.models[:MAX_LEDGER_MODELS]),
         )
         for issue in numbered
+        if issue.id not in carried_by_id
     )
 
     ledger = Ledger(round_number=state.round_number, findings=tuple(carried))

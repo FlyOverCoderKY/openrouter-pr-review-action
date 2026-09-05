@@ -283,14 +283,11 @@ def _cost_note(lanes: list[LaneResult], judge_cost: float | None, judge_ran: boo
     judge_unknown = judge_ran and judge_cost is None
 
     if not complete_lanes and not partial_lanes and not judge_complete:
+        unreported = [f"`{lane.model}`" for lane in unknown_lanes]
         if judge_unknown:
-            unreported = [f"`{lane.model}`" for lane in lanes]
-            if unreported:
-                return (
-                    "unavailable — incomplete: no cost reported for "
-                    f"{', '.join(unreported)}, the judge"
-                )
-            return "unavailable — incomplete: judge cost unreported"
+            unreported.append("the judge")
+        if unreported:
+            return f"unavailable — incomplete: no cost reported for {', '.join(unreported)}"
         return ""
 
     fully_complete = not partial_lanes and not unknown_lanes and not judge_unknown
@@ -309,10 +306,10 @@ def _cost_note(lanes: list[LaneResult], judge_cost: float | None, judge_ran: boo
         return note
 
     parts: list[str] = []
-    if complete_lane_sum or judge_complete:
+    if complete_lanes or judge_complete:
         subtotal = complete_lane_sum + (judge_cost or 0.0)
         figures = [subtotal]
-        if complete_lane_sum:
+        if complete_lanes:
             figures.append(complete_lane_sum)
         if judge_complete:
             figures.append(judge_cost)
@@ -327,7 +324,7 @@ def _cost_note(lanes: list[LaneResult], judge_cost: float | None, judge_ran: boo
             parts.append(_fmt_cost(judge_cost, precision))
         else:
             parts.append(_fmt_cost(complete_lane_sum, precision))
-    if partial_sum:
+    if partial_lanes:
         precision = _cost_precision(partial_sum)
         parts.append(f"at least {_fmt_cost(partial_sum, precision)} (incomplete)")
 

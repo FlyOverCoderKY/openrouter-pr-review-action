@@ -234,6 +234,23 @@ Alternatives (do not change the default unless you mean to):
 
 A judge schema or transport failure is labeled on the posted review and falls back to the deterministic coverage-preserving union, subject to the same visible 80-finding publishing cap. Invalid lane artifacts or action-wide contract errors still fail closed.
 
+In `role: all`, reviewers finish up to five seconds before the coordinator stops
+collecting results, leaving time to save their final diagnostics. The existing judge
+and publication reserves are unchanged. HTTP attempts run in isolated workers that
+are terminated at the elapsed-time limit, so periodic response bytes cannot keep a
+request alive indefinitely. Retries still share the lane's remaining budget.
+The limit includes worker startup and response transfer. There is no extra time
+after that limit: near lane expiry, a response that has not reached the reviewer
+is incomplete even if the provider has finished generating it. This keeps retries
+and shutdown within the reserved publication window.
+
+All-role artifact uploads include `progress-N.json` checkpoints alongside the final
+lane files. These contain aggregate request/tool/retry counts, observed usage and
+costs, last HTTP error status, transport timeout and connection failure counts, and
+provider metadata when known. They contain no prompts, tool arguments, or model
+output. A timeout preserves observed costs as incomplete and never turns an
+unfinished lane into a successful review.
+
 Matrix lane artifacts carry a versioned publication context: the collected PR metadata,
 diff and completeness accounting, prior loop state, and tool-turn policy. The judge
 uses that saved context without fetching the diff or prior ledger again. A newer
@@ -362,7 +379,7 @@ Account data policies still apply; a route pin does not override them.
 | `review_mode` | `auto` | `auto` continues an existing ledger on any event, or seeds an initial review when none exists. `initial` explicitly resets history; `verify` requires an existing ledger. |
 | `effort` | _empty_ | Optional OpenRouter reasoning effort for **review lanes**. |
 | `max_tool_turns` | `50` | Read-only tool rounds against the inert checkout. `0` disables tools. First-pass default matches the sibling Grok `max_turns`. Follow-up jobs may pass `30`. |
-| `openrouter_timeout_seconds` | `180` | Per-request OpenRouter timeout; 1–600 seconds. |
+| `openrouter_timeout_seconds` | `180` | Elapsed-time limit per OpenRouter HTTP attempt, including connection, headers and body; 1–600 seconds. |
 | `lane_index` | `0` | Zero-based matrix index used by `role=lane` artifact naming. Normally supplied by the reusable workflow. |
 | `lane_model` | _empty_ | Optional validated model override for `role=lane`. Normally supplied through matrix plumbing. |
 | `lane_results_dir` | _empty_ | Lane artifact output/input directory used by `role=lane` and `role=judge`. Normally supplied by orchestration. |

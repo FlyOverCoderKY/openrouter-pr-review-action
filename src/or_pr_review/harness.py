@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from or_pr_review.errors import ActionError, LaneError
+from or_pr_review.http_transport import bounded_urlopen
 from or_pr_review.models import GEMINI_MAX_RESPONSE_TOKENS, base_chat_payload
 from or_pr_review.redaction import redact
 from or_pr_review.schema import (
@@ -267,10 +268,12 @@ def openrouter_chat(
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=request_timeout) as response:
+            with bounded_urlopen(request, timeout=request_timeout) as response:
                 raw = response.read().decode("utf-8")
             break
         except urllib.error.HTTPError as exc:
+            if stats is not None:
+                stats["last_http_status"] = exc.code
             full_error_body = exc.read().decode("utf-8", errors="replace")
             err_body = full_error_body[:800]
             provider = _provider_from_error_body(full_error_body)
@@ -300,18 +303,24 @@ def openrouter_chat(
                 provider=provider,
             ) from exc
         except TimeoutError as exc:
+            if stats is not None:
+                stats["transport_timeouts"] = stats.get("transport_timeouts", 0) + 1
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
                 _sleep_before_retry(_retry_delay(attempt, None), sleep=sleep, deadline=deadline)
                 continue
             raise LaneError("OpenRouter request timed out") from exc
         except urllib.error.URLError as exc:
+            if stats is not None:
+                stats["connection_errors"] = stats.get("connection_errors", 0) + 1
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
                 _sleep_before_retry(_retry_delay(attempt, None), sleep=sleep, deadline=deadline)
                 continue
             raise LaneError(f"OpenRouter request failed: {redact(str(exc.reason))}") from exc
         except (http.client.HTTPException, OSError) as exc:
+            if stats is not None:
+                stats["connection_errors"] = stats.get("connection_errors", 0) + 1
             # A connection that drops mid-body raises from response.read() as
             # http.client.IncompleteRead / RemoteDisconnected or a bare
             # ConnectionError — none of which are URLError — and is exactly as
@@ -415,7 +424,7 @@ def run_lane(
     expect_resolutions: bool = False,
     expected_paths: set[str] | None = None,
     expected_resolution_ids: set[str] | None = None,
-    lane_timeout: int = DEFAULT_LANE_TIMEOUT_SECONDS,
+    lane_timeout: float = DEFAULT_LANE_TIMEOUT_SECONDS,
     progress: ProgressFn | None = None,
 ) -> LaneResult:
     started = time.monotonic()
@@ -464,7 +473,14 @@ def run_lane(
             known_cost = usage.get("known_cost_usd", 0.0)
             if isinstance(known_cost, (int, float)) and not isinstance(known_cost, bool):
                 snapshot["cost_usd"] = known_cost
-        for key in ("requests", "tool_rounds", "retries"):
+        for key in (
+            "requests",
+            "tool_rounds",
+            "retries",
+            "last_http_status",
+            "transport_timeouts",
+            "connection_errors",
+        ):
             value = stats.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
                 snapshot[key] = value

@@ -12,6 +12,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from or_pr_review.harness import (
     DEFAULT_LANE_TIMEOUT_SECONDS,
     MAX_RATE_LIMIT_ATTEMPTS,
     MAX_RETRY_AFTER_SECONDS,
+    ProgressFn,
     parse_max_tool_turns,
     require_openrouter_key,
     run_lane,
@@ -98,6 +100,7 @@ JOB_BUDGET_SECONDS = 22 * 60
 POST_RESERVE_SECONDS = 3 * 60
 JUDGE_SCHEDULING_MARGIN_SECONDS = 5
 MIN_JUDGE_ATTEMPT_SECONDS = 30
+LANE_COLLECTION_GRACE_SECONDS = 5
 DEFAULT_BOT_LOGIN = "github-actions[bot]"
 _JOB_DEADLINE_KEY = "_OR_PR_REVIEW_JOB_DEADLINE_MONOTONIC"
 
@@ -440,7 +443,20 @@ def _role_all(env: dict[str, str]) -> int:
     lane_dir = Path(env.get("ALL_LANE_RESULTS_DIR") or (work / "lanes"))
     lane_dir.mkdir(parents=True, exist_ok=True)
 
-    def _one(model: str) -> LaneResult:
+    deadline_seconds = _all_role_deadline_seconds(env, remaining, judge_reserve)
+    # Finish inside the collector's deadline, including explicit shorter overrides.
+    # Do not extend the job or consume the judge/publication reserve.
+    lane_timeout = min(
+        lane_timeout,
+        max(0.0, deadline_seconds - min(LANE_COLLECTION_GRACE_SECONDS, deadline_seconds / 2)),
+    )
+    print(
+        f"lane budget={lane_timeout:g}s; collection deadline={deadline_seconds}s; "
+        f"judge/publication reserve={judge_reserve}s",
+        flush=True,
+    )
+
+    def _one(index: int, model: str) -> LaneResult:
         return _invoke_lane(
             env,
             model,
@@ -451,32 +467,28 @@ def _role_all(env: dict[str, str]) -> int:
             expected_paths=expected_paths,
             expected_resolution_ids=expected_ids,
             lane_timeout=lane_timeout,
+            progress=partial(_persist_lane_progress, lane_dir, index, model),
         )
 
     lanes: list[LaneResult] = []
     if len(slugs) == 1:
-        lane = _one(slugs[0])
+        lane = _one(0, slugs[0])
         lane.head_sha = collected.head_sha
         lane.review_context = context
         _persist_lane_artifact(lane_dir, 0, lane)
         lanes.append(lane)
     else:
-        deadline_seconds = _all_role_deadline_seconds(env, remaining, judge_reserve)
         # A timed-out pool cannot stop requests already in flight. The lane
         # clock's per-request clamp guarantees those stragglers end within
         # their lane deadline after non-waiting shutdown returns control.
         pool = ThreadPoolExecutor(max_workers=min(len(slugs), LANE_CAP))
         timed_out = False
         try:
-            futures = {pool.submit(_one, model): i for i, model in enumerate(slugs)}
+            futures = {pool.submit(_one, i, model): i for i, model in enumerate(slugs)}
             by_index: dict[int, LaneResult] = {}
             pending = set(futures)
             try:
-                iterator = (
-                    as_completed(futures, timeout=deadline_seconds)
-                    if deadline_seconds > 0
-                    else as_completed(futures)
-                )
+                iterator = as_completed(futures, timeout=deadline_seconds)
                 for future in iterator:
                     pending.discard(future)
                     i = futures[future]
@@ -504,6 +516,7 @@ def _role_all(env: dict[str, str]) -> int:
                             "role=all deadline reached before every lane finished; "
                             f"salvaging {completed}/{len(slugs)} completed lane(s)",
                         )
+                        _restore_lane_progress(lane_dir, i, lane)
                     by_index[i] = lane
                     _persist_and_log_lane(lane_dir, i, slugs[i], lane, collected.head_sha, context)
         finally:
@@ -557,11 +570,14 @@ def _invoke_lane(
     expect_resolutions: bool = False,
     expected_paths: set[str] | None = None,
     expected_resolution_ids: set[str] | None = None,
-    lane_timeout: int | None = None,
+    lane_timeout: float | None = None,
+    progress: ProgressFn | None = None,
 ) -> LaneResult:
     try:
         key = require_openrouter_key(env)
         lane_kwargs: dict[str, Any] = parse_model_routes(env.get("MODEL_ROUTES")).get(model, {})
+        if progress is not None:
+            lane_kwargs["progress"] = progress
         if lane_timeout is not None:
             lane_kwargs["lane_timeout"] = lane_timeout
         return run_lane(
@@ -1210,6 +1226,60 @@ def _job_budget_seconds(env: dict[str, str]) -> int:
     if budget < 1:
         raise ActionError("job_budget_seconds must be a positive integer")
     return budget
+
+
+# Aggregate telemetry only: never persist prompts, tool arguments or model text.
+_PROGRESS_FIELDS = frozenset(
+    {
+        "elapsed_ms",
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "known_cost_usd",
+        "attempted_requests",
+        "cost_observed_responses",
+        "cost_complete",
+        "cost_usd",
+        "requests",
+        "tool_rounds",
+        "retries",
+        "provider",
+        "requested_service_tier",
+        "served_service_tiers",
+        "service_tier_observed_responses",
+        "service_tier_complete",
+        "service_tier_confirmed",
+        "last_http_status",
+        "transport_timeouts",
+        "connection_errors",
+    }
+)
+
+
+def _persist_lane_progress(
+    directory: Path, index: int, model: str, snapshot: dict[str, Any]
+) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = {key: value for key, value in snapshot.items() if key in _PROGRESS_FIELDS}
+    payload.update(schema="or-pr-review/lane-progress/1", model=model)
+    path = directory / f"progress-{index}.json"
+    pending = path.with_suffix(".tmp")
+    pending.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    pending.replace(path)
+
+
+def _restore_lane_progress(directory: Path, index: int, lane: LaneResult) -> None:
+    try:
+        snapshot = json.loads((directory / f"progress-{index}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    for key in _PROGRESS_FIELDS:
+        if key in snapshot and hasattr(lane, key):
+            setattr(lane, key, snapshot[key])
+    # An in-flight request may be billable even if earlier costs were complete.
+    # Preserve observed costs separately; never claim a total for an interrupted lane.
+    lane.cost_usd = None
+    lane.cost_complete = False
 
 
 def _persist_lane_artifact(directory: Path, index: int, result: LaneResult) -> Path:

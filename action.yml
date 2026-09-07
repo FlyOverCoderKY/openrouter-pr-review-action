@@ -133,7 +133,7 @@ inputs:
     required: false
     default: "50"
   openrouter_timeout_seconds:
-    description: "Timeout in seconds for each OpenRouter HTTP request (1-600)."
+    description: "Elapsed-time limit for each OpenRouter HTTP attempt, including worker startup, connection, headers, body and response transfer (1-600 seconds)."
     required: false
     default: "180"
   lane_index:
@@ -274,7 +274,9 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: openrouter-review-lanes-${{ github.run_id }}-${{ github.run_attempt }}
-        path: ${{ steps.dirs.outputs.all_lane_results_dir }}/lane-*.json
+        path: |
+          ${{ steps.dirs.outputs.all_lane_results_dir }}/lane-*.json
+          ${{ steps.dirs.outputs.all_lane_results_dir }}/progress-*.json
         if-no-files-found: ignore
         retention-days: 3
 

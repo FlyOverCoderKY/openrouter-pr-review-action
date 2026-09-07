@@ -1084,7 +1084,7 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
         workspace: object,
         **kwargs: object,
     ) -> LaneResult:
-        lane_timeouts.append(int(kwargs["lane_timeout"]))
+        lane_timeouts.append(float(kwargs["lane_timeout"]))
         if model == "slow/model":
             return failed_lane(model, "lane wall-clock deadline exhausted")
         return LaneResult(
@@ -1096,6 +1096,7 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
         )
 
     def fake_as_completed(futures: object, timeout: int | None = None):
+        captured["collection_timeout"] = timeout
         ordered = list(futures)
         yield ordered[0]
         # _role_all must persist the completed result before asking for the
@@ -1137,6 +1138,7 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
     )
     assert main(["all"], env) == 0
     assert captured["early_artifact"] is True
+    assert all(0 < timeout < captured["collection_timeout"] for timeout in lane_timeouts)
     assert captured["timed_out"] is True
     lanes = captured["lanes"]
     assert isinstance(lanes, list)
@@ -2261,3 +2263,123 @@ def test_gitattributes_text_reads_the_reviewed_commit(tmp_path: Path) -> None:
     env = {"SOURCE_WORKSPACE": str(repo), "HEAD_SHA": "b" * 40}
     assert cli_mod._gitattributes_text(env) == ""
     assert cli_mod._gitattributes_text({"SOURCE_WORKSPACE": str(repo)}) == ""
+
+
+def test_all_timeout_preserves_progress_without_claiming_success(tmp_path, monkeypatch):
+    from threading import Event
+
+    from or_pr_review import cli
+    from or_pr_review.loop import LoopState
+    from or_pr_review.schema import failed_lane
+
+    saved = Event()
+    release = Event()
+    artifact_dir = tmp_path / "lanes"
+    monkeypatch.setattr(
+        cli,
+        "_collect_with_loop",
+        lambda env: (_mk_collected(), LoopState(mode="initial", round_number=1), ""),
+    )
+    monkeypatch.setattr(cli, "_maybe_status", lambda *args: None)
+    monkeypatch.setattr(cli, "_prepare_workspace", lambda *args: tmp_path)
+    monkeypatch.setattr(cli, "_messages", lambda *args: [])
+
+    def invoke(env, model, *args, **kwargs):
+        kwargs["progress"](
+            {
+                "requests": 3,
+                "tool_rounds": 2,
+                "retries": 1,
+                "attempted_requests": 4,
+                "elapsed_ms": 700,
+                "known_cost_usd": 0.12,
+                "cost_usd": 0.12,
+                "cost_complete": True,
+                "last_http_status": 429,
+                "requested_service_tier": "flex",
+                "served_service_tiers": ["flex"],
+                "service_tier_observed_responses": 3,
+                "service_tier_complete": False,
+                "service_tier_confirmed": False,
+                "prompt": "must never be saved",
+            }
+        )
+        if model == "slow/model":
+            saved.set()
+        release.wait(5)
+        return failed_lane(model, "late result")
+
+    def completed(futures, timeout):
+        assert timeout == 1
+        assert saved.wait(2)
+        raise FutureTimeoutError()
+        yield  # same iterator interface as as_completed
+
+    def finish(env, lanes, **kwargs):
+        try:
+            slow = next(lane for lane in lanes if lane.model == "slow/model")
+            assert not slow.ok and not slow.findings
+            assert slow.requests == 3 and slow.retries == 1 and slow.tool_rounds == 2
+            assert slow.cost_usd is None and slow.cost_complete is False
+            assert slow.known_cost_usd == 0.12
+            assert slow.requested_service_tier == "flex"
+            assert slow.served_service_tiers == ["flex"]
+            assert slow.service_tier_observed_responses == 3
+            assert slow.service_tier_complete is False
+            assert slow.service_tier_confirmed is False
+            progress = json.loads((artifact_dir / "progress-1.json").read_text())
+            assert progress["last_http_status"] == 429
+            assert progress["requested_service_tier"] == "flex"
+            assert progress["served_service_tiers"] == ["flex"]
+            assert progress["service_tier_observed_responses"] == 3
+            assert progress["service_tier_complete"] is False
+            assert progress["service_tier_confirmed"] is False
+            assert "prompt" not in progress
+            assert (artifact_dir / "lane-1.json").exists()
+            return 1
+        finally:
+            release.set()
+
+    monkeypatch.setattr(cli, "_invoke_lane", invoke)
+    monkeypatch.setattr(cli, "as_completed", completed)
+    monkeypatch.setattr(cli, "_finish", finish)
+    env = _base_env(
+        tmp_path,
+        MODELS="fast/model,slow/model",
+        PR_NUMBER="1",
+        ALL_ROLE_DEADLINE_SECONDS="1",
+        ALL_LANE_RESULTS_DIR=str(artifact_dir),
+    )
+    try:
+        assert main(["all"], env) == 1
+    finally:
+        release.set()
+
+
+def test_zero_remaining_budget_does_not_wait_unbounded(tmp_path, monkeypatch):
+    from or_pr_review import cli
+    from or_pr_review.loop import LoopState
+    from or_pr_review.schema import failed_lane
+
+    monkeypatch.setattr(
+        cli,
+        "_collect_with_loop",
+        lambda env: (_mk_collected(), LoopState(mode="initial", round_number=1), ""),
+    )
+    monkeypatch.setattr(cli, "_maybe_status", lambda *args: None)
+    monkeypatch.setattr(cli, "_prepare_workspace", lambda *args: tmp_path)
+    monkeypatch.setattr(cli, "_messages", lambda *args: [])
+    monkeypatch.setattr(cli, "_remaining_job_seconds", lambda env: 0)
+
+    def invoke(env, model, *args, **kwargs):
+        assert kwargs["lane_timeout"] == 0
+        return failed_lane(model, "no budget")
+
+    def completed(futures, timeout):
+        assert timeout == 0
+        yield from futures
+
+    monkeypatch.setattr(cli, "_invoke_lane", invoke)
+    monkeypatch.setattr(cli, "as_completed", completed)
+    monkeypatch.setattr(cli, "_finish", lambda *args, **kwargs: 1)
+    assert main(["all"], _base_env(tmp_path, MODELS="fast/model,slow/model", PR_NUMBER="1")) == 1

@@ -182,6 +182,14 @@ def render_review_parts(
     cost_note = _cost_note(lanes, judge_cost, judge_ran)
     if cost_note:
         header.append(f"**Cost:** {cost_note}")
+    if collected.review_policy is not None:
+        policy = collected.review_policy
+        header.extend(
+            [
+                f"**Review policy:** `{policy.profile}/{policy.minimum}` · `{policy.digest}`",
+                f"**Policy source:** `{policy.base_sha}` · {len(policy.files)} guidance file(s)",
+            ]
+        )
     header.extend(
         [
             "",

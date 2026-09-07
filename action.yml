@@ -85,6 +85,13 @@ inputs:
     description: "Caller-owned additive review profiles as a JSON array of {name?, paths: [globs], instructions} — applied only when a changed path matches (path-glob semantics: * and ? stay within a segment, ** crosses); never narrows the review (max 20 profiles and 16,000 UTF-8 bytes). TRUSTED workflow configuration only: never interpolate PR content or repository files into this input, and do not include secrets."
     required: false
     default: ""
+  review_policy:
+    description: >-
+      off (default) or base: load bounded hierarchical REVIEW.md guidance from
+      the immutable PR target-branch commit. Requires role=all and full-depth
+      source checkout. PR policy edits cannot govern their own review.
+    required: false
+    default: "off"
   status_comments:
     description: "Post/update a live status comment on the PR."
     required: false
@@ -173,6 +180,12 @@ inputs:
     default: ""
 
 outputs:
+  policy_digest:
+    description: "SHA-256 of the effective repository review guidance, when enabled."
+    value: ${{ steps.run.outputs.policy_digest }}
+  policy_base_sha:
+    description: "Immutable target-branch commit supplying review guidance."
+    value: ${{ steps.run.outputs.policy_base_sha }}
   verdict:
     description: "Review verdict: clean | issues | partial | error"
     value: ${{ steps.run.outputs.verdict }}
@@ -242,6 +255,7 @@ runs:
         ROAST_LEVEL: ${{ inputs.roast_level }}
         CUSTOM_INSTRUCTIONS: ${{ inputs.custom_instructions }}
         PATH_PROFILES: ${{ inputs.path_profiles }}
+        REVIEW_POLICY: ${{ inputs.review_policy }}
         GENERATED_PATHS: ${{ inputs.generated_paths }}
         STATUS_COMMENTS: ${{ inputs.status_comments }}
         MAX_DIFF_KB: ${{ inputs.max_diff_kb }}

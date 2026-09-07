@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from or_pr_review.errors import ActionError, DivergedRangeError
+from or_pr_review.review_policy import ResolvedPolicy
 from or_pr_review.triage import (
     AttrRule,
     accounted_paths_from_diff,
@@ -156,6 +157,9 @@ class CollectedReview:
     # consumers that reason about "what changed on this PR" (path profiles)
     # must not be blinded by byte truncation of the prompt embed.
     all_changed_paths: tuple[str, ...] = ()
+    # Target-branch tip from collection, independent of an incremental diff's base.
+    policy_base_sha: str = ""
+    review_policy: ResolvedPolicy | None = None
 
     @property
     def diff(self) -> str:
@@ -378,6 +382,7 @@ def collect_review(
         raise ActionError("initial review_mode requires review_scope=full-pr")
 
     pr = source.pr_view(pr_number)
+    policy_base_sha = normalize_sha(_as_str(pr.get("baseRefOid"))) or ""
     head_from_pr = head_sha_from_pr(pr)
     if scope == "full-pr":
         plan = plan_diff(
@@ -429,6 +434,7 @@ def collect_review(
         ),
         mode=mode,
         all_changed_paths=_all_changed_paths(raw),
+        policy_base_sha=policy_base_sha,
     )
 
 

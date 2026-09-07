@@ -71,6 +71,7 @@ from or_pr_review.prompt import (
     changed_paths_from_diff,
     diff_right_side_lines,
     parse_path_profiles,
+    review_policy_block,
 )
 from or_pr_review.publish import (
     decide_verdict,
@@ -81,6 +82,7 @@ from or_pr_review.publish import (
 )
 from or_pr_review.redaction import redact
 from or_pr_review.review_context import freeze_context, restore_context
+from or_pr_review.review_policy import resolve_policy
 from or_pr_review.schema import (
     MAX_COVERAGE_ENTRIES,
     LaneResult,
@@ -131,6 +133,17 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     role = (args[0] if args else environ.get("ROLE") or "all").strip().lower()
     _ACTIVE_ENV = environ
     try:
+        if role == "policy":
+            from or_pr_review.policy_cli import main as policy_main
+
+            return policy_main(args[1:])
+        policy_mode = (environ.get("REVIEW_POLICY") or "off").strip().lower()
+        if policy_mode not in {"off", "base"}:
+            raise ActionError("review_policy must be off or base")
+        if policy_mode == "base" and role != "all":
+            raise ActionError(
+                "review_policy=base currently requires role=all; matrix is unsupported"
+            )
         if role in {"all", "lane", "judge"}:
             environ[_JOB_DEADLINE_KEY] = str(time.monotonic() + _job_budget_seconds(environ))
         if role == "setup":
@@ -144,11 +157,13 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         raise ActionError(f"unknown role {role!r}; expected setup, lane, judge, or all")
     except SchemaError as exc:
         _error(f"schema mismatch (fail-closed): {exc}")
-        _best_effort_incomplete(environ, stage=role, reason=redact(str(exc)))
+        if role != "policy":
+            _best_effort_incomplete(environ, stage=role, reason=redact(str(exc)))
         return 1
     except ActionError as exc:
         _error(redact(str(exc)))
-        _best_effort_incomplete(environ, stage=role, reason=redact(str(exc)))
+        if role != "policy":
+            _best_effort_incomplete(environ, stage=role, reason=redact(str(exc)))
         return 1
     except Exception as exc:  # noqa: BLE001 — unexpected bugs are operational failures
         _error(f"unexpected action error: {redact(str(exc))}")
@@ -344,11 +359,17 @@ def _resolve_issues(
         flush=True,
     )
     try:
+        policy_kwargs = {}
+        if successful[0].review_context:
+            saved = restore_context(successful[0].review_context)
+            if saved.collected.review_policy is not None:
+                policy_kwargs["policy_guidance"] = review_policy_block(saved.collected)
         issues, mode, judge_cost = run_llm_judge(
             model=judge_model,
             lanes=lane_payloads,
             api_key=key,
             timeout=judge_timeout,
+            **policy_kwargs,
         )
     except SchemaError as exc:
         # The lane artifacts already passed our schema and anchor gates. A
@@ -418,6 +439,7 @@ def _role_all(env: dict[str, str]) -> int:
     # emitted once by _finish alongside the other public result outputs.
     _write_lane_setup_outputs(slugs)
     collected, state, agent_replies = _collect_with_loop(env)
+    collected = _with_review_policy(env, collected, state)
     context = freeze_context(
         (env.get("GITHUB_REPOSITORY") or "").strip(),
         collected,
@@ -928,6 +950,33 @@ def _messages(
         agent_replies=agent_replies,
         path_profiles=parse_path_profiles(env.get("PATH_PROFILES")),
     )
+
+
+def _with_review_policy(
+    env: dict[str, str], collected: CollectedReview, state: LoopState
+) -> CollectedReview:
+    if (env.get("REVIEW_POLICY") or "off").strip().lower() != "base":
+        return collected
+    root = _source_root(env)
+    if root is None:
+        raise ActionError("review_policy=base requires the full-depth source checkout")
+    policy = resolve_policy(
+        root,
+        collected.policy_base_sha,
+        collected.head_sha,
+        tuple(f.file for f in state.prior_findings if f.file),
+        timeout=_int_env(env, "GITHUB_TIMEOUT_SECONDS", 120),
+    )
+    if policy.profile not in {"code", "docs"}:
+        raise ActionError(f"unsupported review policy profile: {policy.profile}")
+    if policy.minimum != "standard":
+        raise ActionError(
+            "deep review requires a configured deep profile; guidance-only mode cannot fulfill it"
+        )
+    _set_output("policy_digest", policy.digest)
+    _set_output("policy_base_sha", policy.base_sha)
+    print(f"review policy: {len(policy.files)} file(s), {policy.profile}/standard, {policy.digest}")
+    return replace(collected, review_policy=policy)
 
 
 def _finish(

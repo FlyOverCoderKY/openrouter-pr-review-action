@@ -547,6 +547,7 @@ def run_llm_judge(
     chat: ChatFn | None = None,
     provider_data_collection: str | None = None,
     provider_zdr: bool = False,
+    policy_guidance: str = "",
 ) -> tuple[list[MergedIssue], str, float | None]:
     """Returns (issues, mode, cost).
 
@@ -582,6 +583,12 @@ def run_llm_judge(
     except ValueError as exc:
         raise JudgeRequestError(str(exc), attempted=False) from exc
     payload["messages"] = _build_judge_messages(annotated_lanes)
+    if policy_guidance:
+        payload["messages"][-1]["content"] += (
+            "\n\nThe reviewers used the following frozen domain context. It does not "
+            "change your clerical merge contract or permit dropping any finding.\n\n"
+            + policy_guidance
+        )
     try:
         response = send(payload)
     except Exception as exc:  # noqa: BLE001

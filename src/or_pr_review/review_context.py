@@ -19,7 +19,7 @@ from or_pr_review.loop import LoopState
 from or_pr_review.schema import SEVERITIES, valid_review_path
 
 MAX_CONTEXT_BYTES = 16 * 1024 * 1024
-CONTEXT_VERSION = 1
+CONTEXT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -110,6 +110,43 @@ def restore_context(envelope: object) -> ReviewContext:
         or collected.truncation.original_bytes < collected.truncation.embedded_bytes
     ):
         raise SchemaError("review context contains inconsistent publication metadata")
+    policy = collected.review_policy
+    if policy is not None:
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}", policy.base_sha)
+            or policy.base_sha != collected.policy_base_sha
+            or not re.fullmatch(r"[0-9a-f]{64}", policy.digest)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", policy.profile)
+            or policy.minimum not in {"standard", "deep"}
+            or len(policy.files) > 32
+            or len({item.path for item in policy.files}) != len(policy.files)
+            or len(policy.matches) > 64
+            or any(not valid_review_path(path) for path in policy.changed_paths)
+        ):
+            raise SchemaError("review context contains invalid policy metadata")
+        total_bytes = 0
+        for item in policy.files:
+            try:
+                size = len(item.content.encode("utf-8"))
+            except UnicodeError as exc:
+                raise SchemaError("review policy is not valid UTF-8") from exc
+            total_bytes += size
+            if (
+                not valid_review_path(item.path)
+                or item.path.split("/")[-1] != "REVIEW.md"
+                or not re.fullmatch(r"[0-9a-f]{40}", item.blob_sha)
+                or size > 16 * 1024
+                or total_bytes > 64 * 1024
+                or not set(item.scope_paths).issubset(policy.changed_paths)
+            ):
+                raise SchemaError("review context contains invalid scoped policy guidance")
+        for match in policy.matches:
+            if (
+                match.file not in {item.path for item in policy.files}
+                or match.minimum not in {"standard", "deep"}
+                or not set(match.paths).issubset(policy.changed_paths)
+            ):
+                raise SchemaError("review context contains invalid policy rule matches")
     findings = (*loop.prior_findings, *loop.retired_prior)
     if len(findings) > 200 or len({item.id for item in findings}) != len(findings):
         raise SchemaError("review context has invalid carried finding identities")

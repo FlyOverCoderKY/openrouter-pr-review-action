@@ -4,7 +4,7 @@ An MIT-licensed GitHub Action that reviews pull requests using one or more model
 
 Author: **Nathan (FlyOverCoderKY) / RetireGolden, LLC**.
 
-**Start here:** [Setup](#setup) · [Choose models](#choosing-models) · [Copy-paste workflow](#copy-paste-one-lane-grok-via-openrouter) · [Agentic loops and merge gates](#agentic-loops-and-merge-gates) · [Troubleshooting](#troubleshooting) · [Inputs](#inputs)
+**Start here:** [Setup](#setup) · [Choose models](#choosing-models) · [Repository guidance](#repository-review-guidance) · [Copy-paste workflow](#copy-paste-one-lane-grok-via-openrouter) · [Agentic loops and merge gates](#agentic-loops-and-merge-gates) · [Troubleshooting](#troubleshooting) · [Inputs](#inputs)
 
 ## Setup
 
@@ -73,6 +73,57 @@ This project is independent of its sibling [`grok-pr-review-action`](https://git
 
 Persona lanes are **out of v1** (path-scoped guidance is available via `path_profiles`). The `persona` input is a reserved unused hook so a later persona feature does not require a rewrite. A future **single-persona** run should skip the judge the same way (one reviewer = no judge).
 
+## Repository review guidance
+
+Optional `REVIEW.md` files give reviewers durable project context: invariants,
+supported behavior, sources of truth, and concrete failure modes to check.
+Root guidance applies across the PR; nested files add guidance for their own
+directories. They never exclude changed files or replace your CI rules.
+
+Use a pinned action revision containing this feature and add this input to
+both direct-action review steps (`role: all`, with a full-depth checkout):
+
+```yaml
+with:
+  review_policy: base
+```
+
+The older pins in the general workflow examples predate this feature; advance
+them deliberately before enabling it. Leave `review_policy` off for unchanged
+behavior. Matrix policy planning is not supported in this initial release;
+policy-enabled matrix roles fail before model calls.
+
+A useful first `REVIEW.md` can be plain Markdown:
+
+```markdown
+# Review guidance
+
+Persisted documents must remain readable after an upgrade. When storage
+formats change, follow the reader, writer, migration, and restore paths.
+The contract is documented in docs/storage.md; verify claims against code.
+
+For a bug, identify its trigger, affected behavior, and supporting code.
+Uncertainty about a requirement is a question, not proof of a defect.
+```
+
+Guidance comes from the **immutable target-branch commit**, not the PR's file
+contents. A PR adding or changing `REVIEW.md` therefore uses the existing policy;
+its new guidance starts applying after merge. The review reports the source
+commit and effective-policy digest. All lanes and the merge judge receive the
+same frozen guidance, including during verification rounds.
+
+See [the policy reference](docs/review-policy.md) for hierarchy, metadata,
+validation limits, local previews, privacy, and troubleshooting. Models remain
+selected by workflow inputs in this guidance-only release; automatic escalation
+and on-demand extra reviewers are not yet enabled.
+
+When asking a coding agent to install this feature, add: “Read the policy
+reference at the pinned action revision. Enable target-branch REVIEW.md guidance
+for both all-role review steps, write concise contracts verified against local
+sources, and run local lint and explain without model calls. Preserve existing
+CI, model settings, and the findings ledger. Verify the receipt on the next
+normal PR after the guidance lands.”
+
 ## Auth
 
 Real auth is **`OPENROUTER_API_KEY` against `https://openrouter.ai/api/v1/chat/completions` only**.
@@ -90,7 +141,7 @@ The action fails closed if the key is empty (when a lane or the multi-lane judge
 
 ## Privacy
 
-This action uses OpenRouter as an external processor. The prompt sends PR metadata, the selected diff, `custom_instructions`, and any matching `path_profiles` instructions to OpenRouter, which routes them to the **upstream model provider** for each slug. When a lane uses `read_file`, `grep`, or `list_dir`, those paths and file contents can also be sent as model context.
+This action uses OpenRouter as an external processor. The prompt sends PR metadata, the selected diff, `custom_instructions`, matching `path_profiles`, and enabled applicable `REVIEW.md` guidance to OpenRouter, which routes them to the **upstream model provider** for each slug. When a lane uses `read_file`, `grep`, or `list_dir`, those paths and file contents can also be sent as model context.
 
 Do not put secrets, credentials, regulated personal data, or unrelated confidential material in PR text, diffs, repository files, `custom_instructions`, or `path_profiles`. Obtain organizational approval before enabling the action on private or regulated repositories.
 
@@ -372,6 +423,7 @@ Account data policies still apply; a route pin does not override them.
 | `roast_level` | `professional` | `professional` \| `playful`. |
 | `custom_instructions` | _empty_ | Extra prompt text, max 16,000 UTF-8 bytes. Never put secrets here. |
 | `path_profiles` | _empty_ | Caller-owned additive review profiles: JSON `[{name?, paths: [globs], instructions}]`, applied only when a changed path matches (`*`/`?` stay within a path segment, `**` crosses). Sharpen attention; never narrow the review. Trusted workflow config only — never interpolate PR content, never put secrets here. Max 20 profiles and 16,000 UTF-8 bytes. |
+| `review_policy` | `off` | `base` loads hierarchical target-branch `REVIEW.md` guidance. Requires `role: all` and full-depth source checkout. Invalid policy fails before model calls. See the [reference](docs/review-policy.md). |
 | `status_comments` | `true` | Live status comment on the PR. |
 | `max_diff_kb` | `300` | Embedded diff cap. Over-budget diffs go through **diff-budget triage**: generated/vendored/lock-class files (the reviewed commit's `.gitattributes` `linguist-generated`/`linguist-vendored`, lockfile heuristics, large committed JSON snapshots, `generated_paths`) demote to stubs first, then the largest hand-written files, so hand-written hunks keep the budget. A stubbed file stays in the embedded diff (header + counts + first-hunk reference), is materialized into the inert checkout for the tools even past the normal 1 MB cap (up to 8 MB), and still requires a coverage entry — so a fully stubbed-or-embedded diff keeps its real verdict and review-loop continuity. `.gitattributes` is repository content (PR-author-controlled); honoring it only shifts packing priority — a demoted file keeps its stub, coverage obligation, and tool access, which is strictly safer than the raw byte cut it replaces (where tail files vanished entirely). Files dropped entirely, an unparseable diff's raw byte cut, or stubs with tools disabled (`max_tool_turns: 0`) ⇒ `partial`, never clean. |
 | `generated_paths` | _empty_ | Extra globs (JSON array of strings) classified as generated/vendored during diff-budget triage. Demotion only shifts packing priority — never excludes a file from review. Trusted workflow config only — never interpolate PR content. Max 8,000 UTF-8 bytes, 200 globs. |
@@ -396,6 +448,8 @@ Account data policies still apply; a route pin does not override them.
 | `bug_count` | Open bug-severity findings after this round |
 | `round` | Review-loop round number this run performed |
 | `review_url` | Posted GitHub review |
+| `policy_digest` | Effective guidance SHA-256 when policy is enabled |
+| `policy_base_sha` | Immutable target commit supplying guidance |
 | `models_json` | Parsed slug array (`setup` / `all`) |
 | `matrix` | `[{index, model}, …]` for a GitHub Actions matrix |
 | `lane_count` | Number of lanes |

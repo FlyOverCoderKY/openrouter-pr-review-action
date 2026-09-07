@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from or_pr_review.errors import ActionError
+from or_pr_review.redaction import redact
+from or_pr_review.schema import MAX_FILE, normalize_review_path
 from or_pr_review.triage import path_glob_regex
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -134,6 +136,15 @@ def _drain_bounded(
     return bytes(stored)
 
 
+def _git_operation(args: list[str]) -> str:
+    if not args:
+        return "command"
+    verb = args[0]
+    if verb == "cat-file" and len(args) >= 2:
+        return f"{verb} {args[1]}"
+    return verb
+
+
 def _git(repo: Path, args: list[str], timeout: int, limit: int = _GIT_OUTPUT) -> bytes:
     command = [
         "git",
@@ -229,7 +240,15 @@ def _git(repo: Path, args: list[str], timeout: int, limit: int = _GIT_OUTPUT) ->
     if stdout_overflow.is_set() or stderr_overflow.is_set():
         raise ActionError("git policy discovery output exceeds its safety bound")
     if proc.returncode:
-        raise ActionError("git policy discovery failed")
+        stderr_text = stderr_box[0] if stderr_box else b""
+        detail = redact(stderr_text.decode("utf-8", errors="replace").strip())
+        if len(detail) > 600:
+            detail = detail[:600]
+        operation = _git_operation(args)
+        message = f"git policy discovery {operation} failed"
+        if detail:
+            message += f": {detail}"
+        raise ActionError(message)
     return stdout_box[0] if stdout_box else b""
 
 
@@ -241,7 +260,23 @@ def _validate_commit(repo: Path, sha: str, timeout: int, label: str) -> None:
         raise ActionError(f"{label}_sha is not a commit object")
 
 
+def _discovery_path(path: str, label: str) -> str:
+    normalized = normalize_review_path(path)
+    if normalized is None:
+        if len(path) > MAX_FILE:
+            raise ActionError(f"{label} path exceeds {MAX_FILE} characters")
+        if "`" in path:
+            raise ActionError(f"invalid {label} path {path!r}: backticks are not allowed")
+        raise ActionError(f"invalid {label} path {path!r}")
+    if path != normalized:
+        raise ActionError(f"invalid {label} path {path!r}: path is not canonical")
+    if ":" in path:
+        raise ActionError(f"invalid {label} path {path!r}: colons are not allowed")
+    return path
+
+
 def _safe_path(path: str, label: str) -> str:
+    """Glob-segment validation; review paths use ``_discovery_path`` instead."""
     if (
         not path
         or path.startswith("/")
@@ -256,20 +291,65 @@ def _safe_path(path: str, label: str) -> str:
     return path
 
 
-def _tree(repo: Path, sha: str, timeout: int) -> dict[str, tuple[str, str, str]]:
-    raw = _git(repo, ["ls-tree", "-r", "--full-tree", "-z", sha], timeout)
-    entries: dict[str, tuple[str, str, str]] = {}
+def _ls_tree_children(repo: Path, tree_oid: str, timeout: int) -> list[tuple[str, str, str, str]]:
+    if not _SHA.fullmatch(tree_oid):
+        raise ActionError("internal tree object id is invalid")
+    raw = _git(repo, ["ls-tree", "--full-tree", "-z", tree_oid], timeout)
+    children: list[tuple[str, str, str, str]] = []
     for item in raw.split(b"\0"):
         if not item:
             continue
         try:
             left, name = item.split(b"\t", 1)
             mode, kind, object_sha = left.decode("ascii").split(" ")
-            path = name.decode("utf-8", "strict")
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise ActionError("base tree contains an invalid path entry") from exc
-        _safe_path(path, "base tree")
-        entries[path] = (mode, kind, object_sha)
+        except ValueError as exc:
+            raise ActionError("tree listing contains an invalid entry") from exc
+        try:
+            name_str = name.decode("utf-8", "strict")
+        except UnicodeDecodeError:
+            continue
+        children.append((name_str, mode, kind, object_sha))
+    return children
+
+
+def _discover_entries(
+    repo: Path,
+    commit_sha: str,
+    directories: set[str],
+    timeout: int,
+) -> dict[str, tuple[str, str, str]]:
+    """List immediate children of the root and applicable ancestor directories."""
+    root_tree = (
+        _git(repo, ["rev-parse", "--verify", f"{commit_sha}^{{tree}}"], timeout, 128)
+        .decode("ascii", "replace")
+        .strip()
+    )
+    if not _SHA.fullmatch(root_tree):
+        raise ActionError("base commit tree is invalid")
+
+    tree_oids: dict[str, str] = {"": root_tree}
+    entries: dict[str, tuple[str, str, str]] = {}
+    for directory in sorted(
+        directories, key=lambda item: (0 if not item else item.count("/") + 1, item)
+    ):
+        tree_oid = tree_oids.get(directory)
+        if tree_oid is None:
+            continue
+        for name, mode, kind, object_sha in _ls_tree_children(repo, tree_oid, timeout):
+            full_path = f"{directory}/{name}" if directory else name
+            if name.casefold() == "review.md":
+                # Policy names are always applicable when their directory is
+                # being enumerated: validate bounds even for the exact name.
+                _discovery_path(full_path, "base tree")
+                if name != "REVIEW.md":
+                    raise _error(full_path, "case-variant REVIEW.md is ambiguous")
+            try:
+                full_path = _discovery_path(full_path, "base tree")
+            except ActionError:
+                continue
+            entries[full_path] = (mode, kind, object_sha)
+            if kind == "tree" and full_path in directories:
+                tree_oids[full_path] = object_sha
     return entries
 
 
@@ -301,7 +381,7 @@ def _changed_paths(repo: Path, base: str, head: str, timeout: int) -> tuple[str,
             raise ActionError("git name-status output is malformed")
         for raw_path in items[index : index + count]:
             try:
-                paths.add(_safe_path(raw_path.decode("utf-8", "strict"), "changed"))
+                paths.add(_discovery_path(raw_path.decode("utf-8", "strict"), "changed"))
             except UnicodeDecodeError as exc:
                 raise ActionError("git name-status includes a non-UTF-8 path") from exc
         index += count
@@ -458,37 +538,27 @@ def resolve_policy(
     for item in carried_paths:
         if not isinstance(item, str):
             raise ActionError("carried_paths must contain strings")
-        changed.add(_safe_path(item, "carried"))
+        changed.add(_discovery_path(item, "carried"))
     changed_paths = tuple(sorted(changed))
-    tree = _tree(repo, base_sha, timeout)
-
     directories: set[str] = {""}
-    wanted: set[str] = {""}
     for changed_path in changed_paths:
         parts = changed_path.split("/")
         if len(parts) > _MAX_DEPTH:
             raise ActionError(f"{changed_path}: ancestor depth exceeds {_MAX_DEPTH}")
         for index in range(len(parts)):
-            parent = "/".join(parts[:index])
-            directories.add(parent)
-            wanted.add(parent)
+            directories.add("/".join(parts[:index]))
+
+    tree = _discover_entries(repo, base_sha, directories, timeout)
+
+    for changed_path in changed_paths:
+        parts = changed_path.split("/")
+        for index in range(len(parts)):
             component = "/".join(parts[: index + 1])
             entry = tree.get(component)
             if entry and entry[0] == "120000":
                 raise ActionError(f"{changed_path}: traverses symlink {component}")
             if entry and entry[0] == "160000":
                 raise ActionError(f"{changed_path}: traverses submodule {component}")
-
-    # Case ambiguity is material only in policy directories actually traversed.
-    for directory in wanted:
-        prefix = f"{directory}/" if directory else ""
-        for candidate in tree:
-            parent = candidate.rsplit("/", 1)[0] if "/" in candidate else ""
-            if parent != directory:
-                continue
-            name = candidate[len(prefix) :]
-            if name.casefold() == "review.md" and name != "REVIEW.md":
-                raise _error(prefix + name, "case-variant REVIEW.md is ambiguous")
 
     policy_paths = [
         (directory + "/" if directory else "") + "REVIEW.md"

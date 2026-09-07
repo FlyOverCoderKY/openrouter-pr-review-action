@@ -9,7 +9,7 @@ from or_pr_review import cli
 from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
 from or_pr_review.errors import ActionError, SchemaError
 from or_pr_review.loop import LoopState
-from or_pr_review.prompt import build_messages
+from or_pr_review.prompt import build_messages, review_policy_block
 from or_pr_review.publish import render_review_parts
 from or_pr_review.review_context import freeze_context, restore_context
 from or_pr_review.review_policy import PolicyFile, ResolvedPolicy
@@ -51,8 +51,100 @@ def test_frozen_policy_survives_context_and_scoped_prompt():
     prompt = build_messages(restored.collected)[1]["content"]
     assert BASE in prompt and "storage/REVIEW.md" in prompt
     assert "Keep old data readable." in prompt
-    assert 'Applies to: ["storage/a.py"]' in prompt
+    assert "Scope: changed or carried paths under `storage/`" in prompt
+    assert "`storage/a.py`" in prompt
+    assert 'Applies to: ["storage/a.py"]' not in prompt
     assert "cannot exclude files" in prompt
+    assert collected.review_policy.files[0].scope_paths == ("storage/a.py",)
+
+
+def test_child_scope_prompt_describes_directory_only():
+    policy = ResolvedPolicy(
+        BASE,
+        "code",
+        "standard",
+        (
+            PolicyFile("REVIEW.md", "a" * 40, "Root guidance.", ("src/a.py", "docs/b.md")),
+            PolicyFile(
+                "src/REVIEW.md",
+                "b" * 40,
+                "Child guidance.",
+                ("src/a.py",),
+            ),
+        ),
+        (),
+        ("src/a.py", "docs/b.md"),
+        "e" * 64,
+    )
+    collected = replace(sample(), review_policy=policy)
+    block = review_policy_block(collected)
+    assert (
+        "Scope: changed or carried paths anywhere in the repository "
+        "(root `REVIEW.md`) (2): `src/a.py`, `docs/b.md`"
+    ) in block
+    assert "Scope: changed or carried paths under `src/` (1): `src/a.py`" in block
+
+
+def test_large_inventory_prompt_uses_bounded_scope_preview():
+    many_paths = tuple(f"src/pkg/file{i}.py" for i in range(120))
+    policy = ResolvedPolicy(
+        BASE,
+        "code",
+        "standard",
+        (PolicyFile("REVIEW.md", "c" * 40, "Inventory guidance.", many_paths),),
+        (),
+        many_paths,
+        "f" * 64,
+    )
+    collected = replace(sample(), review_policy=policy, all_changed_paths=many_paths)
+    block = review_policy_block(collected)
+    assert "… (120 total)" in block
+    assert "file119.py" not in block
+    assert collected.review_policy.files[0].scope_paths == many_paths
+
+
+def test_invalid_carried_path_rejects_before_context_freeze(tmp_path):
+    from or_pr_review.review_policy import resolve_policy
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "t@example.invalid"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"],
+        check=True,
+        capture_output=True,
+    )
+    (repo / "a").write_text("a\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "a"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True
+    )
+    base = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo / "a").write_text("b\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "a"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "head"], check=True, capture_output=True
+    )
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    with pytest.raises(ActionError, match="carried.*backticks"):
+        resolve_policy(repo, base, head, ("src/`x`.py",))
+    with pytest.raises(ActionError, match="not canonical"):
+        resolve_policy(repo, base, head, (" a",))
 
 
 def test_receipt_preserves_existing_header_positions():

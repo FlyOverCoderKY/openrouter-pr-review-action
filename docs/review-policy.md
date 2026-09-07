@@ -25,11 +25,18 @@ For `src/storage/reader.py`, the applicable files are root `REVIEW.md`,
 scoped to its own changed files. Parent guidance remains applicable when a
 child adds detail; conflicting prose should be reported as ambiguity.
 
-Discovery uses the complete PR path inventory before diff truncation, including
-both sides of renames, deleted paths, and carried findings from earlier rounds.
-The verification prompt can still use an incremental diff without forgetting
-those obligations. Reading adjacent source through tools does not change the
-frozen policy or reviewer roster.
+Discovery walks only the repository root and ancestor directories of changed,
+carried, and rename/deletion paths. For each such directory it lists immediate
+children from the immutable target-branch tree (one bounded `git ls-tree` per
+unique directory, deduplicated). Irrelevant subtrees are not traversed, and
+unrelated unsupported sibling names are ignored. Each directory listing and the
+Git `diff --name-status` inventory is capped at 4 MiB of output; an oversized
+required listing or inventory is an error. The inventory still includes both
+sides of renames, deleted paths, and carried findings from earlier rounds before
+diff truncation. The verification
+prompt can use an incremental diff without forgetting those obligations.
+Reading adjacent source through tools does not change the frozen policy or
+reviewer roster.
 
 For a rename, the original directory's guidance applies to the old side and
 transition, and the destination directory's guidance applies to the new side.
@@ -111,8 +118,8 @@ trusted workflow configuration.
 | Applicable unique files combined | 64 KiB and 32 files |
 | Ancestor traversal | 20 levels |
 | Rules combined | 64 |
-| Globs | 16 per rule, 256 combined, 256 characters each |
-| Git inventory output | 4 MiB per operation |
+| Globs | 16 per rule, 256 combined, 256 UTF-8 bytes each |
+| Git inventory output | 4 MiB per `ls-tree` directory listing and `diff --name-status` inventory |
 
 Keep guidance concise and specific. Link local authoritative documentation;
 the reviewer can read relevant evidence using its existing bounded tools.

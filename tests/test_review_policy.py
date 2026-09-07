@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from or_pr_review.errors import ActionError
-from or_pr_review.review_policy import parse_policy_file, resolve_policy
+from or_pr_review.review_policy import (
+    _GIT_OUTPUT,
+    _GIT_STDERR,
+    parse_policy_file,
+    resolve_policy,
+)
+from or_pr_review.review_policy import (
+    _git as bounded_git,
+)
 
 
 def _git(repo: Path, *args: str, input: str | None = None) -> str:
@@ -112,6 +122,8 @@ def test_rename_deletion_and_carried_paths_are_covered(tmp_path: Path) -> None:
             _policy('{"rules":[{"id":"x","id":"y","paths":["a"],"minimum":"deep"}]}'),
             "duplicate JSON key",
         ),
+        ("```review-policy \n{}\n```\n", "first content"),
+        ("```review-policy\t\n{}\n```\n", "first content"),
     ],
 )
 def test_malformed_metadata_is_rejected(tmp_path: Path, contents: str, match: str) -> None:
@@ -132,6 +144,84 @@ def test_bounds_case_ambiguity_and_object_validation(tmp_path: Path) -> None:
         resolve_policy(repo, "A" * 40, head)
     with pytest.raises(ActionError, match="not a commit"):
         resolve_policy(repo, _git(repo, "hash-object", "a"), head)
+
+
+def test_empty_diff_root_case_variant_is_rejected(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    base = _commit(repo, {"reView.md": "wrong case\n", "a": "a"})
+    with pytest.raises(ActionError, match="case-variant"):
+        resolve_policy(repo, base, base)
+
+
+_GIT_CHILD = """\
+import sys
+import time
+
+mode = sys.argv[1]
+limit = int(sys.argv[2])
+if mode == "stdout_overflow":
+    sys.stdout.buffer.write(b"x" * (limit + 1))
+    sys.stdout.buffer.flush()
+    time.sleep(30)
+elif mode == "stderr_overflow":
+    sys.stderr.buffer.write(b"x" * (limit + 1))
+    sys.stderr.buffer.flush()
+    time.sleep(30)
+elif mode == "stall":
+    time.sleep(3600)
+elif mode == "ok":
+    sys.stdout.buffer.write(b"commit\\n")
+"""
+
+
+def _patch_git_popen(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, limit: int = 0
+) -> None:
+    script = tmp_path / "git_child.py"
+    script.write_text(_GIT_CHILD, encoding="utf-8")
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "git":
+            return real_popen([sys.executable, "-I", str(script), mode, str(limit)], **kwargs)
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+
+def test_git_output_bounds_kill_overflowing_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    base = _commit(repo, {"a": "a"})
+    limit = 64
+    _patch_git_popen(monkeypatch, tmp_path, "stdout_overflow", limit)
+    start = time.monotonic()
+    with pytest.raises(ActionError, match="safety bound"):
+        bounded_git(repo, ["cat-file", "-t", base], 10, limit)
+    assert time.monotonic() - start < 3
+
+
+def test_git_output_bounds_kill_overflowing_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    base = _commit(repo, {"a": "a"})
+    _patch_git_popen(monkeypatch, tmp_path, "stderr_overflow", _GIT_STDERR)
+    start = time.monotonic()
+    with pytest.raises(ActionError, match="safety bound"):
+        bounded_git(repo, ["cat-file", "-t", base], 10, _GIT_OUTPUT)
+    assert time.monotonic() - start < 3
+
+
+def test_git_output_bounds_kill_stalled_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    base = _commit(repo, {"a": "a"})
+    _patch_git_popen(monkeypatch, tmp_path, "stall")
+    with pytest.raises(ActionError, match="timed out"):
+        bounded_git(repo, ["cat-file", "-t", base], 1, _GIT_OUTPUT)
 
 
 def test_byte_and_file_count_limits(tmp_path: Path) -> None:

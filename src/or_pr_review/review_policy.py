@@ -13,8 +13,10 @@ import json
 import os
 import re
 import subprocess
-import tempfile
+import threading
+import time
 from dataclasses import dataclass
+from io import BufferedReader
 from pathlib import Path
 from typing import Any
 
@@ -94,31 +96,141 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def _git(repo: Path, args: list[str], timeout: int, limit: int = _GIT_OUTPUT) -> bytes:
-    command = ["git", "--no-replace-objects", "-c", "core.quotepath=false", "-C", str(repo), *args]
+_GIT_STDERR = 8192
+
+
+def _drain_bounded(
+    pipe: BufferedReader | None,
+    limit: int,
+    overflow: threading.Event,
+    read_error: threading.Event,
+    read_error_detail: list[BaseException],
+) -> bytes:
+    if pipe is None:
+        return b""
+    stored = bytearray()
     try:
-        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-            result = subprocess.run(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
-                env=_clean_env(),
-                timeout=timeout,
-                check=False,
-            )
-            stdout_size = stdout.tell()
-            stderr_size = stderr.tell()
-            if stdout_size > limit or stderr_size > 8192:
-                raise ActionError("git policy discovery output exceeds its safety bound")
-            if result.returncode:
-                raise ActionError("git policy discovery failed")
-            stdout.seek(0)
-            return stdout.read(limit)
-    except subprocess.TimeoutExpired as exc:
-        raise ActionError(f"git policy discovery timed out after {timeout}s") from exc
+        while not overflow.is_set():
+            remaining = limit - len(stored)
+            request = min(65536, remaining + 1)
+            try:
+                chunk = pipe.read1(request)
+            except OSError as exc:
+                read_error.set()
+                read_error_detail.append(exc)
+                break
+            if not chunk:
+                break
+            stored.extend(chunk)
+            if len(stored) > limit:
+                overflow.set()
+                del stored[limit:]
+                break
+    finally:
+        try:
+            pipe.close()
+        except OSError:
+            pass
+    return bytes(stored)
+
+
+def _git(repo: Path, args: list[str], timeout: int, limit: int = _GIT_OUTPUT) -> bytes:
+    command = [
+        "git",
+        "--no-replace-objects",
+        "--no-lazy-fetch",
+        "-c",
+        "core.quotepath=false",
+        "-C",
+        str(repo),
+        *args,
+    ]
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=_clean_env(),
+        )
     except OSError as exc:
         raise ActionError(f"failed to run git policy discovery: {exc}") from exc
+
+    stdout_box: list[bytes] = []
+    stderr_box: list[bytes] = []
+    stdout_overflow = threading.Event()
+    stderr_overflow = threading.Event()
+    stdout_read_error = threading.Event()
+    stderr_read_error = threading.Event()
+    stdout_read_error_detail: list[BaseException] = []
+    stderr_read_error_detail: list[BaseException] = []
+
+    def read_stdout() -> None:
+        stdout_box.append(
+            _drain_bounded(
+                proc.stdout,
+                limit,
+                stdout_overflow,
+                stdout_read_error,
+                stdout_read_error_detail,
+            )
+        )
+
+    def read_stderr() -> None:
+        stderr_box.append(
+            _drain_bounded(
+                proc.stderr,
+                _GIT_STDERR,
+                stderr_overflow,
+                stderr_read_error,
+                stderr_read_error_detail,
+            )
+        )
+
+    threads = (
+        threading.Thread(target=read_stdout, daemon=True),
+        threading.Thread(target=read_stderr, daemon=True),
+    )
+    for thread in threads:
+        thread.start()
+
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    try:
+        while proc.poll() is None:
+            if (
+                stdout_overflow.is_set()
+                or stderr_overflow.is_set()
+                or stdout_read_error.is_set()
+                or stderr_read_error.is_set()
+            ):
+                proc.kill()
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                proc.kill()
+                break
+            time.sleep(0.01)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    finally:
+        for thread in threads:
+            thread.join(timeout=5)
+        if any(thread.is_alive() for thread in threads):
+            raise ActionError("git policy discovery reader did not finish")
+
+    if timed_out:
+        raise ActionError(f"git policy discovery timed out after {timeout}s")
+    if stdout_read_error.is_set() or stderr_read_error.is_set():
+        raise ActionError("git policy discovery output read failed")
+    if stdout_overflow.is_set() or stderr_overflow.is_set():
+        raise ActionError("git policy discovery output exceeds its safety bound")
+    if proc.returncode:
+        raise ActionError("git policy discovery failed")
+    return stdout_box[0] if stdout_box else b""
 
 
 def _validate_commit(repo: Path, sha: str, timeout: int, label: str) -> None:
@@ -351,7 +463,7 @@ def resolve_policy(
     tree = _tree(repo, base_sha, timeout)
 
     directories: set[str] = {""}
-    wanted: set[str] = set()
+    wanted: set[str] = {""}
     for changed_path in changed_paths:
         parts = changed_path.split("/")
         if len(parts) > _MAX_DEPTH:

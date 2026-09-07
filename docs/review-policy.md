@@ -8,7 +8,8 @@ hide supported bugs, exempt files, or change merge and CI requirements.
 ## Enable and bootstrap
 
 Use a pinned action revision that supports `review_policy: base`, a full-depth
-checkout containing the PR head and target commit, and the direct `role: all`
+checkout containing the PR head and target commit, Git supporting `--no-lazy-fetch`,
+and the direct `role: all`
 action. Enable the input in both initial and verification steps. Policy loading
 defaults to off, and this release rejects policy-enabled setup/lane/judge roles.
 
@@ -29,6 +30,11 @@ both sides of renames, deleted paths, and carried findings from earlier rounds.
 The verification prompt can still use an incremental diff without forgetting
 those obligations. Reading adjacent source through tools does not change the
 frozen policy or reviewer roster.
+
+For a rename, the original directory's guidance applies to the old side and
+transition, and the destination directory's guidance applies to the new side.
+Both participate in the review. Moving a file does not permanently transfer
+its old directory's contracts to its new location.
 
 The loader reads Git blobs from the immutable target-branch tip captured during
 collection. This is separate from the merge base and previous reviewed commit.
@@ -119,7 +125,7 @@ Install this action's Python package in a separate trusted environment, then
 run against the repository being reviewed:
 
 ```bash
-python -P -m or_pr_review policy lint REVIEW.md src/storage/REVIEW.md
+python -P -m or_pr_review policy lint --repo . REVIEW.md src/storage/REVIEW.md
 python -P -m or_pr_review policy explain --repo . --base FULL_TARGET_SHA --head FULL_PR_SHA
 ```
 
@@ -129,7 +135,10 @@ Python package. `explain` reports source files/blob IDs, scopes, matched rules, 
 effective policy digest, without printing prose. Add `--carried-path path/to/file`
 to preview a carried finding. `lint` validates individual proposed files;
 `explain` checks their effective ancestry and aggregate bounds. Neither command
-uses GitHub credentials, network requests, or OpenRouter.
+uses GitHub credentials, network requests, or OpenRouter. Missing objects in a
+partial clone fail locally; Git lazy fetching is disabled. For `lint`, file paths
+must stay inside the chosen `--repo` root, and nested root-only profile settings
+are rejected as well as syntax errors.
 
 To preview a proposed policy as authoritative after merge, use a temporary local
 commit containing that policy as the base and a subsequent example change as

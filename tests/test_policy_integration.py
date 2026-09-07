@@ -117,8 +117,38 @@ def test_policy_source_must_match_collection():
 def test_local_lint_validates_without_credentials(tmp_path, capsys):
     path = tmp_path / "REVIEW.md"
     path.write_text("# Contract\nKeep old data readable.\n", encoding="utf-8")
-    assert cli.main(["policy", "lint", str(path)], {}) == 0
+    assert cli.main(["policy", "lint", "--repo", str(tmp_path), str(path)], {}) == 0
     assert "syntax valid" in capsys.readouterr().out
+
+
+def test_local_lint_allows_root_profile(tmp_path, capsys):
+    path = tmp_path / "REVIEW.md"
+    path.write_text(
+        '```review-policy\n{"version":1,"review":{"profile":"security"}}\n```\n',
+        encoding="utf-8",
+    )
+    assert cli.main(["policy", "lint", "--repo", str(tmp_path), "REVIEW.md"], {}) == 0
+    assert "syntax valid" in capsys.readouterr().out
+
+
+def test_local_lint_rejects_nested_profile(tmp_path, capsys):
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (nested / "REVIEW.md").write_text(
+        '```review-policy\n{"version":1,"review":{"profile":"security"}}\n```\n',
+        encoding="utf-8",
+    )
+    assert cli.main(["policy", "lint", "--repo", str(tmp_path), "src/REVIEW.md"], {}) == 1
+    assert "only root" in capsys.readouterr().err
+
+
+def test_local_lint_rejects_path_outside_repo(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "REVIEW.md"
+    outside.write_text("# Contract\n", encoding="utf-8")
+    assert cli.main(["policy", "lint", "--repo", str(repo), str(outside)], {}) == 1
+    assert "outside repository root" in capsys.readouterr().err
 
 
 def test_local_explain_omits_private_prose(monkeypatch, capsys):

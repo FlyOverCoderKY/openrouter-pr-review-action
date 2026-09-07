@@ -2296,6 +2296,11 @@ def test_all_timeout_preserves_progress_without_claiming_success(tmp_path, monke
                 "cost_usd": 0.12,
                 "cost_complete": True,
                 "last_http_status": 429,
+                "requested_service_tier": "flex",
+                "served_service_tiers": ["flex"],
+                "service_tier_observed_responses": 3,
+                "service_tier_complete": False,
+                "service_tier_confirmed": False,
                 "prompt": "must never be saved",
             }
         )
@@ -2317,8 +2322,18 @@ def test_all_timeout_preserves_progress_without_claiming_success(tmp_path, monke
             assert slow.requests == 3 and slow.retries == 1 and slow.tool_rounds == 2
             assert slow.cost_usd is None and slow.cost_complete is False
             assert slow.known_cost_usd == 0.12
+            assert slow.requested_service_tier == "flex"
+            assert slow.served_service_tiers == ["flex"]
+            assert slow.service_tier_observed_responses == 3
+            assert slow.service_tier_complete is False
+            assert slow.service_tier_confirmed is False
             progress = json.loads((artifact_dir / "progress-1.json").read_text())
             assert progress["last_http_status"] == 429
+            assert progress["requested_service_tier"] == "flex"
+            assert progress["served_service_tiers"] == ["flex"]
+            assert progress["service_tier_observed_responses"] == 3
+            assert progress["service_tier_complete"] is False
+            assert progress["service_tier_confirmed"] is False
             assert "prompt" not in progress
             assert (artifact_dir / "lane-1.json").exists()
             return 1

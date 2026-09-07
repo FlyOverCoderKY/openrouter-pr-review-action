@@ -1,5 +1,9 @@
 """Exercise real sockets, including responses that never hit an idle timeout."""
 
+import io
+import json
+import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -9,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from or_pr_review import http_transport
 from or_pr_review.http_transport import bounded_urlopen
 
 
@@ -28,6 +33,59 @@ def server(handler):
 class QuietHandler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        TimeoutError("timed out"),
+        ConnectionRefusedError(111, "Connection refused"),
+        socket.gaierror(-2, "Name or service not known"),
+    ],
+)
+def test_worker_preserves_wrapped_error_classification_and_reason(monkeypatch, reason):
+    payload = {
+        "url": "https://example.test/",
+        "method": "POST",
+        "headers": {"Authorization": "Bearer test-secret"},
+        "body": "cHJpdmF0ZSBwcm9tcHQ=",
+        "timeout": 5,
+    }
+    output = io.StringIO()
+    monkeypatch.setattr(http_transport.sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(http_transport.sys, "stdout", output)
+
+    def fail(*args, **kwargs):
+        raise urllib.error.URLError(reason)
+
+    monkeypatch.setattr(http_transport.urllib.request, "urlopen", fail)
+    http_transport.main()
+    serialized = output.getvalue()
+    reply = json.loads(serialized)
+    assert "test-secret" not in serialized
+    assert "private prompt" not in serialized
+    assert payload["body"] not in serialized
+
+    # Exercise reconstruction with exactly the response emitted by the worker.
+    def completed(*args, **kwargs):
+        assert kwargs["timeout"] == 5
+        return subprocess.CompletedProcess(args[0], 0, serialized, "")
+
+    monkeypatch.setattr(http_transport.subprocess, "run", completed)
+    request = urllib.request.Request(payload["url"])
+    if isinstance(reason, TimeoutError):
+        assert reply == {"kind": "timeout"}
+        with pytest.raises(TimeoutError, match="HTTP request timed out"):
+            bounded_urlopen(request, timeout=5)
+    else:
+        assert reply == {
+            "kind": "connection",
+            "category": type(reason).__name__,
+            "reason": str(reason),
+        }
+        with pytest.raises(urllib.error.URLError) as caught:
+            bounded_urlopen(request, timeout=5)
+        assert caught.value.reason == f"{type(reason).__name__}: {reason}"
 
 
 @pytest.mark.parametrize("phase", ["headers", "body", "error-body"])

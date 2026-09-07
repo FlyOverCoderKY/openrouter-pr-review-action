@@ -133,7 +133,7 @@ inputs:
     required: false
     default: "50"
   openrouter_timeout_seconds:
-    description: "Timeout in seconds for each OpenRouter HTTP request (1-600)."
+    description: "Elapsed-time limit for each OpenRouter HTTP attempt, including worker startup, connection, headers, body and response transfer (1-600 seconds)."
     required: false
     default: "180"
   lane_index:

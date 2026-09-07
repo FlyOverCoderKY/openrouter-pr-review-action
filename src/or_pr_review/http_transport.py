@@ -45,7 +45,8 @@ def bounded_urlopen(request: urllib.request.Request, *, timeout: float) -> io.By
     if kind == "timeout":
         raise TimeoutError("HTTP request timed out")
     if kind == "connection":
-        raise OSError("HTTP connection failed")
+        # The harness redacts this reason before publishing diagnostics.
+        raise urllib.error.URLError(f"{reply['category']}: {reply['reason']}")
     body = io.BytesIO(base64.b64decode(reply["body"]))
     if kind == "http_error":
         headers = Message()
@@ -77,8 +78,20 @@ def main() -> None:
                 }
     except TimeoutError:
         reply = {"kind": "timeout"}
-    except (urllib.error.URLError, http.client.HTTPException, OSError):
-        reply = {"kind": "connection"}
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+        # urllib wraps connect/TLS/send failures, including socket timeouts.
+        # Preserve their classification rather than reporting all as connections.
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if isinstance(reason, TimeoutError):
+            reply = {"kind": "timeout"}
+        else:
+            # Send only the exception reason, never the request or payload. This
+            # private IPC is consumed by the harness's redacting URLError branch.
+            reply = {
+                "kind": "connection",
+                "category": type(reason).__name__,
+                "reason": str(reason),
+            }
     json.dump(reply, sys.stdout)
 
 

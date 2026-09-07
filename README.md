@@ -239,6 +239,10 @@ collecting results, leaving time to save their final diagnostics. The existing j
 and publication reserves are unchanged. HTTP attempts run in isolated workers that
 are terminated at the elapsed-time limit, so periodic response bytes cannot keep a
 request alive indefinitely. Retries still share the lane's remaining budget.
+The limit includes worker startup and response transfer. There is no extra time
+after that limit: near lane expiry, a response that has not reached the reviewer
+is incomplete even if the provider has finished generating it. This keeps retries
+and shutdown within the reserved publication window.
 
 All-role artifact uploads include `progress-N.json` checkpoints alongside the final
 lane files. These contain aggregate request/tool/retry counts, observed usage and

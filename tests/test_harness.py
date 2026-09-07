@@ -1606,7 +1606,7 @@ def test_openrouter_chat_retries_transient_errors(monkeypatch: pytest.MonkeyPatc
             raise _http_error(429, retry_after="1")
         return _FakeResponse()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     sleeps: list[float] = []
     stats: dict[str, int] = {}
     parsed = harness.openrouter_chat(
@@ -1639,7 +1639,7 @@ def test_openrouter_chat_bounds_or_ignores_bad_retry_after(
             raise _http_error(429, retry_after=retry_after)
         return _FakeResponse()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     sleeps: list[float] = []
 
     from or_pr_review import harness
@@ -1669,7 +1669,7 @@ def test_openrouter_chat_retries_mid_body_connection_drops(
             raise ConnectionResetError("peer reset")
         return _FakeResponse()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     sleeps: list[float] = []
     stats: dict[str, int] = {}
     parsed = harness.openrouter_chat(
@@ -1686,7 +1686,7 @@ def test_openrouter_chat_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyP
     def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
         raise _http_error(503)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     sleeps: list[float] = []
     with pytest.raises(LaneError, match="HTTP 503"):
         harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append)
@@ -1707,7 +1707,7 @@ def test_openrouter_chat_rate_limit_retries_longer_with_stable_jitter(
     def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
         raise _http_error(429, body=body)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     sleeps: list[float] = []
     with pytest.raises(harness.OpenRouterHTTPError) as raised:
         harness.openrouter_chat(
@@ -1791,7 +1791,7 @@ def test_http_error_provider_is_parsed_beyond_display_truncation(
     def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
         raise _http_error(400, body=body)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     with pytest.raises(harness.OpenRouterHTTPError) as raised:
         harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5)
 
@@ -1808,7 +1808,7 @@ def test_rate_limit_deadline_preserves_provider_and_nonbillable_cost(
     def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
         raise _http_error(429, body=body)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     with pytest.raises(harness.OpenRouterHTTPError) as raised:
         harness.openrouter_chat(
             "sk-test",
@@ -1828,7 +1828,7 @@ def test_openrouter_chat_does_not_retry_client_errors(monkeypatch: pytest.Monkey
     def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
         raise _http_error(400)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     sleeps: list[float] = []
     with pytest.raises(LaneError, match="HTTP 400"):
         harness.openrouter_chat("sk-test", {"model": "m"}, timeout=5, sleep=sleeps.append)
@@ -1970,7 +1970,7 @@ def test_http_retries_cannot_cross_lane_request_budget(
         now["value"] += timeout
         raise TimeoutError("provider stalled")
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     sleeps: list[float] = []
     with pytest.raises(LaneError, match="request budget exhausted"):
         harness.openrouter_chat(
@@ -2752,7 +2752,7 @@ def test_openrouter_chat_internal_retry_counts_one_logical_attempt(
         return _SuccessResponse()
 
     stats: dict[str, int] = {}
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     response = harness.openrouter_chat(
         "sk-test",
         {"model": "example/model"},
@@ -2790,7 +2790,7 @@ def test_run_lane_openrouter_retry_keeps_total_cost_incomplete(
 
         return _SuccessResponse()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     result = run_lane(
         model="example/model",
         messages=[{"role": "user", "content": "review"}],
@@ -2841,7 +2841,7 @@ def test_run_lane_openrouter_retry_progress_counts_inflight_before_interruption(
         assert "cost_usd" not in checkpoint
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
     with pytest.raises(KeyboardInterrupt):
         run_lane(
             model="example/model",

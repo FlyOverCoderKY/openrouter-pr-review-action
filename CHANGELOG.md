@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Enforce elapsed-time HTTP attempt limits with killable transport workers, including
+  stalled DNS/headers and trickling success or error bodies. Finish lanes before the
+  coordinator deadline, and never wait indefinitely when the budget is exhausted.
+  Preserve aggregate progress checkpoints in all-role artifacts, including retry and
+  transport failure counters; interrupted lanes retain observed usage without
+  claiming complete costs or successful review coverage.
+
 - Carry bounded, versioned publication context in matrix lane artifacts. The judge
   restores the reviewed diff and prior ledger instead of recollecting live state;
   a new push now reaches stale partial publication without discarding completed

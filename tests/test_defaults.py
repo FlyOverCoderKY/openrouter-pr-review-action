@@ -9,7 +9,7 @@ from or_pr_review.cli import DEFAULT_BOT_LOGIN, JOB_BUDGET_SECONDS
 from or_pr_review.collect import DEFAULT_MAX_DIFF_KB
 from or_pr_review.harness import DEFAULT_MAX_TOOL_TURNS, DEFAULT_TIMEOUT
 from or_pr_review.loop import LEDGER_PREFIX
-from or_pr_review.models import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL
+from or_pr_review.models import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL, parse_judge_model
 
 
 def _input_default(text: str, name: str) -> str | None:
@@ -54,9 +54,11 @@ def test_action_yml_default_max_tool_turns_is_fifty() -> None:
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert _input_default(action, "max_tool_turns") == "50"
     assert _input_default(workflow, "max_tool_turns") == "50"
-    assert _input_default(action, "judge_model") == DEFAULT_JUDGE_MODEL
+    assert _input_default(action, "judge_model") == ""
     assert _input_default(workflow, "judge_model") == DEFAULT_JUDGE_MODEL
-    assert _input_default(action, "models") == DEFAULT_MODEL
+    assert parse_judge_model(_input_default(action, "judge_model")) == DEFAULT_JUDGE_MODEL
+    assert parse_judge_model(_input_default(workflow, "judge_model")) == DEFAULT_JUDGE_MODEL
+    assert _input_default(action, "models") == ""
     assert _input_default(workflow, "models") == DEFAULT_MODEL
     assert _input_default(action, "bot_login") == DEFAULT_BOT_LOGIN
     assert _input_default(workflow, "bot_login") == DEFAULT_BOT_LOGIN

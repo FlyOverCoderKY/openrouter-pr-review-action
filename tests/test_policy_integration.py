@@ -164,8 +164,8 @@ def test_receipt_preserves_existing_header_positions():
     assert f"**Policy source:** `{BASE}`" in bodies[0]
 
 
-@pytest.mark.parametrize("role", ["setup", "lane", "judge"])
-def test_policy_rejects_matrix_before_collection_or_spend(monkeypatch, role):
+@pytest.mark.parametrize("role", ["lane", "judge"])
+def test_policy_matrix_consumers_require_the_prepared_context_before_collection(monkeypatch, role):
     monkeypatch.setattr(cli, "_best_effort_incomplete", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_collect_with_loop", lambda *a: pytest.fail("must not collect"))
     assert cli.main([role], {"REVIEW_POLICY": "base"}) == 1

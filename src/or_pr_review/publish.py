@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from typing import Any
 
 from or_pr_review.collect import CollectedReview
@@ -43,6 +45,11 @@ def decide_verdict(
     return "issues" if issues else "clean"
 
 
+def canonical_receipt_json(receipt: dict[str, Any]) -> str:
+    """Stable public encoding shared by the hidden marker and artifact file."""
+    return json.dumps(receipt, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
 def fail_on_should_fail(
     fail_on: str,
     issues: list[MergedIssue],
@@ -82,6 +89,7 @@ def render_review(
     extra_notices: list[str] | None = None,
     hidden_marker: str | None = None,
     round_lines: list[str] | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> str:
     """Single-body rendering; the first part of render_review_parts."""
     return render_review_parts(
@@ -97,6 +105,7 @@ def render_review(
         extra_notices=extra_notices,
         hidden_marker=hidden_marker,
         round_lines=round_lines,
+        receipt=receipt,
     )[0]
 
 
@@ -114,6 +123,7 @@ def render_review_parts(
     extra_notices: list[str] | None = None,
     hidden_marker: str | None = None,
     round_lines: list[str] | None = None,
+    receipt: dict[str, Any] | None = None,
 ) -> list[str]:
     """The review body plus continuation-comment bodies for long findings
     lists, so nothing is dropped to fit GitHub's body limit.
@@ -177,6 +187,15 @@ def render_review_parts(
         f"**Mode:** `{collected.mode}`",
         f"**Commit:** `{reviewed_sha or collected.head_sha}`",
     ]
+    if receipt is not None:
+        canonical = canonical_receipt_json(receipt)
+        marker = base64.b64encode(canonical.encode("utf-8")).decode("ascii")
+        header.extend(
+            [
+                f"<!-- openrouter-review-plan:v1:{marker} -->",
+                _receipt_status_line(receipt),
+            ]
+        )
     if judge_note:
         header.append(f"**Judge:** {judge_note}")
     cost_note = _cost_note(lanes, judge_cost, judge_ran)
@@ -251,6 +270,18 @@ def render_review_parts(
             lines = [*lines, f"[Workflow run]({run_url})", ""]
         bodies.append(_finalize(lines))
     return bodies
+
+
+def _receipt_status_line(receipt: dict[str, Any]) -> str:
+    """A small human companion to the opaque canonical provenance receipt."""
+    profile = receipt.get("profile", "")
+    level = receipt.get("level", "")
+    panel = receipt.get("panel_status", "")
+    satisfied = receipt.get("profile_satisfied", False)
+    return (
+        f"**Review plan:** `{profile}/{level}` · panel `{panel}` · "
+        f"profile {'satisfied' if satisfied else 'unsatisfied'}"
+    )
 
 
 def _fmt_cost(value: float, precision: int | None = None) -> str:

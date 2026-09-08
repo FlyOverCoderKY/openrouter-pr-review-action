@@ -53,6 +53,8 @@ LEDGER_V1_EVIDENCE_COMPAT_LIMIT = 616
 MAX_LEDGER_MODELS = 8
 MAX_REPLY_CHARS = 2_000
 MAX_REPLIES_BYTES = 16_000
+OMISSION_MARKER = "…[older entries omitted]\n"
+_CONTEXT_SEPARATOR = "\n\n"
 
 _FINDING_ID_RE = re.compile(r"^r\d{1,3}-\d{1,3}$")
 _GENERATION_RE = re.compile(r"^[0-9a-f]{0,12}$")
@@ -537,10 +539,14 @@ def render_agent_context(
         comment_lines.append(_clip_reply(body))
         comment_lines.append("")
     reply_text = _clip_tail("\n".join(reply_lines).strip(), MAX_REPLIES_BYTES)
-    remaining = MAX_REPLIES_BYTES - len(reply_text.encode("utf-8"))
-    comment_text = _clip_tail("\n".join(comment_lines).strip(), max(0, remaining))
+    reply_bytes = len(reply_text.encode("utf-8"))
+    remaining = MAX_REPLIES_BYTES - reply_bytes
+    comment_source = "\n".join(comment_lines).strip()
+    if comment_source and reply_text:
+        remaining -= len(_CONTEXT_SEPARATOR.encode("utf-8"))
+    comment_text = _clip_tail(comment_source, max(0, remaining))
     parts = [part for part in (reply_text, comment_text) if part]
-    return "\n\n".join(parts)
+    return _CONTEXT_SEPARATOR.join(parts)
 
 
 def _clip_tail(text: str, max_bytes: int) -> str:
@@ -550,8 +556,12 @@ def _clip_tail(text: str, max_bytes: int) -> str:
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return text
-    clipped = encoded[-max_bytes:].decode("utf-8", errors="ignore")
-    return "…[older entries omitted]\n" + clipped
+    marker = OMISSION_MARKER.encode("utf-8")
+    content_budget = max_bytes - len(marker)
+    if content_budget <= 0:
+        return encoded[-max_bytes:].decode("utf-8", errors="ignore")
+    clipped = encoded[-content_budget:].decode("utf-8", errors="ignore")
+    return OMISSION_MARKER + clipped
 
 
 def _clip_reply(body: str) -> str:

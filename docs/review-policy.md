@@ -10,8 +10,9 @@ hide supported bugs, exempt files, or change merge and CI requirements.
 Use a pinned action revision that supports `review_policy: base`, a full-depth
 checkout containing the PR head and target commit, Git supporting `--no-lazy-fetch`,
 and the direct `role: all`
-action. Enable the input in both initial and verification steps. Policy loading
-defaults to off, and this release rejects policy-enabled setup/lane/judge roles.
+action. Enable the input in both initial and verification steps. Prepared
+setup/lane/judge roles are supported when they consume the same frozen context
+artifact; see [trusted review profiles](review-profiles.md).
 
 Land the initial guidance using the existing review process. Its own PR uses
 the previous target-branch policy. On the next normal PR, confirm the review
@@ -77,7 +78,7 @@ restore paths as well as the changed writer. See docs/storage.md.
 | --- | --- |
 | `version` | Required integer `1` when metadata exists |
 | `review` | Required object; may be empty |
-| `review.profile` | Root-only profile slug; this release accepts `code` and `docs` as descriptive categories and keeps workflow model settings |
+| `review.profile` | Root-only profile slug; `code` and `docs` are descriptive categories, and a custom name must exist in trusted `review_profiles` |
 | `review.minimum` | `standard` or `deep`; omitted means standard |
 | `review.rules` | Optional array of `{id, paths, minimum}`; IDs unique within a file |
 | `paths` | Nonempty relative globs; `*` and `?` stay within one component, `**` crosses directories |
@@ -87,11 +88,11 @@ versions, non-finite numbers, and nested profile overrides are errors. Rules
 are relative to their containing directory. Child minima and matched rules can
 only raise the inherited minimum; they cannot lower it.
 
-The parser and offline preview understand `deep` so configurations can be
-validated before rollout. **The current guidance-only action refuses a matching
-deep request** because it has no configured deep execution profile. It never
-silently runs the standard roster and calls that a deep review. Do not enable
-such a rule in production until profile execution is available.
+The parser and offline preview understand `deep`. A matching deep minimum
+requires a configured deep panel in the trusted `review_profiles` registry; it
+never silently runs the standard roster and calls that a deep review. A manual
+`review_level: deep` request has the same requirement. Registry limits and
+monotonicity rules are documented in [trusted review profiles](review-profiles.md).
 
 Example for offline planning only:
 
@@ -108,7 +109,8 @@ Example for offline planning only:
 
 No expressions, shell commands, templates, remote includes, credentials,
 model/provider slugs, or spending limits belong in file metadata. Those remain
-trusted workflow configuration.
+trusted workflow configuration. `REVIEW.md` never names models, provider
+secrets, or merge authority.
 
 ## Bounds
 
@@ -164,21 +166,27 @@ content and must remain trusted same-repository artifacts. Policy follows the
 same configured OpenRouter/provider processing as other review context; it is
 not a place for secrets or unrelated confidential material.
 
-Publication context version 2 adds policy provenance. Use the same action
-revision for artifact producers and consumers. Older version 1 artifacts require
-a rerun; ledger version 1 remains supported, preserving finding IDs and replies.
+Publication context version 3 adds the frozen prepared execution plan,
+provenance, and deadline. Use the same action revision for artifact producers
+and consumers; older context artifacts require a rerun. The finding ledger
+remains version 1, preserving finding IDs and replies.
 Use `review_mode: auto` for a full-PR manual recheck that retains the ledger.
 
-This first release adds guidance rather than a new authorization gate. A later
-base-branch change does not mutate an active review; a new run resolves a new
-snapshot. Extra-review requests, profile completion gates, and artifact reuse
-are separate features and are not implied by enabling guidance.
+Guidance and action outputs are not an authorization gate. A trusted request
+handler must mark a PR pending before accepting a deep request, require profile
+status, validate workflow provenance and the current effective policy, retain
+pending status after label removal, and support explicit cancellation and base
+policy refresh. Repository integration for that handler is not implemented:
+`review:deep` alone does not enforce pending requests, and dispatching deep is
+only an action input. A later base-branch change does not mutate an active
+review; a new run resolves a new snapshot.
 
 | Symptom | Resolution |
 | --- | --- |
 | New guidance did not apply to its own PR | Expected: target-branch guidance is authoritative; verify the next PR after merge |
 | Policy object missing | Ensure full-depth checkout contains both immutable commits |
-| Unknown profile or matching deep rule | Use supported guidance-only settings; do not remove required checks just to get a green run |
+| Unknown profile or matching deep rule | Add the named profile and deep panel to trusted workflow configuration; do not remove required checks just to get a green run |
 | Configuration error | Correct the reported file/key or bounds; use local lint and explain before review |
-| Matrix mode rejected | Use direct `role: all` for guidance in this release |
+| Prepared context expired or mismatched | Download only the setup artifact from the same workflow run/attempt, verify `review_context_sha256` and `head_sha`, and rerun setup with the same pinned action revision |
+| Required lane missing | Treat the panel as partial/error; `fail_on: never` does not make a required-lane failure successful |
 | Artifact version mismatch | Rerun lanes with one compatible action revision, keeping the existing findings ledger |

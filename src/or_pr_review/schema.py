@@ -192,6 +192,11 @@ class LaneResult:
     service_tier_confirmed: bool | None = None
     # Required by the matrix publisher, optional for older/offline lane consumers.
     review_context: dict[str, Any] | None = None
+    # Prepared profile runs bind each artifact to one frozen setup plan.  Keep
+    # these optional so legacy lane artifacts remain consumable.
+    lane_index: int | None = None
+    required: bool | None = None
+    context_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -238,6 +243,12 @@ class LaneResult:
             payload["service_tier_confirmed"] = self.service_tier_confirmed
         if self.review_context is not None:
             payload["review_context"] = self.review_context
+        if self.lane_index is not None:
+            payload["lane_index"] = self.lane_index
+        if self.required is not None:
+            payload["required"] = self.required
+        if self.context_sha256 is not None:
+            payload["context_sha256"] = self.context_sha256
         return payload
 
 
@@ -581,6 +592,46 @@ def parse_lane_artifact(payload: object) -> LaneResult:
     """Parse a lane JSON file. Schema mismatches fail-closed."""
     if not isinstance(payload, dict):
         raise SchemaError("lane artifact must be a JSON object")
+    allowed = {
+        "schema_version",
+        "ok",
+        "model",
+        "findings",
+        "error",
+        "elapsed_ms",
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "cost_usd",
+        "requests",
+        "tool_rounds",
+        "retries",
+        "salvaged",
+        "thought_signature_tool_turns",
+        "thought_signature_recoveries",
+        "sanitized_tool_turns",
+        "dropped_findings",
+        "head_sha",
+        "provider",
+        "resolutions",
+        "coverage",
+        "known_cost_usd",
+        "attempted_requests",
+        "cost_observed_responses",
+        "cost_complete",
+        "requested_service_tier",
+        "served_service_tiers",
+        "service_tier_observed_responses",
+        "service_tier_complete",
+        "service_tier_confirmed",
+        "review_context",
+        "lane_index",
+        "required",
+        "context_sha256",
+    }
+    unexpected = set(payload) - allowed
+    if unexpected:
+        raise SchemaError(f"lane artifact has unexpected keys: {sorted(unexpected)}")
     version = payload.get("schema_version")
     if version != SCHEMA_VERSION:
         raise SchemaError(f"lane artifact schema_version must be {SCHEMA_VERSION}, got {version!r}")
@@ -637,6 +688,17 @@ def parse_lane_artifact(payload: object) -> LaneResult:
     context = payload.get("review_context")
     if context is not None and not isinstance(context, dict):
         raise SchemaError("lane artifact review_context must be an object or null")
+    lane_index = payload.get("lane_index")
+    if lane_index is not None and (type(lane_index) is not int or lane_index < 0):
+        raise SchemaError("lane artifact lane_index must be a non-negative integer or null")
+    required = payload.get("required")
+    if required is not None and type(required) is not bool:
+        raise SchemaError("lane artifact required must be a boolean or null")
+    context_sha256 = payload.get("context_sha256")
+    if context_sha256 is not None and (
+        type(context_sha256) is not str or re.fullmatch(r"[0-9a-f]{64}", context_sha256) is None
+    ):
+        raise SchemaError("lane artifact context_sha256 must be a lowercase SHA-256 or null")
     return LaneResult(
         schema_version=SCHEMA_VERSION,
         ok=ok,
@@ -689,6 +751,9 @@ def parse_lane_artifact(payload: object) -> LaneResult:
             payload.get("service_tier_confirmed"), field="service_tier_confirmed"
         ),
         review_context=context,
+        lane_index=lane_index,
+        required=required,
+        context_sha256=context_sha256,
     )
 
 

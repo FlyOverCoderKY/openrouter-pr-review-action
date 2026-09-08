@@ -2065,9 +2065,18 @@ def test_initial_round_embeds_marker_and_inline_comments(
     assert "issue_count=1" in out
 
 
-def test_force_push_resets_to_full_pr_initial(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("review_mode", ["auto", "verify"])
+@pytest.mark.parametrize("finding_status", ["open", "disputed"])
+@pytest.mark.parametrize("with_replies", [True, False])
+def test_force_push_preserves_history_in_full_pr_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    review_mode: str,
+    finding_status: str,
+    with_replies: bool,
 ) -> None:
+    from dataclasses import replace
+
     from or_pr_review import cli as cli_mod
     from or_pr_review.collect import (
         DIVERGED_NOTICE,
@@ -2077,12 +2086,24 @@ def test_force_push_resets_to_full_pr_initial(
     )
 
     repo = "FlyOverCoderKY/openrouter-pr-review-action"
-    github = _LoopGitHub(_prior_ledger_marker(repo))
+    from or_pr_review.loop import encode_ledger, extract_ledger
+
+    prior = extract_ledger(_prior_ledger_marker(repo), repo=repo, pr_number=1)
+    assert prior is not None
+    prior = replace(prior, findings=(replace(prior.findings[0], status=finding_status),))
+    github = _LoopGitHub(encode_ledger(prior, repo=repo, pr_number=1))
+    reply_generations: list[str] = []
+
+    def finding_replies(number: int, *, generation: str = ""):
+        reply_generations.append(generation)
+        return [("r1-1", "dev", "added the check in abc123")]
+
+    monkeypatch.setattr(github, "list_finding_replies", finding_replies)
     collected_calls: list[dict[str, str]] = []
 
     def fake_collect(env: dict[str, str]) -> CollectedReview:
         collected_calls.append(dict(env))
-        if env.get("REVIEW_MODE") == "verify":
+        if env.get("REVIEW_SCOPE") == "latest-commit":
             plan = DiffPlan("latest-commit", "single-commit", None, "a" * 40, DIVERGED_NOTICE)
             return CollectedReview(
                 1,
@@ -2105,7 +2126,7 @@ def test_force_push_resets_to_full_pr_initial(
             "feat",
             plan,
             Truncation("diff", False, 4, 4, 300),
-            "initial",
+            env["REVIEW_MODE"],
         )
 
     monkeypatch.setattr(cli_mod, "_collect", fake_collect)
@@ -2115,18 +2136,28 @@ def test_force_push_resets_to_full_pr_initial(
         PR_NUMBER="1",
         GITHUB_TOKEN="ghs_dummy",
         GITHUB_REPOSITORY=repo,
-        REVIEW_MODE="verify",
+        REVIEW_MODE=review_mode,
         REVIEW_SCOPE="latest-commit",
     )
-    collected, state, replies = cli_mod._collect_with_loop(env)
+    collected, state, replies = cli_mod._collect_with_loop(env, with_replies=with_replies)
     # The diverged range must not livelock in partial verify rounds: a
-    # rewrite resets to a fresh full-PR initial round.
-    assert state.mode == "initial"
-    assert state.round_number == 1
+    # rewrite gets full coverage without erasing identities or rebuttals.
+    assert state.mode == collected.mode == "verify"
+    assert state.round_number == 2
+    assert state.generation == prior.generation
+    assert state.prior_findings == prior.findings
     assert collected.plan.kind == "full-pr"
-    assert replies == ""
+    assert collected.plan.fallback_notice is None
+    assert cli_mod._coverage_expectations(state, collected)[0] is True
+    if with_replies:
+        assert "added the check in abc123" in replies
+        assert reply_generations == [prior.generation]
+    else:
+        assert replies == ""
+        assert reply_generations == []
+    assert len(collected_calls) == 2
     assert collected_calls[0]["EVENT_BEFORE"] == "b" * 40  # continuity attempted
-    assert collected_calls[1]["REVIEW_MODE"] == "initial"
+    assert collected_calls[1]["REVIEW_MODE"] == "verify"
     assert collected_calls[1]["REVIEW_SCOPE"] == "full-pr"
 
 

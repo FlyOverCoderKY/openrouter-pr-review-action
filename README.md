@@ -427,8 +427,10 @@ Use `review_mode: auto` with `review_scope: full-pr` for a manual recheck. It
 reviews the whole PR while retaining the existing ledger, finding IDs, and
 rebuttals. With no ledger it seeds an initial review. A corrupt newest ledger
 fails visibly; it never silently starts over. Use `review_mode: initial`
-explicitly only when you intend to reset history. A divergent history detected
-during a latest-commit verification still requires a fresh initial review.
+explicitly only when you intend to reset history. After a rebase or force-push,
+a divergent latest-commit range expands to a full-PR verification. The review
+retains its round progression, finding IDs, settled disputes, and rebuttals;
+the full-PR coverage requirement still applies to the rewritten work.
 
 Follow-up reviewers put incomplete fixes in the existing finding's resolution.
 Additional evidence can name `prior_finding_id` to retain that open finding's ID;

@@ -1352,20 +1352,19 @@ def _collect_with_loop(
         # History was rewritten (force-push): the last reviewed SHA is no
         # longer an ancestor, so a latest-commit verify can never cover the
         # rewritten work — and its partial verdict would never republish the
-        # ledger, repeating the identical failed round forever. A rewrite
-        # requires a fresh exhaustive pass: reset to a full-PR initial round.
+        # ledger, repeating the identical failed round forever. Expand the
+        # acquisition to the full PR while preserving finding identities,
+        # dispositions, and replies: rewritten commits do not reset a review.
         # Transient compare failures (timeouts, 5xx) carry a different notice
         # and never reset: they stay a single-commit partial round and retry
         # naturally on the next push.
         print(
             "notice: history diverged from the last reviewed commit "
-            f"({ledger.reviewed_sha[:12]}); resetting to a full-PR initial review"
+            f"({ledger.reviewed_sha[:12]}); verifying the full PR with existing review history"
         )
-        env_reset = dict(env)
-        env_reset["REVIEW_MODE"] = "initial"
-        env_reset["REVIEW_SCOPE"] = "full-pr"
-        collected = _collect(env_reset)
-        return collected, LoopState(mode="initial", round_number=1), ""
+        env_full = dict(env_for_collect)
+        env_full["REVIEW_SCOPE"] = "full-pr"
+        collected = _collect(env_full)
     agent_replies = ""
     if with_replies and state.mode == "verify":
         try:

@@ -2,7 +2,8 @@
 
 latest-commit never silently falls back to the full PR diff. If the
 before...after range cannot be used, the single latest head commit is
-embedded and a visible notice is recorded.
+embedded and a visible notice is recorded. The CLI coordinator recognizes
+confirmed divergence and recollects with rebase scope and the existing ledger.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from or_pr_review.triage import (
     plan_packing,
 )
 
-ScopeName = Literal["full-pr", "latest-commit"]
+ScopeName = Literal["full-pr", "latest-commit", "rebase"]
 ReviewMode = Literal["auto", "initial", "verify"]
 ResolvedMode = Literal["initial", "verify"]
 DiffKind = Literal["full-pr", "commit-range", "single-commit"]
@@ -168,9 +169,9 @@ class CollectedReview:
 
 def parse_scope(value: str) -> ScopeName:
     scope = (value or "").strip().lower()
-    if scope in {"full-pr", "latest-commit"}:
+    if scope in {"full-pr", "latest-commit", "rebase"}:
         return scope  # type: ignore[return-value]
-    raise ActionError("review_scope must be 'full-pr' or 'latest-commit'")
+    raise ActionError("review_scope must be 'full-pr', 'latest-commit', or 'rebase'")
 
 
 def parse_mode(value: str) -> ReviewMode:
@@ -219,7 +220,7 @@ def plan_diff(
     before = normalize_sha(before_sha)
     base = normalize_sha(base_sha)
 
-    if scope == "full-pr":
+    if scope in {"full-pr", "rebase"}:
         return DiffPlan(
             scope=scope,
             kind="full-pr",
@@ -340,7 +341,7 @@ def fetch_scoped_diff(pr_number: int, plan: DiffPlan, source: ReviewSource) -> t
             return source.compare_diff(plan.from_sha, plan.to_sha), plan
         except DivergedRangeError:
             # Only a genuine non-fast-forward carries the diverged notice;
-            # the review loop keys its reset on it.
+            # the review loop expands it to a rebase review with history.
             notice = DIVERGED_NOTICE
         except ActionError:
             notice = COMPARE_FAILED_NOTICE
@@ -384,7 +385,7 @@ def collect_review(
     pr = source.pr_view(pr_number)
     policy_base_sha = normalize_sha(_as_str(pr.get("baseRefOid"))) or ""
     head_from_pr = head_sha_from_pr(pr)
-    if scope == "full-pr":
+    if scope in {"full-pr", "rebase"}:
         plan = plan_diff(
             scope=scope,
             before_sha=None,
@@ -404,13 +405,15 @@ def collect_review(
         )
 
     raw, plan = fetch_scoped_diff(pr_number, plan, source)
-    if scope == "full-pr":
+    if scope in {"full-pr", "rebase"}:
         confirmed = source.pr_view(pr_number)
         confirmed_head = head_sha_from_pr(confirmed)
         if confirmed_head is None:
             raise ActionError("PR head SHA is missing from the PR metadata; retry the review")
         if plan.to_sha and confirmed_head != plan.to_sha:
             raise ActionError("PR head changed while collecting the full-PR diff; retry the review")
+        if (normalize_sha(_as_str(confirmed.get("baseRefOid"))) or "") != policy_base_sha:
+            raise ActionError("PR base changed while collecting the full-PR diff; retry the review")
         pr = confirmed
         head_from_pr = confirmed_head
 

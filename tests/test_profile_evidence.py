@@ -120,7 +120,7 @@ def published_pair(**changes):
     receipt_dict = payload(**changes)
     review_collected = collected(
         scope=receipt_dict["scope"],
-        kind="full-pr" if receipt_dict["scope"] == "full-pr" else "commit-range",
+        kind="full-pr" if receipt_dict["scope"] in {"full-pr", "rebase"} else "commit-range",
         mode=receipt_dict["mode"],
     )
     body_text = render_body(receipt_dict, review_collected)
@@ -132,6 +132,22 @@ def test_receipt_marker_and_fixed_header_round_trip():
     body_text, canonical, receipt = published_pair()
     assert parse_review_receipt(body_text, canonical) == receipt
     assert receipt_digest(receipt) != receipt_digest(parse_receipt(artifact(profile="docs")))
+
+
+@pytest.mark.parametrize("level", ["standard", "deep"])
+def test_rebase_receipt_requires_full_diff_and_verify_mode(level):
+    trigger = "manual" if level == "deep" else "baseline"
+    body, canonical, receipt = published_pair(
+        scope="rebase", mode="verify", level=level, trigger=trigger
+    )
+    assert parse_review_receipt(body, canonical) == receipt
+    assert "**Scope:** `rebase` (full-pr)" in body
+    with pytest.raises(SchemaError):
+        parse_review_receipt(
+            body.replace("`rebase` (full-pr)", "`rebase` (single-commit)"), canonical
+        )
+    with pytest.raises(SchemaError):
+        parse_receipt(artifact(scope="rebase", mode="initial", level=level, trigger=trigger))
 
 
 def test_rendered_initial_clean_verify_partial_and_deep_full_pr():

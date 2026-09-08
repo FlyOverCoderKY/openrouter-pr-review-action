@@ -159,8 +159,9 @@ inputs:
     default: ""
   review_scope:
     description: >-
-      Diff to embed: full-pr or latest-commit. latest-commit never silently
-      falls back to the full PR diff. Initial rounds require full-pr.
+      Diff to embed: full-pr, latest-commit, or rebase. Rebase reviews the whole
+      PR with history and requires an existing ledger. Divergent latest-commit
+      history automatically selects rebase; transient compare errors stay partial.
     required: false
     default: "full-pr"
   review_mode:

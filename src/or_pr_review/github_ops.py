@@ -222,6 +222,27 @@ class GitHub:
             replies.append((finding_id, _comment_login(comment), body))
         return replies
 
+    def list_rebase_replies(self, number: int, bot_login: str) -> list[tuple[str, str, str]]:
+        """Replies across generations, anchored to actual bot-authored findings."""
+        comments = self._paginated_list(
+            f"repos/{self.repository}/pulls/{number}/comments", "review comments"
+        )
+        roots: dict[int, str] = {}
+        for comment in comments:
+            body, ident = comment.get("body"), comment.get("id")
+            if _comment_login(comment) != bot_login or not isinstance(ident, int):
+                continue
+            match = FINDING_MARKER_RE.search(body) if isinstance(body, str) else None
+            if match:
+                roots[ident] = f"{match.group(1)}/{match.group(2)}"
+        return [
+            (roots[comment["in_reply_to_id"]], _comment_login(comment), comment["body"])
+            for comment in comments
+            if isinstance(comment.get("in_reply_to_id"), int)
+            and comment["in_reply_to_id"] in roots
+            and isinstance(comment.get("body"), str)
+        ]
+
     def list_recent_issue_comments(self, number: int, limit: int = 30) -> list[tuple[str, str]]:
         """(login, body) for the newest PR conversation comments, oldest first."""
         comments = self._paginated_list(

@@ -51,6 +51,7 @@ from or_pr_review.loop import (
     latest_ledger,
     merge_resolutions,
     render_agent_context,
+    render_rebase_context,
     round_report,
 )
 from or_pr_review.merge import MergedIssue, issues_from_single_lane
@@ -456,7 +457,9 @@ def _prepare_execution(env: dict[str, str]) -> dict[str, Any]:
     started_ms = int(time.time() * 1000)
     _validate_inputs(env, full_roster=True)
     collect_env = dict(env)
-    if (env.get("REVIEW_LEVEL") or "auto").strip().lower() == "deep":
+    if (env.get("REVIEW_LEVEL") or "auto").strip().lower() == "deep" and parse_scope(
+        env.get("REVIEW_SCOPE") or "full-pr"
+    ) != "rebase":
         # A manually deep review is exhaustive from the outset; preserve the
         # requested/auto loop mode instead of resetting it to initial.
         collect_env["REVIEW_SCOPE"] = "full-pr"
@@ -804,7 +807,7 @@ def _role_all(env: dict[str, str]) -> int:
     workspace = _prepare_workspace(env, collected, work)
     messages = _messages(env, collected, state, agent_replies)
     expect_coverage, expected_paths = _coverage_expectations(state, collected)
-    expected_ids = _expected_resolution_ids(state)
+    expected_ids = _expected_resolution_ids(state, collected)
     remaining = _remaining_job_seconds(env)
     lane_timeout, judge_reserve = _lane_budget(
         remaining,
@@ -882,7 +885,12 @@ def _run_prepared_lane(
             )
             coverage, paths = _coverage_expectations(context.loop, context.collected)
             inputs = PreparedLaneInputs(
-                frozen, workspace, messages, coverage, paths, _expected_resolution_ids(context.loop)
+                frozen,
+                workspace,
+                messages,
+                coverage,
+                paths,
+                _expected_resolution_ids(context.loop, context.collected),
             )
         # Workspace materialization can consume the last usable time.  Check
         # after it completes, before looking up the paid-provider key.
@@ -990,7 +998,7 @@ def _role_all_prepared(env: dict[str, str]) -> int:
         _messages(frozen, context.collected, context.loop, context.execution.agent_replies),
         coverage,
         expected_paths,
-        _expected_resolution_ids(context.loop),
+        _expected_resolution_ids(context.loop, context.collected),
     )
     plan = context.execution.plan
     _maybe_status(
@@ -1165,7 +1173,7 @@ def _run_one_lane(env: dict[str, str], model: str) -> tuple[LaneResult, Collecte
         expect_coverage=expect_coverage,
         expect_resolutions=state.mode == "verify",
         expected_paths=expected_paths,
-        expected_resolution_ids=_expected_resolution_ids(state),
+        expected_resolution_ids=_expected_resolution_ids(state, collected),
         lane_timeout=lane_timeout,
     )
     result.head_sha = collected.head_sha
@@ -1247,11 +1255,18 @@ def _coverage_expectations(
     return True, paths
 
 
-def _expected_resolution_ids(state: LoopState) -> set[str] | None:
+def _expected_resolution_ids(
+    state: LoopState, collected: CollectedReview | None = None
+) -> set[str] | None:
     """Prior finding ids a verify lane must explicitly resolve."""
     if state.mode != "verify":
         return None
-    return {finding.id for finding in state.open_prior}
+    findings = (
+        state.prior_findings
+        if collected is not None and collected.plan.scope == "rebase"
+        else state.open_prior
+    )
+    return {finding.id for finding in findings}
 
 
 def _lane_budget(
@@ -1318,9 +1333,13 @@ def _resolve_loop(
     mode, round_number = decide_loop_state(
         review_mode=mode_input, event_action=event_action, ledger=ledger
     )
+    if scope == "rebase" and (mode != "verify" or ledger is None):
+        raise ActionError("rebase scope requires an existing ledger and auto or verify mode")
     prior = ledger.findings if ledger is not None and mode == "verify" else ()
     generation = ledger.generation if ledger is not None and mode == "verify" else ""
-    prior, retired = apply_severity_floor(prior, round_number if mode == "verify" else 1)
+    prior, retired = apply_severity_floor(
+        prior, round_number if mode == "verify" and scope != "rebase" else 1
+    )
     return ledger, LoopState(
         mode=mode,
         round_number=round_number,
@@ -1360,12 +1379,32 @@ def _collect_with_loop(
         # naturally on the next push.
         print(
             "notice: history diverged from the last reviewed commit "
-            f"({ledger.reviewed_sha[:12]}); verifying the full PR with existing review history"
+            f"({ledger.reviewed_sha[:12]}); collecting a rebase review with existing history"
         )
         env_full = dict(env_for_collect)
-        env_full["REVIEW_SCOPE"] = "full-pr"
-        collected = _collect(env_full)
+        env_full.update(
+            REVIEW_SCOPE="rebase", HEAD_SHA=collected.head_sha, EVENT_AFTER=collected.head_sha
+        )
+        full = _collect(env_full)
+        if full.head_sha != collected.head_sha or full.policy_base_sha != collected.policy_base_sha:
+            raise ActionError(
+                "head/base changed while acquiring the rebase diff; retry this review"
+            )
+        collected = full
+        state = replace(state, prior_findings=ledger.findings, retired_prior=())
     agent_replies = ""
+    if collected.plan.scope == "rebase" and with_replies:
+        bodies = github.list_bot_review_bodies(pr_number, _bot_login(env))
+        if latest_ledger(bodies, repo=env["GITHUB_REPOSITORY"], pr_number=pr_number) != ledger:
+            raise ActionError("review history changed while acquiring rebase context; retry")
+        # History is part of this review's contract. A failed history read must
+        # not silently downgrade a rebase into a review without its rebuttals.
+        agent_replies = render_rebase_context(
+            bodies,
+            github.list_rebase_replies(pr_number, _bot_login(env)),
+            github.list_recent_issue_comments(pr_number),
+        )
+        return collected, state, agent_replies
     if with_replies and state.mode == "verify":
         try:
             # Replies to findings the severity floor retired would reintroduce
@@ -1602,9 +1641,11 @@ def _finish(
     if _checkout_has_commit(finish_root, reviewed_sha):
         issues = sanitize_anchors(issues, finish_root)  # type: ignore[arg-type]
 
-    prior_ids = {finding.id for finding in loop.open_prior}
+    prior_ids = _expected_resolution_ids(loop, collected) or set()
     resolutions = merge_resolutions([lane.resolutions for lane in successful], prior_ids)
-    outcome = apply_round(loop, issues, resolutions)
+    outcome = apply_round(
+        loop, issues, resolutions, reassess_disputes=collected.plan.scope == "rebase"
+    )
     issues = outcome.issues
 
     github = _github(env)

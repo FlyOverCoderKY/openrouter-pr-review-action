@@ -1643,6 +1643,9 @@ class _LoopGitHub:
     def list_recent_issue_comments(self, number: int, limit: int = 30) -> list[tuple[str, str]]:
         return []
 
+    def list_rebase_replies(self, number: int, bot_login: str) -> list[tuple[str, str, str]]:
+        return [("1234567890ab/r1-1", "dev", "added the check in abc123")]
+
     def pr_view(self, number: int) -> dict[str, object]:
         return {"headRefOid": "a" * 40}
 
@@ -2099,6 +2102,11 @@ def test_force_push_preserves_history_in_full_pr_verification(
         return [("r1-1", "dev", "added the check in abc123")]
 
     monkeypatch.setattr(github, "list_finding_replies", finding_replies)
+    monkeypatch.setattr(
+        github,
+        "list_rebase_replies",
+        lambda number, bot_login: finding_replies(number, generation=prior.generation),
+    )
     collected_calls: list[dict[str, str]] = []
 
     def fake_collect(env: dict[str, str]) -> CollectedReview:
@@ -2116,7 +2124,7 @@ def test_force_push_preserves_history_in_full_pr_verification(
                 Truncation("diff", False, 4, 4, 300),
                 "verify",
             )
-        plan = DiffPlan("full-pr", "full-pr", None, "a" * 40, None)
+        plan = DiffPlan(env["REVIEW_SCOPE"], "full-pr", None, "a" * 40, None)
         return CollectedReview(
             1,
             "t",
@@ -2158,7 +2166,8 @@ def test_force_push_preserves_history_in_full_pr_verification(
     assert len(collected_calls) == 2
     assert collected_calls[0]["EVENT_BEFORE"] == "b" * 40  # continuity attempted
     assert collected_calls[1]["REVIEW_MODE"] == "verify"
-    assert collected_calls[1]["REVIEW_SCOPE"] == "full-pr"
+    assert collected_calls[1]["REVIEW_SCOPE"] == "rebase"
+    assert collected.plan.scope == "rebase"
 
 
 def test_transient_compare_failure_does_not_reset_the_loop(

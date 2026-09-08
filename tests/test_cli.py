@@ -1273,10 +1273,11 @@ def test_judge_gets_one_bounded_window_and_preserves_publication(
         cli_mod._JOB_DEADLINE_KEY: str(100 + 180 + 5 + 60),
     }
     assert cli_mod._judge_request_timeout(env) == 60
-    env[cli_mod._JOB_DEADLINE_KEY] = str(100 + 180 + 5 + 12)
-    assert cli_mod._judge_request_timeout(env) == 12
-    env[cli_mod._JOB_DEADLINE_KEY] = str(100 + 180 + 5)
-    assert cli_mod._judge_request_timeout(env) is None
+    for usable in (0, 1, 12, 14):
+        env[cli_mod._JOB_DEADLINE_KEY] = str(100 + 180 + 5 + usable)
+        assert cli_mod._judge_request_timeout(env) is None
+    env[cli_mod._JOB_DEADLINE_KEY] = str(100 + 180 + 5 + 15)
+    assert cli_mod._judge_request_timeout(env) == 15
 
 
 def test_reviewers_keep_most_of_the_shared_job_budget() -> None:
@@ -1292,8 +1293,10 @@ def test_reviewers_keep_most_of_the_shared_job_budget() -> None:
     assert lane_seconds + reserve == 1320
 
 
+@pytest.mark.parametrize("role", ["all", "judge"])
 def test_judge_retries_share_deadline_and_preserve_completed_lane_findings(
     monkeypatch: pytest.MonkeyPatch,
+    role: str,
 ) -> None:
     import io
     import urllib.error
@@ -1322,6 +1325,11 @@ def test_judge_retries_share_deadline_and_preserve_completed_lane_findings(
                 "busy",
                 headers,
                 io.BytesIO(b'{"error":{"message":"busy"}}'),
+            )
+        if role == "judge":
+            now[0] += 75  # A dedicated judge can finish beyond the shared-job cap.
+            return io.BytesIO(
+                json.dumps({"choices": [{"message": {"content": '{"issues": []}'}}]}).encode()
             )
         now[0] += timeout
         raise TimeoutError("response never completed")
@@ -1356,16 +1364,35 @@ def test_judge_retries_share_deadline_and_preserve_completed_lane_findings(
         "MODELS": "fast/model,slow/model",
         "OPENROUTER_API_KEY": "test-key",
         "OPENROUTER_TIMEOUT_SECONDS": "180",
-        cli_mod._JOB_DEADLINE_KEY: "345",
+        "ROLE": role,
+        cli_mod._JOB_DEADLINE_KEY: "345" if role == "all" else "1420",
     }
     outcome = cli_mod._resolve_issues(env, [lane.model for lane in lanes], lanes, lanes)
-    assert attempts == [60, 57]
-    assert now[0] == 160
-    assert float(env[cli_mod._JOB_DEADLINE_KEY]) - now[0] == 185
+    assert attempts == ([60, 57] if role == "all" else [180, 180])
+    assert now[0] == (160 if role == "all" else 178)
+    assert float(env[cli_mod._JOB_DEADLINE_KEY]) - now[0] >= 185
     issues, note, _cost, ran = outcome
     assert {issue.title for issue in issues} == {"Bug 0", "Bug 1"}
-    assert "transport fallback: deterministic union" in note
+    if role == "all":
+        assert "transport fallback: deterministic union" in note
+    else:
+        assert "transport fallback" not in note
     assert ran is True
+
+
+def test_main_uses_argument_role_for_judge_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_pr_review import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.time, "monotonic", lambda: 100.0)
+    seen = []
+
+    def judge_role(env: dict[str, str]) -> int:
+        seen.append((env["ROLE"], cli_mod._judge_request_timeout(env)))
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_role_judge", judge_role)
+    assert main(["judge"], {"ROLE": "all"}) == 0
+    assert seen == [("judge", 180)]
 
 
 def test_prepare_workspace_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

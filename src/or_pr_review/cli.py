@@ -114,6 +114,7 @@ JOB_BUDGET_SECONDS = 22 * 60
 POST_RESERVE_SECONDS = 3 * 60
 JUDGE_SCHEDULING_MARGIN_SECONDS = 5
 JUDGE_BUDGET_SECONDS = 60
+MIN_JUDGE_WINDOW_SECONDS = 15
 LANE_COLLECTION_GRACE_SECONDS = 5
 DEFAULT_BOT_LOGIN = "github-actions[bot]"
 _JOB_DEADLINE_KEY = "_OR_PR_REVIEW_JOB_DEADLINE_MONOTONIC"
@@ -181,6 +182,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     args = list(sys.argv[1:] if argv is None else argv)
     environ = dict(env) if env is not None else dict(os.environ)
     role = (args[0] if args else environ.get("ROLE") or "all").strip().lower()
+    environ["ROLE"] = role
     _ACTIVE_ENV = environ
     try:
         if role == "policy":
@@ -695,7 +697,7 @@ def _resolve_issues(
             diagnostics,
         )
     # One absolute boundary includes retries and policy/payload preparation.
-    judge_deadline = time.monotonic() + judge_timeout
+    judge_deadline = _judge_deadline(env, judge_timeout)
     key = require_openrouter_key(env)
     print(
         f"judge running with `{judge_model}` (reasoning effort=minimal, "
@@ -1263,7 +1265,7 @@ def _lane_budget(
     judge_reserve = 0
     if shares_job_with_judge and judge_needed:
         # Reviewers produce the evidence. The tool-free judge gets one bounded
-        # window shared by all retries, then we publish the validated union.
+        # window shared by all retries; timeout falls back to the validated union.
         judge_reserve = (
             POST_RESERVE_SECONDS + JUDGE_BUDGET_SECONDS + JUDGE_SCHEDULING_MARGIN_SECONDS
         )
@@ -2118,15 +2120,27 @@ def _remaining_job_seconds(env: dict[str, str]) -> float | None:
 
 
 def _judge_request_timeout(env: dict[str, str]) -> int | None:
-    """Allow one judge window without borrowing publication time or starving lanes."""
+    """Skip impractical windows; only shared jobs cap the judge at one minute."""
     configured = _int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180)
+    window = configured if env.get("ROLE") == "judge" else min(configured, JUDGE_BUDGET_SECONDS)
+    remaining = _remaining_job_seconds(env)
+    if remaining is not None:
+        usable = int(remaining - POST_RESERVE_SECONDS - JUDGE_SCHEDULING_MARGIN_SECONDS)
+        window = min(window, usable)
+    return window if window >= MIN_JUDGE_WINDOW_SECONDS else None
+
+
+def _judge_deadline(env: dict[str, str], timeout: int) -> float | None:
+    if env.get("ROLE") != "judge":
+        return time.monotonic() + timeout
+    # A dedicated matrix judge does not compete with reviewers. Keep its
+    # configured per-attempt timeout and bound retries by its own job deadline.
     remaining = _remaining_job_seconds(env)
     if remaining is None:
-        return min(configured, JUDGE_BUDGET_SECONDS)
-    usable = int(remaining - POST_RESERVE_SECONDS - JUDGE_SCHEDULING_MARGIN_SECONDS)
-    if usable < 1:
         return None
-    return min(configured, JUDGE_BUDGET_SECONDS, usable)
+    return time.monotonic() + max(
+        0.0, remaining - POST_RESERVE_SECONDS - JUDGE_SCHEDULING_MARGIN_SECONDS
+    )
 
 
 def _github(env: dict[str, str]) -> GitHub:

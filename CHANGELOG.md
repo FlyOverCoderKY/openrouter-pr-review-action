@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Give reviewers priority in shared `role: all` jobs: reserve one 60-second
+  judge window instead of budgeting every possible judge retry in advance.
+  Keep the publication allowance and preserve validated lane findings through
+  deterministic union fallback if judging fails. Skip judge calls with less
+  than 15 seconds available. Dedicated matrix judge jobs retain their configured
+  per-attempt timeout and share their own job deadline across retries.
+
 - Add trusted review profiles with version-1 registries, prepared matrix
   execution, and publication context v3. Freeze PR head, policy, replies, model
   plan, and absolute deadline across setup, lane, judge, and all roles. Support

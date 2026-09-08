@@ -544,6 +544,7 @@ def run_llm_judge(
     lanes: list[dict[str, Any]],
     api_key: str,
     timeout: int = 180,
+    deadline: float | None = None,
     chat: ChatFn | None = None,
     provider_data_collection: str | None = None,
     provider_zdr: bool = False,
@@ -571,7 +572,9 @@ def run_llm_judge(
 
     annotated_lanes, input_ids = _annotated_lanes(lanes)
     allowed = [str(lane.get("model")) for lane in lanes if isinstance(lane.get("model"), str)]
-    send = chat or (lambda payload: openrouter_chat(api_key, payload, timeout=timeout))
+    send = chat or (
+        lambda payload: openrouter_chat(api_key, payload, timeout=timeout, deadline=deadline)
+    )
     try:
         payload, _protocol = base_chat_payload(
             model=model,

@@ -12,7 +12,8 @@ inputs:
   role:
     description: >-
       all (default: collect, run lanes, judge when time and lane count permit,
-      then post) | setup (parse models into a matrix) | lane (one model) |
+      then post) | setup (prepare a shared review snapshot and matrix when
+      policy/profiles are enabled; otherwise parse models) | lane (one model) |
       judge (merge artifacts and post).
     required: false
     default: "all"
@@ -22,7 +23,7 @@ inputs:
       (hard-capped at 4). Default is today's Grok 4.6 slug on OpenRouter.
       One model = one lane; the judge is skipped unless judge_needed is true.
     required: false
-    default: "x-ai/grok-4.6"
+    default: ""
   model_routes:
     description: >-
       Trusted JSON object keyed by exact review model slug, each with optional
@@ -37,7 +38,7 @@ inputs:
       Used whenever judging is enabled. Default is openai/gpt-5.6-luna. See
       README for the measured selection rationale.
     required: false
-    default: "openai/gpt-5.6-luna"
+    default: ""
   judge_needed:
     description: >-
       true enables the judge and forces it for one configured lane; false skips
@@ -88,10 +89,50 @@ inputs:
   review_policy:
     description: >-
       off (default) or base: load bounded hierarchical REVIEW.md guidance from
-      the immutable PR target-branch commit. Requires role=all and full-depth
-      source checkout. PR policy edits cannot govern their own review.
+      the immutable PR target-branch commit. Requires a full-depth source
+      checkout. Matrix roles consume a snapshot prepared by setup.
+      PR policy edits cannot govern their own review.
     required: false
     default: "off"
+  review_profiles:
+    description: >-
+      Trusted version-1 JSON registry of named standard/deep panels with models,
+      required lanes, judge, reasoning effort, and bounded tool/time limits.
+      Maximum 8 profiles, 4 lanes per panel, and 32 KiB. Do not combine with
+      models, judge_model, judge_needed, or effort; never interpolate PR content.
+    required: false
+    default: ""
+  review_level:
+    description: >-
+      auto (default) follows target-branch policy; deep raises the requested
+      level and reviews the full PR while retaining the existing ledger.
+      Deep requires a configured deep panel. This input does not grant merge authority.
+    required: false
+    default: "auto"
+  lane_timeout_seconds:
+    description: >-
+      Hard per-lane ceiling in seconds for prepared profiles (1-1800).
+      Selected profiles must fit this ceiling and the total job budget.
+    required: false
+    default: "1080"
+  review_context_file:
+    description: >-
+      Setup snapshot path for prepared all/lane/judge roles.
+      Use only the context artifact from this workflow run and attempt.
+    required: false
+    default: ""
+  review_context_output_file:
+    description: >-
+      Optional setup snapshot destination outside this action's temporary
+      directory, for reuse by later steps in the same trusted job.
+    required: false
+    default: ""
+  review_context_sha256:
+    description: >-
+      Expected snapshot digest from the trusted setup job output. Required
+      with review_context_file; a digest is not a substitute for trusted artifact provenance.
+    required: false
+    default: ""
   status_comments:
     description: "Post/update a live status comment on the PR."
     required: false
@@ -180,6 +221,36 @@ inputs:
     default: ""
 
 outputs:
+  review_profile:
+    description: "Resolved named review profile for prepared execution."
+    value: ${{ steps.run.outputs.review_profile }}
+  review_level:
+    description: "Resolved standard or deep review level."
+    value: ${{ steps.run.outputs.review_level }}
+  review_trigger:
+    description: "Why this level was selected: baseline, policy, or manual."
+    value: ${{ steps.run.outputs.review_trigger }}
+  registry_digest:
+    description: "Identity of the trusted profile registry and model routes."
+    value: ${{ steps.run.outputs.registry_digest }}
+  profile_satisfied:
+    description: "true only when the prepared review satisfies its required reviewers and runtime constraints."
+    value: ${{ steps.run.outputs.profile_satisfied }}
+  panel_status:
+    description: "Prepared panel outcome: complete, degraded, required_missing, or error."
+    value: ${{ steps.run.outputs.panel_status }}
+  review_context_sha256:
+    description: "Expected digest for the shared setup snapshot."
+    value: ${{ steps.run.outputs.review_context_sha256 }}
+  review_context_artifact:
+    description: "Artifact containing the prepared review context for this run and attempt."
+    value: ${{ steps.run.outputs.review_context_file != '' && format('openrouter-review-context-{0}-{1}', github.run_id, github.run_attempt) || '' }}
+  review_receipt_artifact:
+    description: "Artifact containing the canonical prepared review receipt from this run and attempt."
+    value: ${{ steps.run.outputs.review_receipt_file != '' && format('openrouter-review-receipt-{0}-{1}', github.run_id, github.run_attempt) || '' }}
+  head_sha:
+    description: "Immutable reviewed head resolved by setup."
+    value: ${{ steps.run.outputs.head_sha }}
   policy_digest:
     description: "SHA-256 of the effective repository review guidance, when enabled."
     value: ${{ steps.run.outputs.policy_digest }}
@@ -256,6 +327,12 @@ runs:
         CUSTOM_INSTRUCTIONS: ${{ inputs.custom_instructions }}
         PATH_PROFILES: ${{ inputs.path_profiles }}
         REVIEW_POLICY: ${{ inputs.review_policy }}
+        REVIEW_PROFILES: ${{ inputs.review_profiles }}
+        REVIEW_LEVEL: ${{ inputs.review_level }}
+        LANE_TIMEOUT_SECONDS: ${{ inputs.lane_timeout_seconds }}
+        REVIEW_CONTEXT_FILE: ${{ inputs.review_context_file }}
+        REVIEW_CONTEXT_OUTPUT_FILE: ${{ inputs.review_context_output_file }}
+        REVIEW_CONTEXT_SHA256: ${{ inputs.review_context_sha256 }}
         GENERATED_PATHS: ${{ inputs.generated_paths }}
         STATUS_COMMENTS: ${{ inputs.status_comments }}
         MAX_DIFF_KB: ${{ inputs.max_diff_kb }}
@@ -282,6 +359,24 @@ runs:
       # -P prevents the untrusted reviewed checkout from shadowing the action's
       # Python package ahead of the trusted PYTHONPATH entry above.
       run: python3 -P -u -m or_pr_review
+
+    - name: Preserve prepared review context
+      if: ${{ always() && steps.run.outputs.review_context_file != '' && (inputs.role == 'setup' || (inputs.role == 'all' && inputs.review_context_file == '')) }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: openrouter-review-context-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ steps.run.outputs.review_context_file }}
+        if-no-files-found: error
+        retention-days: 30
+
+    - name: Preserve prepared review receipt
+      if: ${{ always() && steps.run.outputs.review_receipt_file != '' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: openrouter-review-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ steps.run.outputs.review_receipt_file }}
+        if-no-files-found: error
+        retention-days: 30
 
     - name: Preserve completed all-role lanes
       if: ${{ always() && inputs.role == 'all' }}

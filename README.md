@@ -4,7 +4,7 @@ An MIT-licensed GitHub Action that reviews pull requests using one or more model
 
 Author: **Nathan (FlyOverCoderKY) / RetireGolden, LLC**.
 
-**Start here:** [Setup](#setup) · [Choose models](#choosing-models) · [Repository guidance](#repository-review-guidance) · [Copy-paste workflow](#copy-paste-one-lane-grok-via-openrouter) · [Agentic loops and merge gates](#agentic-loops-and-merge-gates) · [Troubleshooting](#troubleshooting) · [Inputs](#inputs)
+**Start here:** [Setup](#setup) · [Choose models](#choosing-models) · [Repository guidance](#repository-review-guidance) · [Trusted profiles](docs/review-profiles.md) · [Copy-paste workflow](#copy-paste-one-lane-grok-via-openrouter) · [Agentic loops and merge gates](#agentic-loops-and-merge-gates) · [Troubleshooting](#troubleshooting) · [Inputs](#inputs)
 
 ## Setup
 
@@ -113,9 +113,9 @@ commit and effective-policy digest. All lanes and the merge judge receive the
 same frozen guidance, including during verification rounds.
 
 See [the policy reference](docs/review-policy.md) for hierarchy, metadata,
-validation limits, local previews, privacy, and troubleshooting. Models remain
-selected by workflow inputs in this guidance-only release; automatic escalation
-and on-demand extra reviewers are not yet enabled.
+validation limits, local previews, privacy, and troubleshooting. For named
+standard/deep panels, bounds, prepared matrix artifacts, and the authorization
+boundary, read [trusted review profiles](docs/review-profiles.md).
 
 When asking a coding agent to install this feature, add: “Read the policy
 reference at the pinned action revision. Enable target-branch REVIEW.md guidance
@@ -123,6 +123,63 @@ for both all-role review steps, write concise contracts verified against local
 sources, and run local lint and explain without model calls. Preserve existing
 CI, model settings, and the findings ledger. Verify the receipt on the next
 normal PR after the guidance lands.”
+
+### Copyable all-role profile workflow
+
+Use this for a manually requested deep review. Resolve and pin
+`REVIEWED_PROFILE_COMMIT` to a reviewed action revision that contains the
+`review_profiles` input; do not point at an old tag and assume the feature is
+there. The handler that authorizes a deep request is a separate integration.
+
+```yaml
+name: OpenRouter profile review
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: number
+      review_level:
+        required: true
+        type: choice
+        options: [auto, deep]
+        default: deep
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Resolve PR head
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "head_sha=$(gh pr view '${{ inputs.pr_number }}' --json headRefOid --jq .headRefOid)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: FlyOverCoderKY/openrouter-pr-review-action@REVIEWED_PROFILE_COMMIT
+        with:
+          github_token: ${{ github.token }}
+          pr_number: ${{ inputs.pr_number }}
+          review_level: ${{ inputs.review_level }}
+          review_profiles: ${{ vars.REVIEW_PROFILES_JSON }}
+          review_scope: full-pr
+          review_mode: auto
+          fail_on: never
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+Replace the checkout `ref` with the resolved PR head SHA in the workflow that
+you install; the PR number must never accidentally select the default branch.
+Keep full history and do not execute checked-out PR code. A profile run emits
+the resolved profile, level, trigger, registry digest, panel status, context
+digest/artifact, satisfaction flag, and reviewed head SHA.
 
 ## Auth
 
@@ -395,17 +452,9 @@ also paginate `pulls/NUMBER/comments` and `issues/NUMBER/comments`.
 
 ## Inputs
 
-To run a Flex lane alongside normally routed models, set `models` to include
-`openai/gpt-6-astra` and use this trusted workflow configuration:
-
-```yaml
-model_routes: '{"openai/gpt-6-astra":{"provider":"openai/flex","service_tier":"flex"}}'
-```
-
-This pins Astra to OpenAI Flex without provider fallbacks. The other review
-lanes and merge judge keep their existing routing. Flex can have lower availability;
-the review reports whether the requested tier was confirmed on every response.
-Account data policies still apply; a route pin does not override them.
+`model_routes` is optional trusted configuration keyed by exact model slugs. It
+is separate from the profile registry; use only provider identifiers verified
+for your account and action revision.
 
 | Input | Default | Notes |
 | --- | --- | --- |
@@ -423,7 +472,13 @@ Account data policies still apply; a route pin does not override them.
 | `roast_level` | `professional` | `professional` \| `playful`. |
 | `custom_instructions` | _empty_ | Extra prompt text, max 16,000 UTF-8 bytes. Never put secrets here. |
 | `path_profiles` | _empty_ | Caller-owned additive review profiles: JSON `[{name?, paths: [globs], instructions}]`, applied only when a changed path matches (`*`/`?` stay within a path segment, `**` crosses). Sharpen attention; never narrow the review. Trusted workflow config only — never interpolate PR content, never put secrets here. Max 20 profiles and 16,000 UTF-8 bytes. |
-| `review_policy` | `off` | `base` loads hierarchical target-branch `REVIEW.md` guidance. Requires `role: all` and full-depth source checkout. Invalid policy fails before model calls. See the [reference](docs/review-policy.md). |
+| `review_policy` | `off` | `base` loads hierarchical target-branch `REVIEW.md` guidance from full-depth source checkout. Prepared matrix roles consume the setup snapshot. Invalid policy fails before model calls. See the [reference](docs/review-policy.md). |
+| `review_profiles` | _empty_ | Version-1 trusted named standard/deep registry. Maximum 32 KiB, 8 profiles, 4 lanes per panel. Cannot combine with `models`, `judge_model`, `judge_needed`, or `effort`. See [trusted review profiles](docs/review-profiles.md). |
+| `review_level` | `auto` | `auto` follows policy; `deep` raises the request and requires a deep panel. Retains the ledger; does not grant merge authority. |
+| `lane_timeout_seconds` | `1080` | Caller ceiling for prepared profile lanes (1–1800 seconds). The selected profile must fit it and the job budget. |
+| `review_context_file` | _empty_ | Setup snapshot path for prepared matrix lane/judge roles; use only the same workflow run/attempt artifact. |
+| `review_context_sha256` | _empty_ | Expected setup snapshot digest; required with `review_context_file` and not a substitute for artifact provenance. |
+| `review_context_output_file` | _empty_ | Optional destination path for `role=setup` to write `review-context.json` (parent directories are created). Use this when an external orchestrator needs the snapshot outside the action work directory. |
 | `status_comments` | `true` | Live status comment on the PR. |
 | `max_diff_kb` | `300` | Embedded diff cap. Over-budget diffs go through **diff-budget triage**: generated/vendored/lock-class files (the reviewed commit's `.gitattributes` `linguist-generated`/`linguist-vendored`, lockfile heuristics, large committed JSON snapshots, `generated_paths`) demote to stubs first, then the largest hand-written files, so hand-written hunks keep the budget. A stubbed file stays in the embedded diff (header + counts + first-hunk reference), is materialized into the inert checkout for the tools even past the normal 1 MB cap (up to 8 MB), and still requires a coverage entry — so a fully stubbed-or-embedded diff keeps its real verdict and review-loop continuity. `.gitattributes` is repository content (PR-author-controlled); honoring it only shifts packing priority — a demoted file keeps its stub, coverage obligation, and tool access, which is strictly safer than the raw byte cut it replaces (where tail files vanished entirely). Files dropped entirely, an unparseable diff's raw byte cut, or stubs with tools disabled (`max_tool_turns: 0`) ⇒ `partial`, never clean. |
 | `generated_paths` | _empty_ | Extra globs (JSON array of strings) classified as generated/vendored during diff-budget triage. Demotion only shifts packing priority — never excludes a file from review. Trusted workflow config only — never interpolate PR content. Max 8,000 UTF-8 bytes, 200 globs. |
@@ -438,6 +493,11 @@ Account data policies still apply; a route pin does not override them.
 | `head_sha` | _empty_ | Full reviewed commit SHA resolved by reusable-workflow setup. Internal lane/judge plumbing; pull-request runs use the event head by default. |
 | `bot_login` | `github-actions[bot]` | Identity the action posts reviews as. Review-loop ledger state is only trusted from this login. Change it when `github_token` is a PAT or App token. |
 | `persona` | _empty_ | **Reserved, unused in v1.** Future single-persona runs should skip the judge. |
+
+Prepared matrix consumers require `review_context_file` and `review_context_sha256`
+together. When both are supplied to `role: all`, the action loads the frozen
+setup snapshot and does not recollect policy or loop state. The digest detects
+mismatches only; it is not authenticity.
 
 ## Outputs
 
@@ -457,6 +517,16 @@ Account data policies still apply; a route pin does not override them.
 | `judge_model` | Judge slug used when judging is enabled |
 | `lane_file` | Written lane JSON (`role=lane`) |
 | `lane_ok` | `true` when `role=lane` produced a valid structured artifact |
+| `review_profile` | Resolved trusted profile name |
+| `review_level` | Resolved `standard` or `deep` level |
+| `review_trigger` | `baseline`, `policy`, or `manual` selection reason |
+| `registry_digest` | Digest of the trusted registry and exact model routes |
+| `profile_satisfied` | `true` only when required lanes and runtime constraints are satisfied |
+| `panel_status` | `complete`, `degraded`, `required_missing`, or `error` |
+| `review_context_sha256` | Digest expected by prepared matrix consumers |
+| `review_context_artifact` | Prepared context artifact from setup or all-role execution (retention 30 days) |
+| `review_receipt_artifact` | Canonical prepared review receipt artifact (retention 30 days) |
+| `head_sha` | Immutable reviewed PR head resolved by setup |
 
 ## Source evidence and incomplete output
 

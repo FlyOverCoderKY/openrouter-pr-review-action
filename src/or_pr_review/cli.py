@@ -74,6 +74,7 @@ from or_pr_review.prompt import (
     review_policy_block,
 )
 from or_pr_review.publish import (
+    canonical_receipt_json,
     decide_verdict,
     fail_on_should_fail,
     inline_review_comments,
@@ -81,7 +82,20 @@ from or_pr_review.publish import (
     render_review_parts,
 )
 from or_pr_review.redaction import redact
-from or_pr_review.review_context import freeze_context, restore_context
+from or_pr_review.review_context import (
+    FROZEN_RUNTIME_KEYS,
+    MAX_CONTEXT_BYTES,
+    PreparedExecution,
+    ReviewContext,
+    freeze_context,
+    freeze_runtime,
+    restore_context,
+)
+from or_pr_review.review_plan import (
+    ReviewPlan,
+    parse_review_profiles,
+    resolve_review_plan,
+)
 from or_pr_review.review_policy import resolve_policy
 from or_pr_review.schema import (
     MAX_COVERAGE_ENTRIES,
@@ -126,6 +140,44 @@ class JudgeOutcome:
         yield from (self.issues, self.note, self.cost, self.ran)
 
 
+@dataclass(frozen=True)
+class PreparedContext:
+    """Immutable context plus the exact envelope that lane artifacts carry."""
+
+    context: ReviewContext
+    digest: str
+    envelope: dict[str, Any]
+
+    @property
+    def repository(self) -> str:
+        return self.context.repository
+
+    @property
+    def collected(self) -> CollectedReview:
+        return self.context.collected
+
+    @property
+    def loop(self) -> LoopState:
+        return self.context.loop
+
+    @property
+    def execution(self) -> PreparedExecution:
+        assert self.context.execution is not None
+        return self.context.execution
+
+
+@dataclass(frozen=True)
+class PreparedLaneInputs:
+    """Shared, immutable all-role inputs prepared exactly once."""
+
+    frozen_env: dict[str, str]
+    workspace: Path | None
+    messages: list[dict[str, Any]]
+    expect_coverage: bool
+    expected_paths: set[str] | None
+    expected_resolution_ids: set[str] | None
+
+
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> int:
     global _ACTIVE_ENV
     args = list(sys.argv[1:] if argv is None else argv)
@@ -140,11 +192,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         policy_mode = (environ.get("REVIEW_POLICY") or "off").strip().lower()
         if policy_mode not in {"off", "base"}:
             raise ActionError("review_policy must be off or base")
-        if policy_mode == "base" and role != "all":
-            raise ActionError(
-                "review_policy=base currently requires role=all; matrix is unsupported"
-            )
-        if role in {"all", "lane", "judge"}:
+        if role in {"all", "lane", "judge"} and not _prepared_requested(environ):
             environ[_JOB_DEADLINE_KEY] = str(time.monotonic() + _job_budget_seconds(environ))
         if role == "setup":
             return _role_setup(environ)
@@ -171,7 +219,32 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         return 1
 
 
+def _validate_prepared_context_inputs(env: dict[str, str]) -> None:
+    """Reject half-supplied frozen context before any GitHub or provider work."""
+    path = (env.get("REVIEW_CONTEXT_FILE") or "").strip()
+    digest = (env.get("REVIEW_CONTEXT_SHA256") or "").strip()
+    if bool(path) ^ bool(digest):
+        raise ActionError("review_context_file and review_context_sha256 must be supplied together")
+
+
 def _role_setup(env: dict[str, str]) -> int:
+    if _prepared_requested(env):
+        _validate_prepared_context_inputs(env)
+        supplied = (env.get("REVIEW_CONTEXT_FILE") or "").strip()
+        if supplied:
+            context, restored = _load_prepared_context(env)
+        else:
+            context = _prepare_execution(env)
+            restored = restore_context(context)
+        assert restored.execution is not None
+        plan = restored.execution.plan
+        _write_prepared_outputs(context)
+        path = _write_prepared_context(env, context)
+        _set_output("review_context_file", str(path))
+        _set_output("review_context_sha256", _context_digest(context))
+        _set_output("head_sha", restored.collected.head_sha)
+        print(f"prepared {plan.profile}/{plan.level} with {len(plan.lanes)} lane(s)")
+        return 0
     slugs = _validate_inputs(env, full_roster=True)
     needed = _judge_needed(env, slugs)
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
@@ -201,6 +274,8 @@ def _write_judge_outputs(needed: bool, judge_model: str) -> None:
 
 
 def _role_lane(env: dict[str, str]) -> int:
+    if _prepared_requested(env):
+        return _role_lane_prepared(env)
     slugs = _validate_inputs(env)
     index = _int_env(env, "LANE_INDEX", 0)
     if index < 0:
@@ -230,6 +305,8 @@ def _role_lane(env: dict[str, str]) -> int:
 
 
 def _role_judge(env: dict[str, str]) -> int:
+    if _prepared_requested(env):
+        return _role_judge_prepared(env)
     expected = _validate_inputs(env)
     directory = Path(env.get("LANE_RESULTS_DIR") or "")
     if not directory.is_dir():
@@ -255,9 +332,14 @@ def _role_judge(env: dict[str, str]) -> int:
 
 
 def _validate_inputs(env: dict[str, str], *, full_roster: bool = False) -> list[str]:
+    _validate_profile_inputs(env)
     slugs = parse_models(env.get("MODELS"))
     routes = parse_model_routes(env.get("MODEL_ROUTES"))
-    if full_roster and set(routes) - set(slugs):
+    if (
+        full_roster
+        and parse_review_profiles(env.get("REVIEW_PROFILES")) is None
+        and set(routes) - set(slugs)
+    ):
         raise ActionError("model_routes keys must match configured models")
     _job_budget_seconds(env)
     _env_flag(env, "JUDGE_NEEDED", judge_is_needed(slugs))
@@ -291,9 +373,261 @@ def _validate_inputs(env: dict[str, str], *, full_roster: bool = False) -> list[
     return slugs
 
 
+def _prepared_requested(env: dict[str, str]) -> bool:
+    """Whether this invocation must consume/produce the frozen plan contract."""
+    return (
+        (env.get("REVIEW_POLICY") or "off").strip().lower() == "base"
+        or bool((env.get("REVIEW_PROFILES") or "").strip())
+        or (env.get("REVIEW_LEVEL") or "auto").strip().lower() == "deep"
+        or bool((env.get("REVIEW_CONTEXT_FILE") or "").strip())
+        or bool((env.get("REVIEW_CONTEXT_SHA256") or "").strip())
+    )
+
+
+def _validate_profile_inputs(env: dict[str, str]) -> None:
+    """Reject profile configuration mistakes before any GitHub/provider work."""
+    level = (env.get("REVIEW_LEVEL") or "auto").strip().lower()
+    if level not in {"auto", "deep"}:
+        raise ActionError("review_level must be auto or deep")
+    registry = parse_review_profiles(env.get("REVIEW_PROFILES"))
+    if registry is not None:
+        mixed = [
+            name
+            for name in ("MODELS", "JUDGE_MODEL", "EFFORT", "JUDGE_NEEDED")
+            if (env.get(name) or "").strip()
+        ]
+        if mixed:
+            raise ActionError("review_profiles cannot be mixed with " + ", ".join(mixed).lower())
+        routes = parse_model_routes(env.get("MODEL_ROUTES"))
+        available = {
+            lane.model
+            for profile in registry.profiles
+            for panel in (profile.standard, profile.deep)
+            if panel is not None
+            for lane in panel.lanes
+        }
+        unknown = set(routes) - available
+        if unknown:
+            raise ActionError("model_routes names model(s) absent from review_profiles")
+    elif level == "deep":
+        # Resolve produces the same diagnostic later; this earlier failure
+        # guarantees no collection/API activity for an impossible request.
+        raise ActionError("review_level=deep requires a configured deep review profile")
+    lane_ceiling = _int_env(env, "LANE_TIMEOUT_SECONDS", DEFAULT_LANE_TIMEOUT_SECONDS)
+    if not 1 <= lane_ceiling <= 1800:
+        raise ActionError("lane_timeout_seconds must be an integer from 1 through 1800")
+
+
 def _judge_needed(env: dict[str, str], slugs: list[str] | None = None) -> bool:
     inferred = judge_is_needed(slugs if slugs is not None else parse_models(env.get("MODELS")))
     return _env_flag(env, "JUDGE_NEEDED", inferred)
+
+
+def _context_digest(envelope: dict[str, Any]) -> str:
+    digest = envelope.get("sha256")
+    if type(digest) is not str:
+        raise SchemaError("prepared context is missing its digest")
+    return digest
+
+
+def _prepared_plan(env: dict[str, str], collected: CollectedReview, state: LoopState) -> ReviewPlan:
+    registry = parse_review_profiles(env.get("REVIEW_PROFILES"))
+    policy = collected.review_policy
+    return resolve_review_plan(
+        registry,
+        profile=policy.profile if policy is not None else "code",
+        minimum=policy.minimum if policy is not None else "standard",
+        requested_level=(env.get("REVIEW_LEVEL") or "auto").strip().lower(),
+        mode=state.mode,
+        models=parse_models(env.get("MODELS")),
+        judge_model=parse_judge_model(env.get("JUDGE_MODEL")),
+        routes=parse_model_routes(env.get("MODEL_ROUTES")),
+        effort=(env.get("EFFORT") or "").strip(),
+        max_tool_turns=parse_max_tool_turns(env.get("MAX_TOOL_TURNS")),
+        job_budget_seconds=_job_budget_seconds(env),
+        lane_timeout_seconds=_int_env(env, "LANE_TIMEOUT_SECONDS", DEFAULT_LANE_TIMEOUT_SECONDS),
+    )
+
+
+def _prepare_execution(env: dict[str, str]) -> dict[str, Any]:
+    """Collect the loop once and freeze every paid-work input for a profile run."""
+    # Setup owns the absolute clock: collection/policy resolution consumes the
+    # same finite budget as lanes and publication, never a free prelude.
+    started_ms = int(time.time() * 1000)
+    _validate_inputs(env, full_roster=True)
+    collect_env = dict(env)
+    if (env.get("REVIEW_LEVEL") or "auto").strip().lower() == "deep":
+        # A manually deep review is exhaustive from the outset; preserve the
+        # requested/auto loop mode instead of resetting it to initial.
+        collect_env["REVIEW_SCOPE"] = "full-pr"
+    collected, state, replies = _collect_with_loop(collect_env)
+    collected = _with_review_policy(env, collected, state)
+    plan = _prepared_plan(env, collected, state)
+    if plan.level == "deep" and collected.plan.kind != "full-pr":
+        # Policy escalation happens after the incremental collection.  Reuse
+        # the already-selected loop/replies, only replacing the diff under the
+        # pinned identity; this cannot silently turn a verify round into reset.
+        full_env = dict(
+            env,
+            REVIEW_MODE=state.mode,
+            REVIEW_SCOPE="full-pr",
+            HEAD_SHA=collected.head_sha,
+        )
+        full = _collect(full_env)
+        if full.head_sha != collected.head_sha or full.policy_base_sha != collected.policy_base_sha:
+            raise SchemaError(
+                "head/base identity changed while acquiring the required full-PR deep diff"
+            )
+        collected = replace(full, review_policy=collected.review_policy)
+    execution = PreparedExecution(
+        plan=plan,
+        runtime_json=freeze_runtime(env),
+        agent_replies=replies,
+        started_unix_ms=started_ms,
+        deadline_unix_ms=started_ms + plan.job_budget_seconds * 1000,
+        source_run_url=(env.get("RUN_URL") or "").strip(),
+        run_attempt=_int_env(env, "GITHUB_RUN_ATTEMPT", 1),
+    )
+    return freeze_context(
+        (env.get("GITHUB_REPOSITORY") or "").strip(),
+        collected,
+        state,
+        plan.max_tool_turns,
+        execution=execution,
+    )
+
+
+def _write_prepared_context(env: dict[str, str], context: dict[str, Any]) -> Path:
+    explicit = (env.get("REVIEW_CONTEXT_OUTPUT_FILE") or "").strip()
+    if explicit:
+        path = Path(explicit)
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        directory = Path(env.get("ALL_LANE_RESULTS_DIR") or _work_dir(env))
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "review-context.json"
+    path.write_text(
+        json.dumps(context, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def _write_prepared_outputs(context: dict[str, Any]) -> None:
+    restored = restore_context(context)
+    assert restored.execution is not None
+    plan = restored.execution.plan
+    models = [lane.model for lane in plan.lanes]
+    # Guidance-only plans are legacy plans: their explicit JUDGE_NEEDED input
+    # remains meaningful even when the plan itself has one or many lanes.
+    _write_setup_outputs(models, _prepared_judge_needed(restored), plan.judge_model)
+    _set_output(
+        "policy_digest",
+        restored.collected.review_policy.digest if restored.collected.review_policy else "",
+    )
+    _set_output("policy_base_sha", restored.collected.policy_base_sha)
+    _set_output("review_profile", plan.profile)
+    _set_output("review_level", plan.level)
+    _set_output("review_trigger", plan.trigger)
+    _set_output("registry_digest", plan.registry_digest)
+
+
+def _load_prepared_context(env: dict[str, str]) -> tuple[dict[str, Any], ReviewContext]:
+    path = (env.get("REVIEW_CONTEXT_FILE") or "").strip()
+    expected = (env.get("REVIEW_CONTEXT_SHA256") or "").strip()
+    if not path or not expected:
+        raise ActionError(
+            "prepared lane/judge requires review_context_file and review_context_sha256"
+        )
+    try:
+        envelope = _read_bounded_json(Path(path), what="prepared context")
+    except (OSError, json.JSONDecodeError, UnicodeError, RecursionError, SchemaError) as exc:
+        raise SchemaError(f"prepared context file is unreadable: {exc}") from exc
+    context = restore_context(envelope)
+    if _context_digest(envelope) != expected:
+        raise SchemaError("prepared context digest does not match review_context_sha256")
+    execution = context.execution
+    if execution is None:
+        raise SchemaError("prepared context has no execution plan")
+    supplied = {
+        "GITHUB_REPOSITORY": context.repository,
+        "PR_NUMBER": str(context.collected.pr_number),
+        "HEAD_SHA": context.collected.head_sha,
+    }
+    for key, value in supplied.items():
+        raw = (env.get(key) or "").strip()
+        actual = raw.lower() if key == "HEAD_SHA" else raw
+        if actual and actual != value:
+            raise SchemaError(f"prepared context {key.lower()} does not match this job")
+    if (env.get("RUN_URL") or "").strip() != execution.source_run_url:
+        raise SchemaError("prepared context source_run_url does not match this job")
+    if str(execution.run_attempt) != (env.get("GITHUB_RUN_ATTEMPT") or "1").strip():
+        raise SchemaError("prepared context run_attempt does not match this job")
+    return envelope, context
+
+
+def _frozen_execution_env(env: dict[str, str], context: Any) -> dict[str, str]:
+    assert context.execution is not None
+    plan = context.execution.plan
+    frozen = dict(env)
+    for key in FROZEN_RUNTIME_KEYS:
+        frozen.pop(key, None)
+    frozen.update(json.loads(context.execution.runtime_json))
+    frozen["MODELS"] = ",".join(lane.model for lane in plan.lanes)
+    frozen["JUDGE_MODEL"] = plan.judge_model
+    frozen["EFFORT"] = plan.effort
+    frozen["MAX_TOOL_TURNS"] = str(plan.max_tool_turns)
+    frozen["LANE_TIMEOUT_SECONDS"] = str(plan.lane_timeout_seconds)
+    frozen["JOB_BUDGET_SECONDS"] = str(plan.job_budget_seconds)
+    frozen["JUDGE_NEEDED"] = "true" if _prepared_judge_needed(context) else "false"
+    routes = {
+        lane.model: {
+            **({"provider": lane.provider} if lane.provider else {}),
+            **({"service_tier": lane.service_tier} if lane.service_tier else {}),
+        }
+        for lane in plan.lanes
+        if lane.provider or lane.service_tier
+    }
+    frozen["MODEL_ROUTES"] = json.dumps(routes, separators=(",", ":"))
+    remaining = max(0.0, context.execution.deadline_unix_ms / 1000 - time.time())
+    frozen[_JOB_DEADLINE_KEY] = str(time.monotonic() + remaining)
+    return frozen
+
+
+def _prepared_judge_needed(context: Any) -> bool:
+    """Use frozen explicit legacy intent, falling back to the panel shape."""
+    runtime = json.loads(context.execution.runtime_json)
+    return _env_flag(
+        {"JUDGE_NEEDED": runtime.get("JUDGE_NEEDED", "")},
+        "JUDGE_NEEDED",
+        judge_is_needed([lane.model for lane in context.execution.plan.lanes]),
+    )
+
+
+def _read_bounded_json(path: Path, *, what: str) -> Any:
+    """Read untrusted artifacts without allocating past their published cap."""
+    with path.open("rb") as handle:
+        raw = handle.read(MAX_CONTEXT_BYTES + 1)
+    if len(raw) > MAX_CONTEXT_BYTES:
+        raise SchemaError(f"{what} exceeds the 16 MiB artifact limit")
+
+    def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise SchemaError(f"{what} has duplicate key {key!r}")
+            value[key] = item
+        return value
+
+    try:
+        return json.loads(
+            raw.decode("utf-8", "strict"),
+            object_pairs_hook=no_duplicates,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+        )
+    except SchemaError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
+        raise SchemaError(f"{what} is not strict JSON") from exc
 
 
 def _resolve_issues(
@@ -433,6 +767,8 @@ def _capped_union_note(lanes: list[dict[str, Any]], note: str) -> tuple[list[Mer
 
 
 def _role_all(env: dict[str, str]) -> int:
+    if _prepared_requested(env):
+        return _role_all_prepared(env)
     slugs = _validate_inputs(env, full_roster=True)
     needed = _judge_needed(env, slugs)
     # role=all needs the matrix metadata immediately, but judge outputs are
@@ -466,6 +802,11 @@ def _role_all(env: dict[str, str]) -> int:
     lane_dir.mkdir(parents=True, exist_ok=True)
 
     deadline_seconds = _all_role_deadline_seconds(env, remaining, judge_reserve)
+    if remaining is not None:
+        deadline_seconds = min(
+            deadline_seconds,
+            max(0, int(remaining - max(POST_RESERVE_SECONDS, judge_reserve))),
+        )
     # Finish inside the collector's deadline, including explicit shorter overrides.
     # Do not extend the job or consume the judge/publication reserve.
     lane_timeout = min(
@@ -492,59 +833,286 @@ def _role_all(env: dict[str, str]) -> int:
             progress=partial(_persist_lane_progress, lane_dir, index, model),
         )
 
-    lanes: list[LaneResult] = []
-    if len(slugs) == 1:
-        lane = _one(0, slugs[0])
-        lane.head_sha = collected.head_sha
-        lane.review_context = context
-        _persist_lane_artifact(lane_dir, 0, lane)
-        lanes.append(lane)
+    def run_lane_index(index: int) -> LaneResult:
+        return _one(index, slugs[index])
+
+    lanes = _collect_bounded_lanes(
+        len(slugs),
+        run_lane_index,
+        deadline_seconds,
+        on_lane=lambda index, lane: _persist_and_log_lane(
+            lane_dir, index, slugs[index], lane, collected.head_sha, context
+        ),
+        salvage_progress=lambda index, lane: _restore_lane_progress(lane_dir, index, lane),
+        model_for_index=lambda index: slugs[index],
+    )
+    return _finish(env, lanes, collected=collected, loop=state)
+
+
+def _run_prepared_lane(
+    env: dict[str, str],
+    context: PreparedContext,
+    index: int,
+    *,
+    inputs: PreparedLaneInputs | None = None,
+    collector_deadline_monotonic: float | None = None,
+) -> LaneResult:
+    plan = context.execution.plan
+    lane_plan = plan.lanes[index]
+    frozen = inputs.frozen_env if inputs is not None else _frozen_execution_env(env, context)
+    try:
+        if inputs is None:
+            work = _work_dir(frozen)
+            workspace = _prepare_workspace(frozen, context.collected, work)
+            messages = _messages(
+                frozen, context.collected, context.loop, context.execution.agent_replies
+            )
+            coverage, paths = _coverage_expectations(context.loop, context.collected)
+            inputs = PreparedLaneInputs(
+                frozen, workspace, messages, coverage, paths, _expected_resolution_ids(context.loop)
+            )
+        # Workspace materialization can consume the last usable time.  Check
+        # after it completes, before looking up the paid-provider key.
+        remaining = _remaining_job_seconds(frozen)
+        lane_budget, _judge_reserve = _lane_budget(
+            remaining,
+            judge_needed=_prepared_judge_needed(context),
+            shares_job_with_judge=True,
+        )
+        lane_timeout = min(plan.lane_timeout_seconds, lane_budget)
+        if collector_deadline_monotonic is not None:
+            remaining_cap = max(0.0, collector_deadline_monotonic - time.monotonic())
+            lane_timeout = min(
+                lane_timeout,
+                max(
+                    0,
+                    int(remaining_cap - min(LANE_COLLECTION_GRACE_SECONDS, remaining_cap / 2)),
+                ),
+            )
+        reserve = max(POST_RESERVE_SECONDS, _judge_reserve)
+        if remaining is None or remaining <= reserve or lane_timeout < 1:
+            result = failed_lane(
+                lane_plan.model, "prepared review deadline expired before this lane could start"
+            )
+        else:
+            result = _invoke_lane(
+                frozen,
+                lane_plan.model,
+                inputs.messages,
+                inputs.workspace,
+                expect_coverage=inputs.expect_coverage,
+                expect_resolutions=context.loop.mode == "verify",
+                expected_paths=inputs.expected_paths,
+                expected_resolution_ids=inputs.expected_resolution_ids,
+                lane_timeout=lane_timeout,
+            )
+    except ActionError as exc:
+        result = failed_lane(lane_plan.model, redact(str(exc)))
+    result.head_sha = context.collected.head_sha
+    result.lane_index = index
+    result.required = lane_plan.required
+    result.context_sha256 = context.digest
+    result.review_context = context.envelope
+    return result
+
+
+def _context_digest_from_context(context: PreparedContext) -> str:
+    return context.digest
+
+
+def _prepared_context(envelope: dict[str, Any], restored: ReviewContext) -> PreparedContext:
+    return PreparedContext(restored, _context_digest(envelope), envelope)
+
+
+def _role_lane_prepared(env: dict[str, str]) -> int:
+    _validate_prepared_context_inputs(env)
+    envelope, restored = _load_prepared_context(env)
+    context = _prepared_context(envelope, restored)
+    plan = context.execution.plan
+    index = _int_env(env, "LANE_INDEX", 0)
+    if not 0 <= index < len(plan.lanes):
+        raise ActionError("LANE_INDEX is out of range for the prepared review plan")
+    override = (env.get("LANE_MODEL") or "").strip()
+    if override and override != plan.lanes[index].model:
+        raise SchemaError("prepared lane model override does not match its assigned plan lane")
+    result = _run_prepared_lane(env, context, index)
+    path = _write_lane_file(env, index, result)
+    _set_output("lane_file", str(path))
+    _set_output("lane_ok", "true" if result.ok else "false")
+    # Matrix lanes fail open so the judge can publish surviving evidence and
+    # the artifact uploader still receives this explicit failed result.
+    return 0
+
+
+def _role_all_prepared(env: dict[str, str]) -> int:
+    _validate_prepared_context_inputs(env)
+    supplied = (env.get("REVIEW_CONTEXT_FILE") or "").strip()
+    if supplied:
+        envelope, restored = _load_prepared_context(env)
+        _write_prepared_outputs(envelope)
+        _set_output("review_context_file", supplied)
+        _set_output("review_context_sha256", _context_digest(envelope))
+        _set_output("head_sha", restored.collected.head_sha)
     else:
-        # A timed-out pool cannot stop requests already in flight. The lane
-        # clock's per-request clamp guarantees those stragglers end within
-        # their lane deadline after non-waiting shutdown returns control.
-        pool = ThreadPoolExecutor(max_workers=min(len(slugs), LANE_CAP))
-        timed_out = False
+        envelope = _prepare_execution(env)
+        restored = restore_context(envelope)
+        _write_prepared_outputs(envelope)
+        context_path = _write_prepared_context(env, envelope)
+        _set_output("review_context_file", str(context_path))
+        _set_output("review_context_sha256", _context_digest(envelope))
+        _set_output("head_sha", restored.collected.head_sha)
+    context = _prepared_context(envelope, restored)
+    directory = Path(env.get("ALL_LANE_RESULTS_DIR") or (_work_dir(env) / "lanes"))
+    directory.mkdir(parents=True, exist_ok=True)
+    frozen = _frozen_execution_env(env, context)
+    # The all-role compatibility path is one shared job.  Materialize the
+    # immutable checkout and prompt once, then start every lane concurrently.
+    work = _work_dir(frozen)
+    workspace = _prepare_workspace(frozen, context.collected, work)
+    coverage, expected_paths = _coverage_expectations(context.loop, context.collected)
+    inputs = PreparedLaneInputs(
+        frozen,
+        workspace,
+        _messages(frozen, context.collected, context.loop, context.execution.agent_replies),
+        coverage,
+        expected_paths,
+        _expected_resolution_ids(context.loop),
+    )
+    plan = context.execution.plan
+    remaining = _remaining_job_seconds(frozen)
+    _lane_timeout, judge_reserve = _lane_budget(
+        remaining, judge_needed=_prepared_judge_needed(context), shares_job_with_judge=True
+    )
+    deadline_seconds = _all_role_deadline_seconds(frozen, remaining, judge_reserve)
+    # An explicit cap must not outlive the frozen absolute execution deadline
+    # or consume the judge/publication reserve.
+    if remaining is not None:
+        deadline_seconds = min(
+            deadline_seconds,
+            max(0, int(remaining - max(POST_RESERVE_SECONDS, judge_reserve))),
+        )
+
+    collection_deadline = time.monotonic() + deadline_seconds
+
+    def one(index: int) -> LaneResult:
+        return _run_prepared_lane(
+            frozen,
+            context,
+            index,
+            inputs=inputs,
+            collector_deadline_monotonic=collection_deadline,
+        )
+
+    lanes = _collect_all_prepared_lanes(plan, context, directory, one, deadline_seconds)
+    return _finish(
+        frozen,
+        lanes,
+        collected=context.collected,
+        loop=context.loop,
+        prepared_context=context,
+    )
+
+
+def _collect_bounded_lanes(
+    count: int,
+    run_one: Any,
+    deadline_seconds: float,
+    *,
+    on_lane: Any,
+    salvage_progress: Any | None = None,
+    model_for_index: Any | None = None,
+) -> list[LaneResult]:
+    """Run up to ``count`` lanes concurrently under one collection deadline."""
+    if count == 0:
+        return []
+    # A timed-out pool cannot stop requests already in flight. The lane
+    # clock's per-request clamp guarantees those stragglers end within
+    # their lane deadline after non-waiting shutdown returns control.
+    pool = ThreadPoolExecutor(max_workers=min(count, LANE_CAP))
+    timed_out = False
+    by_index: dict[int, LaneResult] = {}
+    futures = {pool.submit(run_one, index): index for index in range(count)}
+    pending = set(futures)
+    try:
         try:
-            futures = {pool.submit(_one, i, model): i for i, model in enumerate(slugs)}
-            by_index: dict[int, LaneResult] = {}
-            pending = set(futures)
-            try:
-                iterator = as_completed(futures, timeout=deadline_seconds)
-                for future in iterator:
-                    pending.discard(future)
-                    i = futures[future]
-                    model = slugs[i]
+            for future in as_completed(futures, timeout=max(0, deadline_seconds)):
+                pending.discard(future)
+                index = futures[future]
+                try:
+                    lane = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    model = model_for_index(index) if model_for_index is not None else "unknown"
+                    lane = failed_lane(model, redact(str(exc)))
+                by_index[index] = lane
+                on_lane(index, lane)
+        except FutureTimeoutError:
+            timed_out = True
+            completed = len(by_index)
+            for future in pending:
+                index = futures[future]
+                model = model_for_index(index) if model_for_index is not None else "unknown"
+                if future.done():
                     try:
                         lane = future.result()
                     except Exception as exc:  # noqa: BLE001
                         lane = failed_lane(model, redact(str(exc)))
-                    by_index[i] = lane
-                    _persist_and_log_lane(lane_dir, i, model, lane, collected.head_sha, context)
-            except FutureTimeoutError:
-                timed_out = True
-                completed = len(by_index)
-                for future in pending:
-                    i = futures[future]
-                    if future.done():
-                        try:
-                            lane = future.result()
-                        except Exception as exc:  # noqa: BLE001
-                            lane = failed_lane(slugs[i], redact(str(exc)))
-                    else:
-                        future.cancel()
-                        lane = failed_lane(
-                            slugs[i],
-                            "role=all deadline reached before every lane finished; "
-                            f"salvaging {completed}/{len(slugs)} completed lane(s)",
-                        )
-                        _restore_lane_progress(lane_dir, i, lane)
-                    by_index[i] = lane
-                    _persist_and_log_lane(lane_dir, i, slugs[i], lane, collected.head_sha, context)
-        finally:
-            pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
-        lanes = [by_index[i] for i in range(len(slugs))]
-    return _finish(env, lanes, collected=collected, loop=state)
+                else:
+                    future.cancel()
+                    lane = failed_lane(
+                        model,
+                        "role=all deadline reached before every lane finished; "
+                        f"salvaging {completed}/{count} completed lane(s)",
+                    )
+                    if salvage_progress is not None:
+                        salvage_progress(index, lane)
+                by_index[index] = lane
+                on_lane(index, lane)
+    finally:
+        pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
+    return [by_index[index] for index in range(count)]
+
+
+def _collect_all_prepared_lanes(
+    plan: ReviewPlan,
+    context: PreparedContext,
+    directory: Path,
+    run_one: Any,
+    deadline_seconds: float,
+) -> list[LaneResult]:
+    """Concurrent bounded collector with immediate persistence and salvage."""
+    count = len(plan.lanes)
+    return _collect_bounded_lanes(
+        count,
+        run_one,
+        deadline_seconds,
+        on_lane=lambda index, lane: _persist_and_log_lane(
+            directory,
+            index,
+            plan.lanes[index].model,
+            lane,
+            context.collected.head_sha,
+            context.envelope,
+        ),
+        salvage_progress=lambda index, lane: _restore_lane_progress(directory, index, lane),
+        model_for_index=lambda index: plan.lanes[index].model,
+    )
+
+
+def _role_judge_prepared(env: dict[str, str]) -> int:
+    _validate_prepared_context_inputs(env)
+    envelope, restored = _load_prepared_context(env)
+    context = _prepared_context(envelope, restored)
+    directory = Path(env.get("LANE_RESULTS_DIR") or "")
+    if not directory.is_dir():
+        raise ActionError("LANE_RESULTS_DIR is missing or not a directory")
+    lanes = _load_prepared_lane_dir(directory, context)
+    return _finish(
+        _frozen_execution_env(env, context),
+        lanes,
+        collected=context.collected,
+        loop=context.loop,
+        prepared_context=context,
+    )
 
 
 def _run_one_lane(env: dict[str, str], model: str) -> tuple[LaneResult, CollectedReview, LoopState]:
@@ -967,12 +1535,14 @@ def _with_review_policy(
         tuple(f.file for f in state.prior_findings if f.file),
         timeout=_int_env(env, "GITHUB_TIMEOUT_SECONDS", 120),
     )
-    if policy.profile not in {"code", "docs"}:
-        raise ActionError(f"unsupported review policy profile: {policy.profile}")
-    if policy.minimum != "standard":
-        raise ActionError(
-            "deep review requires a configured deep profile; guidance-only mode cannot fulfill it"
-        )
+    if parse_review_profiles(env.get("REVIEW_PROFILES")) is None:
+        if policy.profile not in {"code", "docs"}:
+            raise ActionError(f"unsupported review policy profile: {policy.profile}")
+        if policy.minimum != "standard":
+            raise ActionError(
+                "deep review requires a configured deep profile; guidance-only mode cannot "
+                "fulfill it"
+            )
     _set_output("policy_digest", policy.digest)
     _set_output("policy_base_sha", policy.base_sha)
     print(f"review policy: {len(policy.files)} file(s), {policy.profile}/standard, {policy.digest}")
@@ -984,6 +1554,7 @@ def _finish(
     lanes: list[LaneResult],
     collected: CollectedReview | None = None,
     loop: LoopState | None = None,
+    prepared_context: Any | None = None,
 ) -> int:
     if collected is None or loop is None:
         collected, loop, _replies = _collect_with_loop(env, with_replies=False)
@@ -991,8 +1562,14 @@ def _finish(
     # irreconcilable and fail closed before anything posts.
     reviewed_sha = _common_lane_sha(lanes) or collected.head_sha
     successful = [lane for lane in lanes if lane.ok]
-    slugs = parse_models(env.get("MODELS"))
-    _write_judge_outputs(_judge_needed(env, slugs), parse_judge_model(env.get("JUDGE_MODEL")))
+    plan = prepared_context.execution.plan if prepared_context is not None else None
+    slugs = (
+        [lane.model for lane in plan.lanes] if plan is not None else parse_models(env.get("MODELS"))
+    )
+    _write_judge_outputs(
+        _judge_needed(env, slugs),
+        plan.judge_model if plan is not None else parse_judge_model(env.get("JUDGE_MODEL")),
+    )
     judge_outcome = _resolve_issues(env, slugs, lanes, successful)
     issues = judge_outcome.issues
     # Judge output bypasses the per-lane anchor gate, so gate the merged
@@ -1076,6 +1653,82 @@ def _finish(
         # Carried findings from earlier rounds are still open.
         verdict = "issues"
 
+    profile_satisfied = True
+    panel_status = ""
+    receipt: dict[str, Any] | None = None
+    if plan is not None:
+        required_failures = [
+            item
+            for expected, item in zip(plan.lanes, lanes, strict=True)
+            if expected.required and not item.ok
+        ]
+        optional_failures = [
+            item
+            for expected, item in zip(plan.lanes, lanes, strict=True)
+            if not expected.required and not item.ok
+        ]
+        remaining = _remaining_job_seconds(env)
+        expired = remaining is not None and remaining <= 0
+        environment_failed = bool(judge_outcome.environment_diagnostics)
+        # A profile may be degraded by an optional lane, but it is only
+        # satisfied when the resulting review is still authoritative.  This
+        # prevents a stale, expired, partial-diff, or all-failed optional
+        # panel from publishing a clean ledger.
+        profile_satisfied = not required_failures and not expired and not environment_failed
+        if required_failures:
+            panel_status = "required_missing"
+            verdict = "partial" if successful else "error"
+            notices.append(
+                "One or more required review-plan lanes did not complete; "
+                "the profile is unsatisfied."
+            )
+        elif (
+            optional_failures
+            or (len(plan.lanes) > 1 and not judge_outcome.ran)
+            or "fallback" in judge_outcome.note
+        ):
+            panel_status = "degraded"
+        else:
+            panel_status = "complete"
+        if expired and panel_status == "complete":
+            panel_status = "degraded"
+        if not profile_satisfied and verdict in {"clean", "issues"}:
+            verdict = "partial" if successful else "error"
+        if verdict in {"partial", "error"}:
+            profile_satisfied = False
+            if panel_status == "complete":
+                panel_status = "degraded"
+        _set_output("review_profile", plan.profile)
+        _set_output("review_level", plan.level)
+        _set_output("review_trigger", plan.trigger)
+        _set_output("registry_digest", plan.registry_digest)
+        _set_output("profile_satisfied", "true" if profile_satisfied else "false")
+        _set_output("panel_status", panel_status)
+        _set_output("review_context_sha256", _context_digest_from_context(prepared_context))
+        receipt = {
+            "version": 1,
+            "repository": prepared_context.repository,
+            "pr_number": collected.pr_number,
+            "head_sha": reviewed_sha,
+            "policy_base_sha": collected.policy_base_sha,
+            "policy_digest": collected.review_policy.digest if collected.review_policy else "",
+            "profile": plan.profile,
+            "level": plan.level,
+            "trigger": plan.trigger,
+            "registry_digest": plan.registry_digest,
+            "context_sha256": _context_digest_from_context(prepared_context),
+            "required_models": [lane.model for lane in plan.lanes if lane.required],
+            "successful_models": [lane.model for lane in successful],
+            "panel_status": panel_status,
+            "profile_satisfied": profile_satisfied,
+            "verdict": verdict,
+            "scope": collected.plan.scope,
+            "mode": loop.mode,
+            "run_url": prepared_context.execution.source_run_url
+            or (env.get("RUN_URL") or "").strip(),
+            "run_attempt": prepared_context.execution.run_attempt,
+        }
+
     # The generation token scopes inline finding markers to this loop
     # generation; a reset mints a new one so old threads can never pair with
     # new same-numbered findings.
@@ -1104,6 +1757,7 @@ def _finish(
         extra_notices=notices or None,
         hidden_marker=hidden_marker,
         round_lines=round_report(loop, outcome) or None,
+        receipt=receipt,
     )
     comments: list[dict[str, Any]] = []
     if verdict in {"clean", "issues"}:
@@ -1137,6 +1791,9 @@ def _finish(
         )
         raise ActionError(f"failed to post the GitHub review: {exc}") from exc
 
+    if receipt is not None:
+        _set_output("review_receipt_file", str(_write_review_receipt(env, receipt)))
+
     for continuation in bodies[1:]:
         try:
             github.create_issue_comment(collected.pr_number, continuation)
@@ -1157,6 +1814,10 @@ def _finish(
 
     if verdict == "error":
         _error("every model lane failed; nothing structured arrived to post")
+        return 1
+
+    if plan is not None and not profile_satisfied:
+        _error("review profile is unsatisfied")
         return 1
 
     # Every role passes through _validate_inputs before reaching _finish.
@@ -1233,6 +1894,65 @@ def _load_lane_dir(directory: Path, expected: list[str]) -> list[LaneResult]:
         context = restore_context(artifact.review_context)
         if artifact.model != model or artifact.head_sha != context.collected.head_sha:
             raise SchemaError("matrix artifact model or reviewed head does not match its context")
+        lanes.append(artifact)
+    return lanes
+
+
+def _load_prepared_lane_dir(directory: Path, context: PreparedContext) -> list[LaneResult]:
+    """Load only artifacts bound to the standalone setup context.
+
+    Do not use a surviving lane as a source of truth: setup is the authority,
+    so a cancelled first lane cannot erase the matrix publication context.
+    """
+    assert context.execution is not None
+    plan = context.execution.plan
+    files = sorted(directory.rglob("*.json"))
+    by_index: dict[int, Path] = {}
+    for path in files:
+        if not path.stem.startswith("lane-"):
+            raise SchemaError(f"prepared lane artifacts include unexpected file: {path.name}")
+        suffix = path.stem.removeprefix("lane-")
+        if not suffix.isdigit():
+            raise SchemaError(f"prepared lane artifact has invalid name: {path.name}")
+        index = int(suffix)
+        if index in by_index:
+            raise SchemaError(f"duplicate matrix lane index: {index}")
+        by_index[index] = path
+    unexpected = set(by_index) - set(range(len(plan.lanes)))
+    if unexpected:
+        raise SchemaError("prepared lane artifacts contain an out-of-plan index")
+    lanes: list[LaneResult] = []
+    digest = context.digest
+    for index, lane_plan in enumerate(plan.lanes):
+        path = by_index.get(index)
+        if path is None:
+            missing = failed_lane(
+                lane_plan.model, "lane artifact missing (job failed or was cancelled)"
+            )
+            missing.head_sha = context.collected.head_sha
+            missing.lane_index = index
+            missing.required = lane_plan.required
+            missing.context_sha256 = digest
+            missing.review_context = context.envelope
+            lanes.append(missing)
+            continue
+        try:
+            artifact = parse_lane_artifact(_read_bounded_json(path, what=path.name))
+        except (OSError, json.JSONDecodeError, UnicodeError, RecursionError, SchemaError) as exc:
+            raise SchemaError(f"{path.name} is not valid JSON: {exc}") from exc
+        if (
+            artifact.lane_index != index
+            or artifact.model != lane_plan.model
+            or artifact.required != lane_plan.required
+            or artifact.context_sha256 != digest
+            or artifact.head_sha != context.collected.head_sha
+            or artifact.review_context != context.envelope
+        ):
+            raise SchemaError("prepared lane artifact does not match its assigned frozen context")
+        # Also strict-parse the embedded context; equality above detects a
+        # forged digest/envelope pair while restore enforces its structure.
+        if restore_context(artifact.review_context) != context.context:
+            raise SchemaError("prepared lane artifact carries a different full context")
         lanes.append(artifact)
     return lanes
 
@@ -1336,6 +2056,16 @@ def _persist_lane_artifact(directory: Path, index: int, result: LaneResult) -> P
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"lane-{index}.json"
     path.write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_review_receipt(env: dict[str, str], receipt: dict[str, Any]) -> Path:
+    """Write exactly the canonical JSON embedded in the posted receipt marker."""
+    directory = Path(env.get("ALL_LANE_RESULTS_DIR") or (_work_dir(env) / "lanes"))
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "review-receipt.json"
+    canonical = canonical_receipt_json(receipt)
+    path.write_bytes(canonical.encode("utf-8"))
     return path
 
 

@@ -2042,6 +2042,9 @@ _PROGRESS_FIELDS = frozenset(
         "service_tier_confirmed",
         "last_http_status",
         "transport_timeouts",
+        "idle_timeouts",
+        "elapsed_deadlines",
+        "connect_timeouts",
         "connection_errors",
     }
 )
@@ -2067,6 +2070,21 @@ def _restore_lane_progress(directory: Path, index: int, lane: LaneResult) -> Non
     for key in _PROGRESS_FIELDS:
         if key in snapshot and hasattr(lane, key):
             setattr(lane, key, snapshot[key])
+    diagnostics = ", ".join(
+        f"{key}={snapshot[key]}"
+        for key in (
+            "transport_timeouts",
+            "idle_timeouts",
+            "elapsed_deadlines",
+            "connect_timeouts",
+            "connection_errors",
+        )
+        if isinstance(snapshot.get(key), int)
+        and not isinstance(snapshot[key], bool)
+        and snapshot[key] >= 0
+    )
+    if diagnostics and lane.error:
+        lane.error += f"; checkpoint transport history (includes recovered errors): {diagnostics}"
     # An in-flight request may be billable even if earlier costs were complete.
     # Preserve observed costs separately; never claim a total for an interrupted lane.
     lane.cost_usd = None

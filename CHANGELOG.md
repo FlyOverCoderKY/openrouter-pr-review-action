@@ -7,7 +7,8 @@
   and bounded retries, and leave GitHub transport limits unchanged. Give a
   structured finish its whole remaining window instead of pre-reserving half
   for a hypothetical retry. No lane, job, judge, or publication budget increase.
-  Distinguish socket inactivity from absolute elapsed-time expiry in failed-lane diagnostics.
+  Keep a separate DNS/connection/header watchdog; distinguish its expiry, socket
+  inactivity, and absolute elapsed-time expiry in durable checkpoint and failed-lane diagnostics.
 
 - Give reviewers priority in shared `role: all` jobs: reserve one 60-second
   judge window instead of budgeting every possible judge retry in advance.

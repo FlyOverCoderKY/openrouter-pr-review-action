@@ -6,8 +6,10 @@ import base64
 import http.client
 import io
 import json
+import os
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from email.message import Message
@@ -20,6 +22,13 @@ class HttpElapsedTimeout(TimeoutError):
 
 class HttpIdleTimeout(TimeoutError):
     """A socket operation timed out while waiting for activity."""
+
+
+class HttpConnectTimeout(TimeoutError):
+    """DNS, connection or response headers exceeded their watchdog limit."""
+
+
+_CONNECT_TIMEOUT_EXIT = 124
 
 
 def bounded_urlopen(
@@ -53,6 +62,8 @@ def bounded_urlopen(
         # subprocess.run kills and reaps the worker, including its open socket.
         # Never propagate TimeoutExpired: its payload can contain credentials.
         raise HttpElapsedTimeout("HTTP attempt elapsed-time deadline exhausted") from None
+    if result.returncode == _CONNECT_TIMEOUT_EXIT:
+        raise HttpConnectTimeout("HTTP connection/header phase timed out")
     if result.returncode:
         raise OSError("HTTP transport worker failed")
     reply = json.loads(result.stdout)
@@ -79,11 +90,18 @@ def main() -> None:
         headers=payload["headers"],
         method=payload["method"],
     )
+    # Socket timeouts cannot interrupt getaddrinfo. Bound connection/header
+    # setup separately before allowing an active body the longer stage budget.
+    watchdog = threading.Timer(payload["timeout"], lambda: os._exit(_CONNECT_TIMEOUT_EXIT))
+    watchdog.daemon = True
+    watchdog.start()
     try:
         try:
             with urllib.request.urlopen(request, timeout=payload["timeout"]) as response:
+                watchdog.cancel()
                 reply = {"kind": "ok", "body": base64.b64encode(response.read()).decode("ascii")}
         except urllib.error.HTTPError as exc:
+            watchdog.cancel()
             with exc:
                 reply = {
                     "kind": "http_error",
@@ -107,6 +125,8 @@ def main() -> None:
                 "category": type(reason).__name__,
                 "reason": str(reason),
             }
+    finally:
+        watchdog.cancel()
     json.dump(reply, sys.stdout)
 
 

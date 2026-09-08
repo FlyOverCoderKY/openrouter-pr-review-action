@@ -4,12 +4,14 @@ import io
 import json
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -110,11 +112,15 @@ def test_elapsed_deadline_kills_trickling_response(phase, total_timeout):
 
     with server(Handler) as url:
         started = time.monotonic()
-        with pytest.raises(TimeoutError, match="elapsed-time"):
+        with pytest.raises(TimeoutError):
             bounded_urlopen(
                 urllib.request.Request(url, data=b"{}"), timeout=0.8, total_timeout=total_timeout
             )
-        assert time.monotonic() - started < 2
+        elapsed = time.monotonic() - started
+        expected = 0.8 if phase == "headers" or total_timeout is None else total_timeout
+        # Windows clock/process-wait granularity can undershoot by a few ms.
+        # The 50ms tolerance still rejects an old 0.8s kill for a 1.2s budget.
+        assert expected - 0.05 <= elapsed < 2
         # The timed-out request is terminated, not left running in a thread.
         assert disconnected.wait(2)
 
@@ -180,3 +186,48 @@ def test_transport_preserves_body_and_retry_headers(status):
         else:
             with bounded_urlopen(request, timeout=5) as response:
                 assert b'"choices":[]' in response.read()
+
+
+def test_hung_dns_hits_connect_watchdog_before_long_body_budget(monkeypatch):
+    # Run the actual worker with getaddrinfo stalled in a separate process.
+    # The watchdog must kill it; an idle socket timeout cannot cover DNS.
+    code = """
+import socket, sys, time
+sys.path.insert(0, sys.argv[1])
+from or_pr_review import http_transport
+socket.getaddrinfo = lambda *args, **kwargs: time.sleep(10)
+http_transport.main()
+"""
+    payload = {
+        "url": "http://127.0.0.1:1/",
+        "method": "POST",
+        "headers": {},
+        "body": "e30=",
+        "timeout": 0.5,
+    }
+    started = time.monotonic()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            code,
+            str(Path(http_transport.__file__).resolve().parents[1]),
+        ],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        timeout=3,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+    assert result.returncode == http_transport._CONNECT_TIMEOUT_EXIT
+    assert time.monotonic() - started < 3
+    assert result.stdout == ""
+
+    def completed(*args, **kwargs):
+        assert kwargs["timeout"] == 5  # Body/stage limit is deliberately longer.
+        return result
+
+    monkeypatch.setattr(http_transport.subprocess, "run", completed)
+    with pytest.raises(http_transport.HttpConnectTimeout, match="connection/header"):
+        bounded_urlopen(urllib.request.Request(payload["url"]), timeout=0.5, total_timeout=5)

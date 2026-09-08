@@ -349,8 +349,9 @@ HTTP attempts run in isolated workers with a socket inactivity timeout and an
 absolute elapsed-time deadline. A response that keeps delivering data can continue
 past the inactivity duration, but never beyond the current lane-stage deadline.
 Without a stage deadline, the configured HTTP timeout also bounds total elapsed
-time. DNS, stalled headers, trickling success/error bodies, retries, and shutdown
-remain bounded; GitHub transport calls retain their per-operation elapsed limit.
+time. A separate watchdog bounds DNS, connection, and header setup by the configured
+HTTP timeout. Active success/error bodies, retries, and shutdown remain bounded
+by the absolute stage deadline; GitHub transport calls retain their per-operation elapsed limit.
 Tool exploration reserves two inactivity allowances for structured finalization,
 capped at half the lane budget. The first finish can use that entire remaining
 window. A retry or schema repair uses only time actually left; no speculative
@@ -365,7 +366,7 @@ output. A timeout preserves observed costs as incomplete and never turns an
 unfinished lane into a successful review.
 Final failed lane results also retain aggregate timeout and connection-error history
 in their error text, including prepared-context reviews that do not emit progress
-checkpoints. The `idle_timeouts` and `elapsed_deadlines` counts distinguish silent socket waits from the worker reaching its absolute deadline. This history can include recovered errors; the leading error describes
+checkpoints. The `idle_timeouts`, `connect_timeouts`, and `elapsed_deadlines` counters distinguish silent socket waits, connection/header watchdog expiry, and the worker reaching its absolute stage deadline. Interrupted-lane checkpoint artifacts retain these counters too. This history can include recovered errors; the leading error describes
 the terminal failure. HTTP failures already include their immediate status.
 
 Matrix lane artifacts carry a versioned publication context: the collected PR metadata,
@@ -495,7 +496,7 @@ for your account and action revision.
 | `review_mode` | `auto` | `auto` continues an existing ledger on any event, or seeds an initial review when none exists. `initial` explicitly resets history; `verify` requires an existing ledger. |
 | `effort` | _empty_ | Optional OpenRouter reasoning effort for **review lanes**. |
 | `max_tool_turns` | `50` | Read-only tool rounds against the inert checkout. `0` disables tools. First-pass default matches the sibling Grok `max_turns`. Follow-up jobs may pass `30`. |
-| `openrouter_timeout_seconds` | `180` | Socket inactivity limit per OpenRouter HTTP attempt (1–600 seconds). Active responses are bounded by the remaining lane-stage deadline; without one, this also limits total elapsed time. |
+| `openrouter_timeout_seconds` | `180` | Connection/header setup and socket inactivity limit per OpenRouter HTTP attempt (1–600 seconds). Active responses are bounded by the remaining lane-stage deadline; without one, this also limits total elapsed time. |
 | `lane_index` | `0` | Zero-based matrix index used by `role=lane` artifact naming. Normally supplied by the reusable workflow. |
 | `lane_model` | _empty_ | Optional validated model override for `role=lane`. Normally supplied through matrix plumbing. |
 | `lane_results_dir` | _empty_ | Lane artifact output/input directory used by `role=lane` and `role=judge`. Normally supplied by orchestration. |

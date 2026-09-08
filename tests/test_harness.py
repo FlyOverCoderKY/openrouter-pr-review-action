@@ -3101,20 +3101,24 @@ def test_live_finalize_can_use_tail_beyond_one_idle_window(
     assert now[0] == 942
 
 
-@pytest.mark.parametrize("kind", ["idle_timeouts", "elapsed_deadlines"])
+@pytest.mark.parametrize("kind", ["idle_timeouts", "elapsed_deadlines", "connect_timeouts"])
 def test_failed_lane_distinguishes_idle_from_elapsed_timeout(
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
 ) -> None:
     from or_pr_review import harness
-    from or_pr_review.http_transport import HttpElapsedTimeout, HttpIdleTimeout
+    from or_pr_review.http_transport import HttpConnectTimeout, HttpElapsedTimeout, HttpIdleTimeout
 
     now = [0.0]
     monkeypatch.setattr(harness.time, "monotonic", lambda: now[0])
 
     def transport(request, *, timeout, total_timeout=None):
         now[0] += total_timeout
-        error_type = HttpIdleTimeout if kind == "idle_timeouts" else HttpElapsedTimeout
+        error_type = {
+            "idle_timeouts": HttpIdleTimeout,
+            "elapsed_deadlines": HttpElapsedTimeout,
+            "connect_timeouts": HttpConnectTimeout,
+        }[kind]
         raise error_type("private transport detail")
 
     monkeypatch.setattr(harness, "bounded_urlopen", transport)

@@ -2414,6 +2414,10 @@ def test_all_timeout_preserves_progress_without_claiming_success(tmp_path, monke
                 "cost_usd": 0.12,
                 "cost_complete": True,
                 "last_http_status": 429,
+                "transport_timeouts": 3,
+                "idle_timeouts": 1,
+                "elapsed_deadlines": 1,
+                "connect_timeouts": 1,
                 "requested_service_tier": "flex",
                 "served_service_tiers": ["flex"],
                 "service_tier_observed_responses": 3,
@@ -2447,6 +2451,14 @@ def test_all_timeout_preserves_progress_without_claiming_success(tmp_path, monke
             assert slow.service_tier_confirmed is False
             progress = json.loads((artifact_dir / "progress-1.json").read_text())
             assert progress["last_http_status"] == 429
+            for key, expected in [
+                ("transport_timeouts", 3),
+                ("idle_timeouts", 1),
+                ("elapsed_deadlines", 1),
+                ("connect_timeouts", 1),
+            ]:
+                assert progress[key] == expected
+                assert f"{key}={expected}" in slow.error
             assert progress["requested_service_tier"] == "flex"
             assert progress["served_service_tiers"] == ["flex"]
             assert progress["service_tier_observed_responses"] == 3

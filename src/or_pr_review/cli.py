@@ -2134,7 +2134,7 @@ def _judge_deadline(env: dict[str, str], timeout: int) -> float | None:
     if env.get("ROLE") != "judge":
         return time.monotonic() + timeout
     # A dedicated matrix judge does not compete with reviewers. Keep its
-    # configured per-attempt timeout and bound retries by its own job deadline.
+    # configured inactivity timeout and bound retries by its own job deadline.
     remaining = _remaining_job_seconds(env)
     if remaining is None:
         return None

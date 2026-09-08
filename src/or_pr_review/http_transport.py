@@ -14,14 +14,29 @@ from email.message import Message
 from pathlib import Path
 
 
-def bounded_urlopen(request: urllib.request.Request, *, timeout: float) -> io.BytesIO:
-    """Buffer one response in a killable worker; credentials travel only over stdin."""
+class HttpElapsedTimeout(TimeoutError):
+    """The worker reached its absolute elapsed-time limit."""
+
+
+class HttpIdleTimeout(TimeoutError):
+    """A socket operation timed out while waiting for activity."""
+
+
+def bounded_urlopen(
+    request: urllib.request.Request, *, timeout: float, total_timeout: float | None = None
+) -> io.BytesIO:
+    """Buffer a response with socket inactivity and hard elapsed-time limits.
+
+    Callers without a separate total retain the original elapsed-time limit.
+    Credentials travel only over stdin.
+    """
+    elapsed_limit = timeout if total_timeout is None else total_timeout
     payload = {
         "url": request.full_url,
         "method": request.get_method(),
         "headers": dict(request.header_items()),
         "body": base64.b64encode(request.data or b"").decode("ascii"),
-        "timeout": timeout,
+        "timeout": min(timeout, elapsed_limit),
     }
     try:
         result = subprocess.run(
@@ -30,20 +45,20 @@ def bounded_urlopen(request: urllib.request.Request, *, timeout: float) -> io.By
             text=True,
             encoding="utf-8",
             capture_output=True,
-            timeout=timeout,
+            timeout=elapsed_limit,
             check=False,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
     except subprocess.TimeoutExpired:
         # subprocess.run kills and reaps the worker, including its open socket.
         # Never propagate TimeoutExpired: its payload can contain credentials.
-        raise TimeoutError("HTTP attempt elapsed-time deadline exhausted") from None
+        raise HttpElapsedTimeout("HTTP attempt elapsed-time deadline exhausted") from None
     if result.returncode:
         raise OSError("HTTP transport worker failed")
     reply = json.loads(result.stdout)
     kind = reply["kind"]
     if kind == "timeout":
-        raise TimeoutError("HTTP request timed out")
+        raise HttpIdleTimeout("HTTP request timed out")
     if kind == "connection":
         # The harness redacts this reason before publishing diagnostics.
         raise urllib.error.URLError(f"{reply['category']}: {reply['reason']}")

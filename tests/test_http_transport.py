@@ -89,7 +89,8 @@ def test_worker_preserves_wrapped_error_classification_and_reason(monkeypatch, r
 
 
 @pytest.mark.parametrize("phase", ["headers", "body", "error-body"])
-def test_elapsed_deadline_kills_trickling_response(phase):
+@pytest.mark.parametrize("total_timeout", [None, 1.2])
+def test_elapsed_deadline_kills_trickling_response(phase, total_timeout):
     disconnected = threading.Event()
 
     class Handler(QuietHandler):
@@ -110,10 +111,49 @@ def test_elapsed_deadline_kills_trickling_response(phase):
     with server(Handler) as url:
         started = time.monotonic()
         with pytest.raises(TimeoutError, match="elapsed-time"):
-            bounded_urlopen(urllib.request.Request(url, data=b"{}"), timeout=0.8)
+            bounded_urlopen(
+                urllib.request.Request(url, data=b"{}"), timeout=0.8, total_timeout=total_timeout
+            )
         assert time.monotonic() - started < 2
         # The timed-out request is terminated, not left running in a thread.
         assert disconnected.wait(2)
+
+
+def test_live_response_can_finish_beyond_socket_timeout():
+    class Handler(QuietHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.end_headers()
+            # Keep a non-streaming JSON response active with legal whitespace.
+            for _ in range(20):
+                self.wfile.write(b" ")
+                self.wfile.flush()
+                time.sleep(0.05)
+            self.wfile.write(b'{"choices":[]}')
+
+    with server(Handler) as url:
+        started = time.monotonic()
+        with bounded_urlopen(
+            urllib.request.Request(url, data=b"{}"), timeout=0.5, total_timeout=3
+        ) as response:
+            assert json.loads(response.read()) == {"choices": []}
+        assert 1 <= time.monotonic() - started < 3
+
+
+def test_silent_response_still_hits_socket_timeout_before_total():
+    class Handler(QuietHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.end_headers()
+            time.sleep(2)
+
+    with server(Handler) as url:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="HTTP request timed out"):
+            bounded_urlopen(urllib.request.Request(url, data=b"{}"), timeout=0.5, total_timeout=5)
+        assert time.monotonic() - started < 2
 
 
 @pytest.mark.parametrize("status", [200, 429])

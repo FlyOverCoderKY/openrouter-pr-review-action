@@ -1313,7 +1313,9 @@ def test_judge_retries_share_deadline_and_preserve_completed_lane_findings(
     def sleep(seconds: float) -> None:
         now[0] += seconds
 
-    def transport(_request: object, *, timeout: float) -> io.BytesIO:
+    def transport(
+        _request: object, *, timeout: float, total_timeout: float | None = None
+    ) -> io.BytesIO:
         attempts.append(timeout)
         if len(attempts) == 1:
             now[0] += 1

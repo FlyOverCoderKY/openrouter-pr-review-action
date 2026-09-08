@@ -331,7 +331,7 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-Two or more slugs schedule a judge. When using the direct action, `judge_needed: true` can also force it for one configured lane; the reusable workflow does not expose that override. The default judge is `openai/gpt-5.6-luna`, selected by the repeatable synthetic judge benchmark after it retained 50/50 expected findings with 100% precision, zero duplicates, correct verdicts, and no repair/fallback across five runs per fixture. It is a coverage-checked **union-merge** of already-structured findings plus JSON schema — not a second reviewer and not a filter: identity-tracked coverage plus a conservative source-evidence merge check restore anything the judge drops or over-merges. Judged output preserves validated lane findings up to the shared 80-finding publishing cap; if a repaired or fallback union exceeds that cap, it retains the strongest severities and reports the omitted count in the visible judge mode. If only one of several configured lanes succeeds, that survivor posts directly because there is nothing to merge. Thinking/reasoning is pinned to `minimal`. In single-job `role: all`, reviewers get priority: the shared budget reserves 60 seconds total for the judge, plus 180 seconds for publication and a 5-second scheduling margin. Judge retries share one absolute deadline; they do not each reserve another request window. If judging times out or less than 15 seconds remain for a useful request, the posted review explicitly uses the deterministic union of validated lane findings. Dedicated `role: judge` jobs retain the configured per-request timeout, with retries bounded by their own remaining job time after publication reserve. Give `role: all` callers at least a 25-minute job timeout (the reusable matrix workflow uses separate jobs and is not constrained by this shared envelope).
+Two or more slugs schedule a judge. When using the direct action, `judge_needed: true` can also force it for one configured lane; the reusable workflow does not expose that override. The default judge is `openai/gpt-5.6-luna`, selected by the repeatable synthetic judge benchmark after it retained 50/50 expected findings with 100% precision, zero duplicates, correct verdicts, and no repair/fallback across five runs per fixture. It is a coverage-checked **union-merge** of already-structured findings plus JSON schema — not a second reviewer and not a filter: identity-tracked coverage plus a conservative source-evidence merge check restore anything the judge drops or over-merges. Judged output preserves validated lane findings up to the shared 80-finding publishing cap; if a repaired or fallback union exceeds that cap, it retains the strongest severities and reports the omitted count in the visible judge mode. If only one of several configured lanes succeeds, that survivor posts directly because there is nothing to merge. Thinking/reasoning is pinned to `minimal`. In single-job `role: all`, reviewers get priority: the shared budget reserves 60 seconds total for the judge, plus 180 seconds for publication and a 5-second scheduling margin. Judge retries share one absolute deadline; they do not each reserve another request window. If judging times out or less than 15 seconds remain for a useful request, the posted review explicitly uses the deterministic union of validated lane findings. Dedicated `role: judge` jobs retain the configured per-request inactivity timeout, with retries bounded by their own remaining job time after publication reserve. Give `role: all` callers at least a 25-minute job timeout (the reusable matrix workflow uses separate jobs and is not constrained by this shared envelope).
 
 Alternatives (do not change the default unless you mean to):
 
@@ -345,17 +345,17 @@ A judge schema or transport failure is labeled on the posted review and falls ba
 In `role: all`, reviewers finish up to five seconds before the coordinator stops
 collecting results, leaving time to save their final diagnostics. The judge and
 publication allowances described above remain outside that collection deadline.
-HTTP attempts run in isolated workers that
-are terminated at the elapsed-time limit, so periodic response bytes cannot keep a
-request alive indefinitely. Retries still share the lane's remaining budget.
-Tool exploration reserves two HTTP request allowances for a structured finish and
-one repair, capped at half the lane budget. With the default 180-second request
-timeout and enough lane time, each gets up to 180 seconds. Shorter lanes divide
-the available reserve; the overall lane and job deadlines do not increase.
-The limit includes worker startup and response transfer. There is no extra time
-after that limit: near lane expiry, a response that has not reached the reviewer
-is incomplete even if the provider has finished generating it. This keeps retries
-and shutdown within the reserved publication window.
+HTTP attempts run in isolated workers with a socket inactivity timeout and an
+absolute elapsed-time deadline. A response that keeps delivering data can continue
+past the inactivity duration, but never beyond the current lane-stage deadline.
+Without a stage deadline, the configured HTTP timeout also bounds total elapsed
+time. DNS, stalled headers, trickling success/error bodies, retries, and shutdown
+remain bounded; GitHub transport calls retain their per-operation elapsed limit.
+Tool exploration reserves two inactivity allowances for structured finalization,
+capped at half the lane budget. The first finish can use that entire remaining
+window. A retry or schema repair uses only time actually left; no speculative
+repair reservation cuts a live finish short. Overall lane, judge, publication,
+and job budgets do not increase. Incomplete responses never count as a review.
 
 When available, all-role artifact uploads include `progress-N.json` checkpoints alongside the final
 lane files. These contain aggregate request/tool/retry counts, observed usage and
@@ -365,7 +365,7 @@ output. A timeout preserves observed costs as incomplete and never turns an
 unfinished lane into a successful review.
 Final failed lane results also retain aggregate timeout and connection-error history
 in their error text, including prepared-context reviews that do not emit progress
-checkpoints. This history can include recovered errors; the leading error describes
+checkpoints. The `idle_timeouts` and `elapsed_deadlines` counts distinguish silent socket waits from the worker reaching its absolute deadline. This history can include recovered errors; the leading error describes
 the terminal failure. HTTP failures already include their immediate status.
 
 Matrix lane artifacts carry a versioned publication context: the collected PR metadata,
@@ -495,7 +495,7 @@ for your account and action revision.
 | `review_mode` | `auto` | `auto` continues an existing ledger on any event, or seeds an initial review when none exists. `initial` explicitly resets history; `verify` requires an existing ledger. |
 | `effort` | _empty_ | Optional OpenRouter reasoning effort for **review lanes**. |
 | `max_tool_turns` | `50` | Read-only tool rounds against the inert checkout. `0` disables tools. First-pass default matches the sibling Grok `max_turns`. Follow-up jobs may pass `30`. |
-| `openrouter_timeout_seconds` | `180` | Elapsed-time limit per OpenRouter HTTP attempt, including connection, headers and body; 1–600 seconds. |
+| `openrouter_timeout_seconds` | `180` | Socket inactivity limit per OpenRouter HTTP attempt (1–600 seconds). Active responses are bounded by the remaining lane-stage deadline; without one, this also limits total elapsed time. |
 | `lane_index` | `0` | Zero-based matrix index used by `role=lane` artifact naming. Normally supplied by the reusable workflow. |
 | `lane_model` | _empty_ | Optional validated model override for `role=lane`. Normally supplied through matrix plumbing. |
 | `lane_results_dir` | _empty_ | Lane artifact output/input directory used by `role=lane` and `role=judge`. Normally supplied by orchestration. |

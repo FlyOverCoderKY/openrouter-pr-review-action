@@ -44,11 +44,9 @@ DEFAULT_TIMEOUT = 180
 # Compatibility import for Python callers that used the former harness-level
 # constant. New code should import GEMINI_MAX_RESPONSE_TOKENS from models.
 MAX_GEMINI_RESPONSE_TOKENS = GEMINI_MAX_RESPONSE_TOKENS
-# Keep a lane inside the caller's 25-minute job ceiling.  The protected tail
-# is deliberately long enough for one normal default-timeout request, while
-# the remaining seven minutes cover artifact upload, judging, and publishing.
+# Lane ceilings are additionally clamped by the caller's remaining job budget
+# after its separate judge and publication reserves.
 DEFAULT_LANE_TIMEOUT_SECONDS = 18 * 60
-FINAL_RESPONSE_RESERVE_SECONDS = DEFAULT_TIMEOUT
 # Transient-error policy: each request retries a few times with backoff, and
 # a mid-loop failure that survives the retries triggers one salvage attempt
 # in _run_loop instead of discarding the gathered evidence.
@@ -432,7 +430,10 @@ def run_lane(
     stats: dict[str, int] = {}
     clock = _LaneClock(
         deadline=deadline,
-        reserve_seconds=min(FINAL_RESPONSE_RESERVE_SECONDS, max(1, lane_timeout // 2)),
+        # Finalization splits its tail between the first finish and one repair.
+        # Budget a normal HTTP allowance for each, retaining at least half of
+        # short lanes for exploration without extending the caller's deadline.
+        reserve_seconds=min(2 * timeout, max(1, lane_timeout // 2)),
         request_deadline=deadline,
     )
     send = chat or (
@@ -570,7 +571,18 @@ def run_lane(
         if gate_root is not None:
             findings = sanitize_anchors(findings, gate_root)
     except LaneError as exc:
-        failed = failed_lane(model, redact(str(exc)), elapsed_ms=elapsed_ms(started))
+        # Progress callbacks are optional. Preserve timeout/connection history
+        # even when a deadline masks the preceding error. HTTP exceptions already
+        # carry their immediate status; a sticky earlier status can mislead here.
+        diagnostics = ", ".join(
+            f"{key}={stats[key]}"
+            for key in ("transport_timeouts", "connection_errors")
+            if key in stats
+        )
+        error = str(exc)
+        if diagnostics:
+            error += f"; lane transport history (includes recovered errors): {diagnostics}"
+        failed = failed_lane(model, redact(error), elapsed_ms=elapsed_ms(started))
         _attach_stats(failed, stats, usage)
         provider = meta.get("provider")
         failed.provider = provider if isinstance(provider, str) else None

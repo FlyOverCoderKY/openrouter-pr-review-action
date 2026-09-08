@@ -249,9 +249,7 @@ def test_clean_receipt_allows_settled_disputes_but_rejects_mixed_open_ledger(has
     if has_open_finding:
         findings.append(LedgerFinding("r1-2", "bug", "b.py", 2, "Unresolved", "Evidence", "open"))
     lines = body_text.splitlines()
-    lines[1] = encode_ledger(
-        Ledger(3, tuple(findings), HEAD, GENERATION), repo=REPO, pr_number=9
-    )
+    lines[1] = encode_ledger(Ledger(3, tuple(findings), HEAD, GENERATION), repo=REPO, pr_number=9)
     body_text = "\n".join(lines)
     if has_open_finding:
         with pytest.raises(SchemaError, match="unresolved ledger findings"):

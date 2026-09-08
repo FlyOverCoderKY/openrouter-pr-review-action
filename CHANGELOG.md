@@ -2,13 +2,18 @@
 
 ## Unreleased
 
+- Add trusted review profiles with version-1 registries, prepared matrix
+  execution, and publication context v3. Freeze PR head, policy, replies, model
+  plan, and absolute deadline across setup, lane, judge, and all roles. Support
+  deep requests through configured profiles; unsupported matrix policy and deep
+  requests without a profile still fail before model calls. Finding ledger v1 and
+  existing review-header fields remain compatible.
+
 - Add opt-in hierarchical `REVIEW.md` guidance loaded only from an immutable
   target-branch commit. Preserve scoped guidance across lanes, judging, and
-  publication with context v2 and a source/digest receipt. Include bounded
-  metadata validation and offline lint/explain commands. Existing reviewers
-  remain caller-configured; unsupported matrix policy and deep requests fail
-  before model calls. Finding ledger v1 and existing review-header fields remain
-  compatible.
+  publication with the prepared context receipt. Include bounded metadata
+  validation and offline lint/explain commands. Existing reviewers remain
+  caller-configured.
 
 - Enforce elapsed-time HTTP attempt limits with killable transport workers, including
   stalled DNS/headers and trickling success or error bodies. Finish lanes before the

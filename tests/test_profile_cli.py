@@ -16,6 +16,7 @@ import pytest
 from or_pr_review import cli
 from or_pr_review.collect import CollectedReview
 from or_pr_review.errors import ActionError, SchemaError
+from or_pr_review.harness import DEFAULT_LANE_TIMEOUT_SECONDS
 from or_pr_review.loop import LedgerFinding, LoopState, extract_ledger
 from or_pr_review.profile_evidence import parse_review_receipt
 from or_pr_review.publish import render_review_parts
@@ -744,3 +745,195 @@ def test_prepared_lane_clamps_to_collector_cap(tmp_path, monkeypatch) -> None:
         collector_deadline_monotonic=time.monotonic() + 10,
     )
     assert captured and captured[0] <= 5
+
+
+def test_prepared_setup_one_lane_emits_publisher_judge_needed(tmp_path, monkeypatch) -> None:
+    _install_collect(monkeypatch)
+    env = _profile_env(tmp_path, REVIEW_LEVEL="auto")
+    assert cli.main(["setup"], env) == 0
+    outputs = (tmp_path / "outputs.txt").read_text(encoding="utf-8")
+    assert "judge_needed=true" in outputs
+    envelope = json.loads((tmp_path / "lanes" / "review-context.json").read_text(encoding="utf-8"))
+    restored = restore_context(envelope)
+    assert cli._prepared_judge_needed(restored) is False
+
+
+def test_prepared_single_lane_matrix_publishes_without_llm_judge(tmp_path, monkeypatch) -> None:
+    calls = {"collect": 0, "lane": 0, "judge": 0}
+
+    def collect(_env, with_replies=True):
+        calls["collect"] += 1
+        return _collected(), _loop(), ""
+
+    monkeypatch.setattr(cli, "_collect_with_loop", collect)
+    monkeypatch.setattr(cli, "_prepare_workspace", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli, "_maybe_status", lambda *_a, **_k: None)
+    github = FakeGitHub()
+    monkeypatch.setattr(cli, "_github", lambda _env: github)
+
+    def invoke(_env, model, *_a, **_k):
+        calls["lane"] += 1
+        return _lane_ok(model)
+
+    monkeypatch.setattr(cli, "_invoke_lane", invoke)
+    monkeypatch.setattr(
+        cli,
+        "run_llm_judge",
+        lambda *_a, **_k: pytest.fail("single-lane prepared matrix must not call LLM judge"),
+    )
+
+    env = _profile_env(tmp_path, REVIEW_LEVEL="auto")
+    assert cli.main(["setup"], env) == 0
+    outputs = (tmp_path / "outputs.txt").read_text(encoding="utf-8")
+    assert "judge_needed=true" in outputs
+    envelope = json.loads((tmp_path / "lanes" / "review-context.json").read_text(encoding="utf-8"))
+    digest = envelope["sha256"]
+    lane_env = _context_env(tmp_path, envelope, digest, LANE_INDEX="0")
+    assert cli.main(["lane"], lane_env) == 0
+    assert not github.posted
+    judge_env = _context_env(tmp_path, envelope, digest)
+    artifacts = tmp_path / "downloaded-lanes"
+    artifacts.mkdir()
+    (tmp_path / "lanes" / "lane-0.json").replace(artifacts / "lane-0.json")
+    monkeypatch.setattr(
+        cli,
+        "_collect_with_loop",
+        lambda *a, **k: pytest.fail("judge must not recollect"),
+    )
+    judge_env["LANE_RESULTS_DIR"] = str(artifacts)
+    assert cli.main(["judge"], judge_env) == 0
+    assert github.posted
+    assert calls == {"collect": 1, "lane": 1, "judge": 0}
+
+
+def test_prepared_single_lane_required_missing_publishes_error(tmp_path, monkeypatch) -> None:
+    _install_collect(monkeypatch)
+    github = FakeGitHub()
+    monkeypatch.setattr(cli, "_github", lambda _env: github)
+    monkeypatch.setattr(
+        cli,
+        "_invoke_lane",
+        lambda _env, model, *_a, **_k: failed_lane(model, "required lane failed"),
+    )
+    env = _profile_env(tmp_path, REVIEW_LEVEL="auto")
+    assert cli.main(["all"], env) == 1
+    assert github.posted
+    outputs = (tmp_path / "outputs.txt").read_text(encoding="utf-8")
+    assert "panel_status=required_missing" in outputs
+
+
+def test_prepared_matrix_required_missing_lane_publishes_via_judge(tmp_path, monkeypatch) -> None:
+    _install_collect(monkeypatch)
+    github = FakeGitHub()
+    monkeypatch.setattr(cli, "_github", lambda _env: github)
+    monkeypatch.setattr(cli, "_maybe_status", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        cli,
+        "_invoke_lane",
+        lambda _env, model, *_a, **_k: failed_lane(model, "required lane failed"),
+    )
+    env = _profile_env(tmp_path, REVIEW_LEVEL="auto")
+    assert cli.main(["setup"], env) == 0
+    envelope = json.loads((tmp_path / "lanes" / "review-context.json").read_text(encoding="utf-8"))
+    digest = envelope["sha256"]
+    lane_env = _context_env(tmp_path, envelope, digest, LANE_INDEX="0")
+    assert cli.main(["lane"], lane_env) == 0
+    judge_env = _context_env(tmp_path, envelope, digest)
+    artifacts = tmp_path / "downloaded-lanes"
+    artifacts.mkdir()
+    (tmp_path / "lanes" / "lane-0.json").replace(artifacts / "lane-0.json")
+    judge_env["LANE_RESULTS_DIR"] = str(artifacts)
+    assert cli.main(["judge"], judge_env) == 1
+    assert github.posted
+
+
+def test_prepared_all_posts_reviewing_status_once(tmp_path, monkeypatch) -> None:
+    calls = {"collect": 0}
+    status_calls: list[tuple[int, str]] = []
+
+    def collect(_env, with_replies=True):
+        calls["collect"] += 1
+        return _collected(), _loop(), "frozen reply snapshot"
+
+    monkeypatch.setattr(cli, "_collect_with_loop", collect)
+    monkeypatch.setattr(cli, "_prepare_workspace", lambda *_a, **_k: None)
+
+    def status(_env, pr_number, body):
+        status_calls.append((pr_number, body))
+
+    monkeypatch.setattr(cli, "_maybe_status", status)
+    monkeypatch.setattr(cli, "_github", lambda _env: FakeGitHub())
+    monkeypatch.setattr(cli, "_invoke_lane", lambda _env, model, *_a, **_k: _lane_ok(model))
+    _install_judge_skip(monkeypatch)
+    env = _profile_env(tmp_path, STATUS_COMMENTS="true")
+    assert cli.main(["all"], env) == 0
+    assert len([item for item in status_calls if "Reviewing with OpenRouter" in item[1]]) == 1
+    assert calls["collect"] == 1
+
+
+def test_lane_budget_honors_prepared_lane_ceiling() -> None:
+    timeout, _ = cli._lane_budget(
+        3600,
+        judge_needed=True,
+        shares_job_with_judge=True,
+        lane_ceiling=1500,
+    )
+    assert timeout == 1500
+
+
+def test_lane_budget_shrinks_with_remaining_budget() -> None:
+    timeout, _ = cli._lane_budget(
+        1200,
+        judge_needed=True,
+        shares_job_with_judge=True,
+        lane_ceiling=1500,
+    )
+    assert timeout < 1500
+    assert timeout >= 1
+
+
+def test_lane_budget_legacy_default_unchanged() -> None:
+    timeout, _ = cli._lane_budget(3600, judge_needed=True, shares_job_with_judge=True)
+    assert timeout == DEFAULT_LANE_TIMEOUT_SECONDS
+
+
+def test_prepared_lane_timeout_uses_profile_ceiling_with_budget(tmp_path, monkeypatch) -> None:
+    long_lane_registry = """{
+      "version": 1,
+      "profiles": {
+        "code": {
+          "standard": {
+            "lanes": [{"model": "vendor/required", "required": true}],
+            "lane_timeout_seconds": 1500,
+            "job_budget_seconds": 3600
+          }
+        }
+      }
+    }"""
+    _install_collect(monkeypatch)
+    envelope, digest = _run_setup(
+        tmp_path,
+        monkeypatch,
+        _profile_env(
+            tmp_path,
+            REVIEW_PROFILES=long_lane_registry,
+            REVIEW_LEVEL="auto",
+            JOB_BUDGET_SECONDS="3600",
+            LANE_TIMEOUT_SECONDS="1800",
+        ),
+    )
+    context = cli.PreparedContext(restore_context(envelope), digest, envelope)
+    captured: list[float] = []
+    monkeypatch.setattr(
+        cli,
+        "_invoke_lane",
+        lambda *_a, **_k: captured.append(_k["lane_timeout"]) or _lane_ok("vendor/required"),
+    )
+    monkeypatch.setattr(cli, "_remaining_job_seconds", lambda _env: 3600)
+    cli._run_prepared_lane(_context_env(tmp_path, envelope, digest), context, 0)
+    assert captured == [1500]
+
+    captured.clear()
+    monkeypatch.setattr(cli, "_remaining_job_seconds", lambda _env: 1200)
+    cli._run_prepared_lane(_context_env(tmp_path, envelope, digest), context, 0)
+    assert captured and captured[0] < 1500

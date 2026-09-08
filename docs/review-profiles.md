@@ -69,6 +69,12 @@ expected setup digest and the resolved head SHA; they do not independently
 collect policy. Even a one-lane prepared matrix publishes through a judge job.
 There is no additive lane cache: the entire panel reruns.
 
+Setup emits `judge_needed=true` for every prepared profile so matrix workflows
+always schedule the publisher job. That output names the publisher requirement,
+not whether an LLM judge call runs. Frozen runtime keeps the LLM decision in
+`JUDGE_NEEDED`; a one-lane panel still posts directly when the frozen intent
+does not force a merge judge.
+
 The digest detects mismatches; it is not authenticity. Download only the setup
 artifact from the same workflow run and pin the identical action revision in
 setup, lane, and judge jobs. Queue time consumes the total deadline.

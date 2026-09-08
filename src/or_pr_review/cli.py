@@ -238,7 +238,7 @@ def _role_setup(env: dict[str, str]) -> int:
             restored = restore_context(context)
         assert restored.execution is not None
         plan = restored.execution.plan
-        _write_prepared_outputs(context)
+        _write_prepared_outputs(context, publisher_judge_required=True)
         path = _write_prepared_context(env, context)
         _set_output("review_context_file", str(path))
         _set_output("review_context_sha256", _context_digest(context))
@@ -512,14 +512,24 @@ def _write_prepared_context(env: dict[str, str], context: dict[str, Any]) -> Pat
     return path
 
 
-def _write_prepared_outputs(context: dict[str, Any]) -> None:
+def _write_prepared_outputs(
+    context: dict[str, Any],
+    *,
+    publisher_judge_required: bool | None = None,
+) -> None:
     restored = restore_context(context)
     assert restored.execution is not None
     plan = restored.execution.plan
     models = [lane.model for lane in plan.lanes]
-    # Guidance-only plans are legacy plans: their explicit JUDGE_NEEDED input
-    # remains meaningful even when the plan itself has one or many lanes.
-    _write_setup_outputs(models, _prepared_judge_needed(restored), plan.judge_model)
+    # Setup matrix jobs gate the publisher on judge_needed. That output names
+    # whether a judge job must run, not whether an LLM judge call occurs.
+    # Frozen runtime and _prepared_judge_needed retain the LLM decision.
+    judge_for_outputs = (
+        publisher_judge_required
+        if publisher_judge_required is not None
+        else _prepared_judge_needed(restored)
+    )
+    _write_setup_outputs(models, judge_for_outputs, plan.judge_model)
     _set_output(
         "policy_digest",
         restored.collected.review_policy.digest if restored.collected.review_policy else "",
@@ -878,6 +888,7 @@ def _run_prepared_lane(
             remaining,
             judge_needed=_prepared_judge_needed(context),
             shares_job_with_judge=True,
+            lane_ceiling=plan.lane_timeout_seconds,
         )
         lane_timeout = min(plan.lane_timeout_seconds, lane_budget)
         if collector_deadline_monotonic is not None:
@@ -979,9 +990,18 @@ def _role_all_prepared(env: dict[str, str]) -> int:
         _expected_resolution_ids(context.loop),
     )
     plan = context.execution.plan
+    _maybe_status(
+        frozen,
+        context.collected.pr_number,
+        f"Reviewing with OpenRouter ({len(plan.lanes)} lane(s): "
+        f"{', '.join(f'`{lane.model}`' for lane in plan.lanes)}).",
+    )
     remaining = _remaining_job_seconds(frozen)
     _lane_timeout, judge_reserve = _lane_budget(
-        remaining, judge_needed=_prepared_judge_needed(context), shares_job_with_judge=True
+        remaining,
+        judge_needed=_prepared_judge_needed(context),
+        shares_job_with_judge=True,
+        lane_ceiling=plan.lane_timeout_seconds,
     )
     deadline_seconds = _all_role_deadline_seconds(frozen, remaining, judge_reserve)
     # An explicit cap must not outlive the frozen absolute execution deadline
@@ -1236,6 +1256,7 @@ def _lane_budget(
     *,
     judge_needed: bool,
     shares_job_with_judge: bool,
+    lane_ceiling: int = DEFAULT_LANE_TIMEOUT_SECONDS,
 ) -> tuple[int, int]:
     """Return the lane timeout and same-job judge reserve."""
     judge_reserve = 0
@@ -1251,11 +1272,11 @@ def _lane_budget(
             + MAX_RATE_LIMIT_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS
         )
     if remaining is None:
-        return DEFAULT_LANE_TIMEOUT_SECONDS, judge_reserve
+        return lane_ceiling, judge_reserve
     reserve = (
         max(POST_RESERVE_SECONDS, judge_reserve) if shares_job_with_judge or not judge_needed else 0
     )
-    timeout = max(1, min(DEFAULT_LANE_TIMEOUT_SECONDS, int(remaining - reserve)))
+    timeout = max(1, min(lane_ceiling, int(remaining - reserve)))
     return timeout, judge_reserve
 
 
@@ -1545,7 +1566,10 @@ def _with_review_policy(
             )
     _set_output("policy_digest", policy.digest)
     _set_output("policy_base_sha", policy.base_sha)
-    print(f"review policy: {len(policy.files)} file(s), {policy.profile}/standard, {policy.digest}")
+    print(
+        f"review policy: {len(policy.files)} file(s), "
+        f"{policy.profile}/{policy.minimum}, {policy.digest}"
+    )
     return replace(collected, review_policy=policy)
 
 

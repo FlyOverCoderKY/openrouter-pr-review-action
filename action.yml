@@ -282,7 +282,7 @@ outputs:
     description: "Number of model lanes after parsing."
     value: ${{ steps.run.outputs.lane_count }}
   judge_needed:
-    description: "Whether the OpenRouter judge is enabled for the configured lanes."
+    description: "Prepared setup always requires a judge/publisher job, even for one lane. Other roles report the configured LLM-judge decision."
     value: ${{ steps.run.outputs.judge_needed }}
   judge_model:
     description: "OpenRouter slug used when judging is enabled."

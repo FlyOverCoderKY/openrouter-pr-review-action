@@ -8,7 +8,7 @@ import pytest
 
 from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
 from or_pr_review.errors import SchemaError
-from or_pr_review.loop import LoopState
+from or_pr_review.loop import LoopState, render_agent_context
 from or_pr_review.review_context import (
     CONTEXT_VERSION,
     FROZEN_RUNTIME_KEYS,
@@ -238,3 +238,25 @@ def test_restore_rejects_old_context_version() -> None:
     snapshot["version"] = CONTEXT_VERSION - 1
     with pytest.raises(SchemaError, match="unsupported"):
         restore_context(snapshot)
+
+
+def test_prepared_context_agent_replies_roundtrip_near_cap() -> None:
+    replies = [
+        ("r1-1", "dev", "OLD reply " + "x" * 4_000),
+        ("r1-2", "dev", "NEWEST reply " + "🔍" * 500),
+    ]
+    comments = [(f"user{n}", f"comment {n} " + "y" * 1_500) for n in range(8)]
+    rendered = render_agent_context(replies, comments)
+    assert "NEWEST reply" in rendered
+    assert len(rendered.encode("utf-8")) <= 16_000
+    execution = _execution(agent_replies=rendered)
+    snapshot = freeze_context(
+        REPOSITORY,
+        replace(_collected(), mode="verify"),
+        LoopState("verify", 2),
+        50,
+        execution=execution,
+    )
+    restored = restore_context(snapshot)
+    assert restored.execution is not None
+    assert restored.execution.agent_replies == rendered

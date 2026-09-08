@@ -1984,6 +1984,50 @@ def test_http_retries_cannot_cross_lane_request_budget(
     assert sleeps == []
 
 
+@pytest.mark.parametrize("failure", ["timeout", "url", "connection", "http"])
+def test_failed_lane_retains_transport_evidence_without_progress(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from or_pr_review import harness
+
+    now = {"value": 0.0}
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
+
+    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+        now["value"] += timeout
+        if failure == "timeout":
+            raise TimeoutError("private transport details")
+        if failure == "url":
+            raise urllib.error.URLError("private transport details")
+        if failure == "connection":
+            raise ConnectionError("private transport details")
+        raise _http_error(503, body=b"upstream unavailable")
+
+    monkeypatch.setattr(harness, "bounded_urlopen", fake_urlopen)
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        max_tool_turns=0,
+        lane_timeout=5,
+        workspace=None,
+    )
+
+    assert not result.ok
+    error = result.to_dict()["error"]
+    assert "budget exhausted" in error
+    expected = {
+        "timeout": "transport_timeouts=1",
+        "url": "connection_errors=1",
+        "connection": "connection_errors=1",
+        "http": "last_http_status=503",
+    }
+    assert f"transport totals: {expected[failure]}" in error
+    assert "private transport details" not in error
+    assert "sk-test" not in error
+    assert result.cost_usd is None or result.cost_usd == 0
+
+
 def test_repository_tool_timeout_is_killed_and_returned_as_observation(
     tmp_path: Path,
 ) -> None:

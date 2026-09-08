@@ -570,7 +570,17 @@ def run_lane(
         if gate_root is not None:
             findings = sanitize_anchors(findings, gate_root)
     except LaneError as exc:
-        failed = failed_lane(model, redact(str(exc)), elapsed_ms=elapsed_ms(started))
+        # Progress callbacks are optional, so retain aggregate transport evidence
+        # in the durable failure even when a deadline masks the preceding error.
+        diagnostics = ", ".join(
+            f"{key}={stats[key]}"
+            for key in ("last_http_status", "transport_timeouts", "connection_errors")
+            if key in stats
+        )
+        error = str(exc)
+        if diagnostics:
+            error += f"; transport totals: {diagnostics}"
+        failed = failed_lane(model, redact(error), elapsed_ms=elapsed_ms(started))
         _attach_stats(failed, stats, usage)
         provider = meta.get("provider")
         failed.provider = provider if isinstance(provider, str) else None

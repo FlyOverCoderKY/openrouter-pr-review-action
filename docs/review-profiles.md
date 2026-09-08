@@ -34,7 +34,7 @@ panel needs at least one `required: true` lane. A deep panel retains every
 required standard lane and cannot lower explicit effort, tool, or time
 resources. `effort` may be omitted (empty) to delegate to the provider
 default; standard and deep must either both omit or both explicitly set each
-effort field (`effort` and `verify_effort`) when comparing levels. 
+effort field (`effort` and `verify_effort`) when comparing levels.
 `verify_effort` and `verify_max_tool_turns` apply to verification rounds.
 Each panel may set `judge_model`, independent of its lane slugs. `model_routes`
 is a separate exact-slug mapping for lanes and does not configure the judge.

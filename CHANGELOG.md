@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add `rebase` scope for divergent follow-ups and explicit rechecks after a
+  rewrite. Review the full current PR at all severities with bounded earlier
+  reviews and replies, preserving generation and finding IDs. Reassess current
+  disputes with evidence instead of resetting history or treating old decisions
+  as permanent exemptions. Freeze history across prepared lanes and reject
+  missing history or detected collection races. Profile receipts identify the
+  new scope; downstream validators must accept it before adopting this version.
+
 - Let active OpenRouter responses finish beyond the socket inactivity interval,
   bounded by the existing absolute lane-stage deadline. Keep killable workers
   and bounded retries, and leave GitHub transport limits unchanged. Give a

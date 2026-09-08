@@ -292,7 +292,7 @@ jobs:
 
 The examples pin the review-integrity implementation at `2f551f1a028dc916a54a2b7aaf4c3cebb61add08`; a branch push does not update existing consumers' pins. Do not put first-pass and follow-up in one concurrency group that `synchronize` can cancel.
 
-`latest-commit` never silently falls back to the full PR diff. If `before...after` is missing or the compare fails, the action embeds the **single latest head commit** and says so. For `full-pr`, if GitHub rejects `gh pr diff` because the patch exceeds its line limit, the action computes the complete `git diff base...head` from the full-depth workflow checkout before applying the normal diff-budget triage. A truncated diff posts a visible **partial** verdict and is never treated as clean.
+When a `latest-commit` follow-up detects that the last reviewed commit is no longer an ancestor, it automatically selects **`rebase`**: a full-PR review with earlier review context and preserved finding identities. Missing compare inputs or transient compare errors still embed the **single latest head commit**, with a visible **partial** verdict. For `full-pr` and `rebase`, if GitHub rejects the patch because it exceeds its line limit, the action computes the complete `git diff base...head` from the full-depth workflow checkout before applying the normal diff-budget triage. A truncated diff is never treated as clean.
 
 The initial round is the exhaustive pass: the prompt requires a per-file, all-severity sweep (bug, risk, **and** nit), and each coverage entry claims a completed sweep of that file. From verify round 2 onward a **severity floor** applies: carried `nit` findings are retired — stated visibly in the round's resolution section, never silently — so follow-up rounds track the bug/risk backlog to convergence instead of re-adjudicating nits forever.
 
@@ -427,8 +427,29 @@ Use `review_mode: auto` with `review_scope: full-pr` for a manual recheck. It
 reviews the whole PR while retaining the existing ledger, finding IDs, and
 rebuttals. With no ledger it seeds an initial review. A corrupt newest ledger
 fails visibly; it never silently starts over. Use `review_mode: initial`
-explicitly only when you intend to reset history. A divergent history detected
-during a latest-commit verification still requires a fresh initial review.
+explicitly only when you intend to reset history.
+
+After a rebase or force-push, a divergent `latest-commit` range automatically
+selects `review_scope: rebase`. You can also select it explicitly with
+`review_mode: auto` or `verify` when a prior ledger exists. It reviews the
+complete current PR at **all severities**, including nits, and retains its
+generation, round progression, and finding IDs. Every current finding,
+including disputed findings, must receive a resolution. Valid rebuttals still
+apply; specific new evidence can reopen an invalidated dispute under its
+existing ID. Earlier fixed or retired findings supply context; a regression
+is reported as a new finding with evidence connecting it to the earlier fix.
+
+Rebase context includes historical bot review bodies and replies to their
+finding threads, including earlier generations, plus recent PR comments.
+History is untrusted evidence, never instructions. The narrative is bounded
+to 64,000 UTF-8 bytes, favoring recent material and visibly marking omissions;
+the current ledger remains separate. A history fetch failure or a detected
+head, base, or ledger change during collection fails the review for retry.
+Prepared matrix runs freeze this context so every lane sees the same snapshot.
+
+This scope does not promise a prompt-cache hit. Provider caching depends on
+matching prompt prefixes, routing, and retention; changed diffs and history can
+invalidate reuse. Budget for a full review and measure cached-token usage.
 
 Follow-up reviewers put incomplete fixes in the existing finding's resolution.
 Additional evidence can name `prior_finding_id` to retain that open finding's ID;
@@ -492,7 +513,7 @@ for your account and action revision.
 | `status_comments` | `true` | Live status comment on the PR. |
 | `max_diff_kb` | `300` | Embedded diff cap. Over-budget diffs go through **diff-budget triage**: generated/vendored/lock-class files (the reviewed commit's `.gitattributes` `linguist-generated`/`linguist-vendored`, lockfile heuristics, large committed JSON snapshots, `generated_paths`) demote to stubs first, then the largest hand-written files, so hand-written hunks keep the budget. A stubbed file stays in the embedded diff (header + counts + first-hunk reference), is materialized into the inert checkout for the tools even past the normal 1 MB cap (up to 8 MB), and still requires a coverage entry — so a fully stubbed-or-embedded diff keeps its real verdict and review-loop continuity. `.gitattributes` is repository content (PR-author-controlled); honoring it only shifts packing priority — a demoted file keeps its stub, coverage obligation, and tool access, which is strictly safer than the raw byte cut it replaces (where tail files vanished entirely). Files dropped entirely, an unparseable diff's raw byte cut, or stubs with tools disabled (`max_tool_turns: 0`) ⇒ `partial`, never clean. |
 | `generated_paths` | _empty_ | Extra globs (JSON array of strings) classified as generated/vendored during diff-budget triage. Demotion only shifts packing priority — never excludes a file from review. Trusted workflow config only — never interpolate PR content. Max 8,000 UTF-8 bytes, 200 globs. |
-| `review_scope` | `full-pr` | `full-pr` \| `latest-commit`. Initial rounds require `full-pr`. |
+| `review_scope` | `full-pr` | `full-pr` \| `latest-commit` \| `rebase`. Initial rounds require `full-pr`; `rebase` requires an existing ledger and auto/verify mode. Divergent follow-ups select it automatically. |
 | `review_mode` | `auto` | `auto` continues an existing ledger on any event, or seeds an initial review when none exists. `initial` explicitly resets history; `verify` requires an existing ledger. |
 | `effort` | _empty_ | Optional OpenRouter reasoning effort for **review lanes**. |
 | `max_tool_turns` | `50` | Read-only tool rounds against the inert checkout. `0` disables tools. First-pass default matches the sibling Grok `max_turns`. Follow-up jobs may pass `30`. |

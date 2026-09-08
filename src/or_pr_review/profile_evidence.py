@@ -220,7 +220,7 @@ def _run_id_from_url(url: str) -> int:
 
 def _allowed_scope_lines(scope: str) -> set[str]:
     base = f"**Scope:** `{scope}`"
-    if scope == "full-pr":
+    if scope in {"full-pr", "rebase"}:
         return {f"{base} (full-pr)"}
     return {f"{base} (commit-range)", f"{base} (single-commit)"}
 
@@ -283,11 +283,16 @@ def parse_receipt(raw: bytes | str) -> ReviewReceipt:
     if satisfied and level == "deep" and not required:
         raise _fail("deep receipt cannot be satisfied without required models")
     scope, mode = value["scope"], value["mode"]
-    if type(scope) is not str or scope not in {"full-pr", "latest-commit"}:
+    if type(scope) is not str or scope not in {"full-pr", "latest-commit", "rebase"}:
         raise _fail("scope is invalid")
     if type(mode) is not str or mode not in {"initial", "verify"}:
         raise _fail("mode is invalid")
-    if level == "deep" and scope != "full-pr" or mode == "initial" and scope != "full-pr":
+    if (
+        level == "deep"
+        and scope not in {"full-pr", "rebase"}
+        or mode == "initial"
+        and scope != "full-pr"
+    ):
         raise _fail("level or mode requires full-pr scope")
     run_url = _url(value["run_url"], repository)
     if type(value["run_attempt"]) is not int or not 1 <= value["run_attempt"] <= 1000:

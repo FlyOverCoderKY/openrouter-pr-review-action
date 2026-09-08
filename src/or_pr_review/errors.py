@@ -18,9 +18,9 @@ class SchemaError(ActionError):
 class DivergedRangeError(ActionError):
     """A compare range is not a linear fast-forward (history was rewritten).
 
-    Distinct from transport failures on purpose: only this error may reset
-    the review loop, so a transient timeout or 5xx can never wipe carried
-    loop state.
+    Distinct from transport failures: this expands the review to rebase
+    scope without discarding its history. A timeout or 5xx remains a
+    visible partial comparison failure.
     """
 
 

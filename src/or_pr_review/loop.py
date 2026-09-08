@@ -53,6 +53,7 @@ LEDGER_V1_EVIDENCE_COMPAT_LIMIT = 616
 MAX_LEDGER_MODELS = 8
 MAX_REPLY_CHARS = 2_000
 MAX_REPLIES_BYTES = 16_000
+MAX_REBASE_CONTEXT_BYTES = 64_000
 OMISSION_MARKER = "…[older entries omitted]\n"
 _CONTEXT_SEPARATOR = "\n\n"
 
@@ -196,11 +197,14 @@ def apply_round(
     state: LoopState,
     issues: list[MergedIssue],
     resolutions: dict[str, Resolution],
+    *,
+    reassess_disputes: bool = False,
 ) -> RoundOutcome:
     """Fold a completed round into the ledger and number the new issues."""
     carried: list[LedgerFinding] = []
     resolution_lines: list[str] = []
-    for finding in state.open_prior:
+    candidates = state.prior_findings if reassess_disputes else state.open_prior
+    for finding in candidates:
         resolution = resolutions.get(finding.id)
         status = resolution.status if resolution else "unaddressed"
         note = resolution.note if resolution else ""
@@ -210,8 +214,12 @@ def apply_round(
         if status == "disputed":
             carried.append(replace(finding, status="disputed"))
             continue
-        carried.append(finding)
-    carried.extend(state.disputed_prior)
+        if reassess_disputes and status in {"not_fixed", "fixed_incorrectly"}:
+            carried.append(replace(finding, status="open"))
+        else:
+            carried.append(finding)
+    if not reassess_disputes:
+        carried.extend(state.disputed_prior)
 
     numbered: list[MergedIssue] = []
     carried_by_id = {finding.id: index for index, finding in enumerate(carried)}
@@ -547,6 +555,31 @@ def render_agent_context(
     comment_text = _clip_tail(comment_source, max(0, remaining))
     parts = [part for part in (reply_text, comment_text) if part]
     return _CONTEXT_SEPARATOR.join(parts)
+
+
+def render_rebase_context(
+    review_bodies: list[str],
+    finding_replies: list[tuple[str, str, str]],
+    issue_comments: list[tuple[str, str]],
+) -> str:
+    """Bounded historical evidence, including fixes absent from today's ledger.
+
+    The caller supplies only reviews from the configured bot. Their text and
+    all replies remain untrusted prompt data, never a source of current state.
+    Hidden ledger/receipt encodings are unnecessary in this narrative context.
+    """
+    reviews = [re.sub(r"<!--[\s\S]*?-->", "", body).strip() for body in review_bodies]
+    reviews = [body for body in reviews if body]
+    heading = (
+        f"Historical bot reviews ({len(reviews)} available, oldest first). "
+        "These describe earlier code; current code must establish every conclusion.\n\n"
+    )
+    review_text = _clip_tail("\n\n--- Earlier review ---\n\n".join(reviews), 47_500)
+    replies = render_agent_context(finding_replies, issue_comments)
+    result = heading + review_text + "\n\nHistorical replies and PR discussion:\n\n" + replies
+    if len(result.encode("utf-8")) > MAX_REBASE_CONTEXT_BYTES:
+        raise ActionError("rebase review history exceeds its context budget")
+    return result
 
 
 def _clip_tail(text: str, max_bytes: int) -> str:

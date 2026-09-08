@@ -1148,9 +1148,8 @@ def test_all_persists_completed_lane_before_bounded_sibling_finishes(
     assert (artifact_dir / "lane-1.json").is_file()
     expected_reserve = (
         cli_mod.POST_RESERVE_SECONDS
-        + (cli_mod.MAX_RATE_LIMIT_ATTEMPTS - 1) * cli_mod.MAX_RETRY_AFTER_SECONDS
         + cli_mod.JUDGE_SCHEDULING_MARGIN_SECONDS
-        + cli_mod.MAX_RATE_LIMIT_ATTEMPTS * cli_mod.MIN_JUDGE_ATTEMPT_SECONDS
+        + cli_mod.JUDGE_BUDGET_SECONDS
     )
     assert all(
         timeout <= cli_mod.JOB_BUDGET_SECONDS - expected_reserve for timeout in lane_timeouts
@@ -1252,9 +1251,7 @@ def test_judge_deadline_falls_back_instead_of_starting_long_retries(
     )
     env = {
         "MODELS": "fast/model,slow/model",
-        cli_mod._JOB_DEADLINE_KEY: str(
-            cli_mod.time.monotonic() + cli_mod.POST_RESERVE_SECONDS + 60
-        ),
+        cli_mod._JOB_DEADLINE_KEY: str(cli_mod.time.monotonic() + cli_mod.POST_RESERVE_SECONDS + 5),
     }
     issues, note, cost, ran = cli_mod._resolve_issues(
         env, ["fast/model", "slow/model"], lanes, lanes
@@ -1265,18 +1262,110 @@ def test_judge_deadline_falls_back_instead_of_starting_long_retries(
     assert ran is False
 
 
-def test_judge_timeout_is_clipped_to_fit_all_retries(
+def test_judge_gets_one_bounded_window_and_preserves_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from or_pr_review import cli as cli_mod
 
     monkeypatch.setattr(cli_mod.time, "monotonic", lambda: 100.0)
-    # 180s post + 180s worst Retry-After + 5s scheduling + 7*30s requests.
     env = {
         "OPENROUTER_TIMEOUT_SECONDS": "180",
-        cli_mod._JOB_DEADLINE_KEY: str(100 + 180 + 180 + 5 + 210),
+        cli_mod._JOB_DEADLINE_KEY: str(100 + 180 + 5 + 60),
     }
-    assert cli_mod._judge_request_timeout(env) == 30
+    assert cli_mod._judge_request_timeout(env) == 60
+    env[cli_mod._JOB_DEADLINE_KEY] = str(100 + 180 + 5 + 12)
+    assert cli_mod._judge_request_timeout(env) == 12
+    env[cli_mod._JOB_DEADLINE_KEY] = str(100 + 180 + 5)
+    assert cli_mod._judge_request_timeout(env) is None
+
+
+def test_reviewers_keep_most_of_the_shared_job_budget() -> None:
+    from or_pr_review import cli as cli_mod
+
+    # Production 22-minute envelope with an 18-minute lane ceiling: allocating
+    # hypothetical seven-attempt judge retries used to leave only ~12 minutes.
+    lane_seconds, reserve = cli_mod._lane_budget(
+        1320, judge_needed=True, shares_job_with_judge=True, lane_ceiling=1080
+    )
+    assert lane_seconds == 1075
+    assert reserve == 245
+    assert lane_seconds + reserve == 1320
+
+
+def test_judge_retries_share_deadline_and_preserve_completed_lane_findings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    import urllib.error
+    from email.message import Message
+
+    from or_pr_review import cli as cli_mod
+    from or_pr_review import harness, judge
+    from or_pr_review.schema import Finding, LaneResult
+
+    now = [100.0]
+    attempts: list[float] = []
+    monkeypatch.setattr(cli_mod.time, "monotonic", lambda: now[0])
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    def transport(_request: object, *, timeout: float) -> io.BytesIO:
+        attempts.append(timeout)
+        if len(attempts) == 1:
+            now[0] += 1
+            headers = Message()
+            headers["Retry-After"] = "2"
+            raise urllib.error.HTTPError(
+                "https://openrouter.ai/api/v1/chat/completions",
+                429,
+                "busy",
+                headers,
+                io.BytesIO(b'{"error":{"message":"busy"}}'),
+            )
+        now[0] += timeout
+        raise TimeoutError("response never completed")
+
+    real_chat = harness.openrouter_chat
+    monkeypatch.setattr(harness, "bounded_urlopen", transport)
+    monkeypatch.setattr(
+        judge,
+        "openrouter_chat",
+        lambda key, payload, **kwargs: real_chat(key, payload, sleep=sleep, **kwargs),
+    )
+    lanes = [
+        LaneResult(
+            schema_version=SCHEMA_VERSION,
+            ok=True,
+            model=model,
+            error=None,
+            findings=[
+                Finding(
+                    title=f"Bug {index}",
+                    body=f"Distinct failure {index}",
+                    severity="bug",
+                    file="a.py",
+                    line=index + 1,
+                    model_id=model,
+                )
+            ],
+        )
+        for index, model in enumerate(("fast/model", "slow/model"))
+    ]
+    env = {
+        "MODELS": "fast/model,slow/model",
+        "OPENROUTER_API_KEY": "test-key",
+        "OPENROUTER_TIMEOUT_SECONDS": "180",
+        cli_mod._JOB_DEADLINE_KEY: "345",
+    }
+    outcome = cli_mod._resolve_issues(env, [lane.model for lane in lanes], lanes, lanes)
+    assert attempts == [60, 57]
+    assert now[0] == 160
+    assert float(env[cli_mod._JOB_DEADLINE_KEY]) - now[0] == 185
+    issues, note, _cost, ran = outcome
+    assert {issue.title for issue in issues} == {"Bug 0", "Bug 1"}
+    assert "transport fallback: deterministic union" in note
+    assert ran is True
 
 
 def test_prepare_workspace_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

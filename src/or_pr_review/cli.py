@@ -30,8 +30,6 @@ from or_pr_review.errors import ActionError, SchemaError
 from or_pr_review.github_ops import GitHub, require_full_sha, upsert_status_comment
 from or_pr_review.harness import (
     DEFAULT_LANE_TIMEOUT_SECONDS,
-    MAX_RATE_LIMIT_ATTEMPTS,
-    MAX_RETRY_AFTER_SECONDS,
     ProgressFn,
     parse_max_tool_turns,
     require_openrouter_key,
@@ -115,7 +113,7 @@ _ACTIVE_ENV: dict[str, str] = {}
 JOB_BUDGET_SECONDS = 22 * 60
 POST_RESERVE_SECONDS = 3 * 60
 JUDGE_SCHEDULING_MARGIN_SECONDS = 5
-MIN_JUDGE_ATTEMPT_SECONDS = 30
+JUDGE_BUDGET_SECONDS = 60
 LANE_COLLECTION_GRACE_SECONDS = 5
 DEFAULT_BOT_LOGIN = "github-actions[bot]"
 _JOB_DEADLINE_KEY = "_OR_PR_REVIEW_JOB_DEADLINE_MONOTONIC"
@@ -696,6 +694,8 @@ def _resolve_issues(
             False,
             diagnostics,
         )
+    # One absolute boundary includes retries and policy/payload preparation.
+    judge_deadline = time.monotonic() + judge_timeout
     key = require_openrouter_key(env)
     print(
         f"judge running with `{judge_model}` (reasoning effort=minimal, "
@@ -713,6 +713,7 @@ def _resolve_issues(
             lanes=lane_payloads,
             api_key=key,
             timeout=judge_timeout,
+            deadline=judge_deadline,
             **policy_kwargs,
         )
     except SchemaError as exc:
@@ -1261,15 +1262,10 @@ def _lane_budget(
     """Return the lane timeout and same-job judge reserve."""
     judge_reserve = 0
     if shares_job_with_judge and judge_needed:
-        # role=all shares one job with the judge. Reserve enough time for a
-        # meaningful request on every HTTP attempt plus retry delay and post;
-        # otherwise lanes that consume their advertised budget make the judge
-        # mathematically impossible to start.
+        # Reviewers produce the evidence. The tool-free judge gets one bounded
+        # window shared by all retries, then we publish the validated union.
         judge_reserve = (
-            POST_RESERVE_SECONDS
-            + (MAX_RATE_LIMIT_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
-            + JUDGE_SCHEDULING_MARGIN_SECONDS
-            + MAX_RATE_LIMIT_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS
+            POST_RESERVE_SECONDS + JUDGE_BUDGET_SECONDS + JUDGE_SCHEDULING_MARGIN_SECONDS
         )
     if remaining is None:
         return lane_ceiling, judge_reserve
@@ -2122,17 +2118,15 @@ def _remaining_job_seconds(env: dict[str, str]) -> float | None:
 
 
 def _judge_request_timeout(env: dict[str, str]) -> int | None:
-    """Fit every possible judge retry inside the remaining job budget."""
+    """Allow one judge window without borrowing publication time or starving lanes."""
     configured = _int_env(env, "OPENROUTER_TIMEOUT_SECONDS", 180)
     remaining = _remaining_job_seconds(env)
     if remaining is None:
-        return configured
-    judge_budget = remaining - POST_RESERVE_SECONDS
-    retry_reserve = (MAX_RATE_LIMIT_ATTEMPTS - 1) * MAX_RETRY_AFTER_SECONDS
-    usable = judge_budget - retry_reserve - JUDGE_SCHEDULING_MARGIN_SECONDS
-    if usable < MAX_RATE_LIMIT_ATTEMPTS * MIN_JUDGE_ATTEMPT_SECONDS:
+        return min(configured, JUDGE_BUDGET_SECONDS)
+    usable = int(remaining - POST_RESERVE_SECONDS - JUDGE_SCHEDULING_MARGIN_SECONDS)
+    if usable < 1:
         return None
-    return min(configured, max(1, int(usable // MAX_RATE_LIMIT_ATTEMPTS)))
+    return min(configured, JUDGE_BUDGET_SECONDS, usable)
 
 
 def _github(env: dict[str, str]) -> GitHub:

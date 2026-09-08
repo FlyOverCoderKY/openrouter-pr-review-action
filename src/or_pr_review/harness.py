@@ -20,7 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from or_pr_review.errors import ActionError, LaneError
-from or_pr_review.http_transport import bounded_urlopen
+from or_pr_review.http_transport import (
+    HttpConnectTimeout,
+    HttpElapsedTimeout,
+    HttpIdleTimeout,
+    bounded_urlopen,
+)
 from or_pr_review.models import GEMINI_MAX_RESPONSE_TOKENS, base_chat_payload
 from or_pr_review.redaction import redact
 from or_pr_review.schema import (
@@ -157,7 +162,7 @@ class _LoopState:
         self.finalize_reason = reason
         if reason == "deadline":
             # Deadline pressure is orthogonal to the immediate finalize reason.
-            # A later signature recovery must still preserve the repair reserve.
+            # A later signature recovery may repair only from time still left.
             self.deadline_limited = True
         if salvaged:
             self.salvage_attempted = True
@@ -187,13 +192,10 @@ class _LaneClock:
         *,
         now: float,
         tools_active: bool,
-        deadline_limited: bool,
-        repair_available: bool,
     ) -> float | None:
+        self.ensure_active(now)
         if self.deadline is None:
             self.request_deadline = None
-        elif deadline_limited and repair_available:
-            self.request_deadline = now + max(1.0, (self.deadline - now) / 2)
         elif tools_active:
             self.request_deadline = self.deadline - self.reserve_seconds
         else:
@@ -266,7 +268,16 @@ def openrouter_chat(
             },
         )
         try:
-            with bounded_urlopen(request, timeout=request_timeout) as response:
+            # A live response may take longer than one socket inactivity window.
+            # The absolute stage deadline still bounds headers, trickling bodies,
+            # worker shutdown and all retries, without preempting useful data.
+            limits: dict[str, float] = {}
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LaneError("OpenRouter lane request budget exhausted")
+                limits["total_timeout"] = remaining
+            with bounded_urlopen(request, timeout=request_timeout, **limits) as response:
                 raw = response.read().decode("utf-8")
             break
         except urllib.error.HTTPError as exc:
@@ -303,6 +314,12 @@ def openrouter_chat(
         except TimeoutError as exc:
             if stats is not None:
                 stats["transport_timeouts"] = stats.get("transport_timeouts", 0) + 1
+                if isinstance(exc, HttpIdleTimeout):
+                    stats["idle_timeouts"] = stats.get("idle_timeouts", 0) + 1
+                elif isinstance(exc, HttpElapsedTimeout):
+                    stats["elapsed_deadlines"] = stats.get("elapsed_deadlines", 0) + 1
+                elif isinstance(exc, HttpConnectTimeout):
+                    stats["connect_timeouts"] = stats.get("connect_timeouts", 0) + 1
             if attempt < MAX_HTTP_ATTEMPTS:
                 _count_retry(stats)
                 _sleep_before_retry(_retry_delay(attempt, None), sleep=sleep, deadline=deadline)
@@ -345,7 +362,7 @@ def _count_retry(stats: dict[str, int] | None) -> None:
 
 
 def _bounded_request_timeout(timeout: int, deadline: float | None) -> float:
-    """Clamp one HTTP request to the remaining lane-stage wall clock."""
+    """Clamp socket inactivity to remaining stage time; elapsed is separate."""
     if deadline is None:
         return float(timeout)
     remaining = deadline - time.monotonic()
@@ -430,9 +447,8 @@ def run_lane(
     stats: dict[str, int] = {}
     clock = _LaneClock(
         deadline=deadline,
-        # Finalization splits its tail between the first finish and one repair.
-        # Budget a normal HTTP allowance for each, retaining at least half of
-        # short lanes for exploration without extending the caller's deadline.
+        # Preserve a finish window, capped at half of short lanes. The first
+        # finish can use the whole tail; retry only from time actually left.
         reserve_seconds=min(2 * timeout, max(1, lane_timeout // 2)),
         request_deadline=deadline,
     )
@@ -480,6 +496,9 @@ def run_lane(
             "retries",
             "last_http_status",
             "transport_timeouts",
+            "idle_timeouts",
+            "elapsed_deadlines",
+            "connect_timeouts",
             "connection_errors",
         ):
             value = stats.get(key)
@@ -576,7 +595,13 @@ def run_lane(
         # carry their immediate status; a sticky earlier status can mislead here.
         diagnostics = ", ".join(
             f"{key}={stats[key]}"
-            for key in ("transport_timeouts", "connection_errors")
+            for key in (
+                "transport_timeouts",
+                "idle_timeouts",
+                "elapsed_deadlines",
+                "connect_timeouts",
+                "connection_errors",
+            )
             if key in stats
         )
         error = str(exc)
@@ -783,8 +808,6 @@ def _run_loop(
             clock.prepare_request(
                 now=now,
                 tools_active=state.tools_active,
-                deadline_limited=state.deadline_limited,
-                repair_available=not state.finalize_retried,
             )
             payload = {
                 **payload_base,
@@ -895,9 +918,8 @@ def _run_loop(
                     )
                     continue
                 if state.deadline_limited and not state.finalize_retried:
-                    # A transport/provider failure during the first protected
-                    # finalize still gets one bounded retry. The request above
-                    # reserved time specifically for this path.
+                    # A failed finish may be repaired from remaining time.
+                    # Do not interrupt a live response to reserve this retry.
                     retry_finalization(
                         (
                             "The protected finalize request failed. Do not call tools. "

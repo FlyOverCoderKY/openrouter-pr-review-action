@@ -25,7 +25,7 @@ on:
         type: string
         default: "120"
       openrouter_timeout_seconds:
-        description: Timeout in seconds for each OpenRouter request (1-600).
+        description: Connection/header and socket inactivity timeout (1-600 seconds); active bodies may continue until the lane-stage deadline.
         type: string
         default: "180"
       job_budget_seconds:

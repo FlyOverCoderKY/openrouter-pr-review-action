@@ -34,15 +34,13 @@ def test_require_key_fail_closed() -> None:
         require_openrouter_key({})
 
 
-def test_lane_clock_preserves_finalize_repair_budget() -> None:
+def test_lane_clock_gives_finish_the_remaining_budget() -> None:
     clock = _LaneClock(deadline=100.0, reserve_seconds=20.0)
 
     assert (
         clock.prepare_request(
             now=50.0,
             tools_active=True,
-            deadline_limited=False,
-            repair_available=True,
         )
         == 80.0
     )
@@ -51,17 +49,13 @@ def test_lane_clock_preserves_finalize_repair_budget() -> None:
         clock.prepare_request(
             now=80.0,
             tools_active=False,
-            deadline_limited=True,
-            repair_available=True,
         )
-        == 90.0
+        == 100.0
     )
     assert (
         clock.prepare_request(
             now=90.0,
             tools_active=False,
-            deadline_limited=True,
-            repair_available=False,
         )
         == 100.0
     )
@@ -1254,7 +1248,7 @@ def test_gemini_deadline_signature_rejection_sanitizes_before_retry(
     assert result.thought_signature_recoveries == 1
     assert result.sanitized_tool_turns == 1
     assert len(payloads) == 4
-    assert request_deadlines == [5.0, 8.0, 8.0, 10.0]
+    assert request_deadlines == [5.0, 10.0, 10.0, 10.0]
 
 
 def test_budget_withdrawal_never_solicits_unserviceable_calls(tmp_path: Path) -> None:
@@ -1600,7 +1594,9 @@ def test_openrouter_chat_retries_transient_errors(monkeypatch: pytest.MonkeyPatc
 
     attempts = {"n": 0}
 
-    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: int, total_timeout: float | None = None
+    ) -> _FakeResponse:
         attempts["n"] += 1
         if attempts["n"] <= 2:
             raise _http_error(429, retry_after="1")
@@ -1632,7 +1628,9 @@ def test_openrouter_chat_bounds_or_ignores_bad_retry_after(
 ) -> None:
     attempts = 0
 
-    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: int, total_timeout: float | None = None
+    ) -> _FakeResponse:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -1659,7 +1657,9 @@ def test_openrouter_chat_retries_mid_body_connection_drops(
 
     attempts = {"n": 0}
 
-    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: int, total_timeout: float | None = None
+    ) -> _FakeResponse:
         attempts["n"] += 1
         if attempts["n"] == 1:
             # A truncated chunked response raises from response.read(), not
@@ -1683,7 +1683,9 @@ def test_openrouter_chat_retries_mid_body_connection_drops(
 def test_openrouter_chat_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
     from or_pr_review import harness
 
-    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: int, total_timeout: float | None = None
+    ) -> _FakeResponse:
         raise _http_error(503)
 
     monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
@@ -1704,7 +1706,9 @@ def test_openrouter_chat_rate_limit_retries_longer_with_stable_jitter(
         b'"metadata":{"provider_name":"Google"}}}'
     )
 
-    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: int, total_timeout: float | None = None
+    ) -> _FakeResponse:
         raise _http_error(429, body=body)
 
     monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
@@ -1788,7 +1792,9 @@ def test_http_error_provider_is_parsed_beyond_display_truncation(
         }
     ).encode()
 
-    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: float, total_timeout: float | None = None
+    ) -> _FakeResponse:
         raise _http_error(400, body=body)
 
     monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
@@ -1805,7 +1811,9 @@ def test_rate_limit_deadline_preserves_provider_and_nonbillable_cost(
 
     body = b'{"error":{"metadata":{"provider_name":"Google"}}}'
 
-    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: float, total_timeout: float | None = None
+    ) -> _FakeResponse:
         raise _http_error(429, body=body)
 
     monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
@@ -1825,7 +1833,9 @@ def test_rate_limit_deadline_preserves_provider_and_nonbillable_cost(
 def test_openrouter_chat_does_not_retry_client_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     from or_pr_review import harness
 
-    def fake_urlopen(_request: object, timeout: int) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: int, total_timeout: float | None = None
+    ) -> _FakeResponse:
         raise _http_error(400)
 
     monkeypatch.setattr("or_pr_review.harness.bounded_urlopen", fake_urlopen)
@@ -1970,7 +1980,9 @@ def test_deadline_finish_and_repair_receive_full_http_allowances(
     finishes: list[float] = []
     monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
 
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+    def fake_urlopen(
+        request: urllib.request.Request, timeout: float, total_timeout: float | None = None
+    ) -> io.BytesIO:
         payload = json.loads(request.data)
         if "tools" in payload:
             now["value"] += timeout
@@ -2011,7 +2023,9 @@ def test_http_retries_cannot_cross_lane_request_budget(
 
     monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
 
-    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: float, total_timeout: float | None = None
+    ) -> _FakeResponse:
         observed_timeouts.append(timeout)
         now["value"] += timeout
         raise TimeoutError("provider stalled")
@@ -2039,7 +2053,9 @@ def test_failed_lane_retains_transport_evidence_without_progress(
     now = {"value": 0.0}
     monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
 
-    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: float, total_timeout: float | None = None
+    ) -> _FakeResponse:
         now["value"] += timeout
         if failure == "timeout":
             raise TimeoutError("private transport details")
@@ -2086,7 +2102,9 @@ def test_transport_history_does_not_replace_later_parse_failure(
 
     calls = 0
 
-    def fake_urlopen(_request: object, timeout: float) -> io.BytesIO:
+    def fake_urlopen(
+        _request: object, timeout: float, total_timeout: float | None = None
+    ) -> io.BytesIO:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -2869,7 +2887,9 @@ def test_openrouter_chat_internal_retry_counts_one_logical_attempt(
         }
     ).encode()
 
-    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: float, total_timeout: float | None = None
+    ) -> _FakeResponse:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -2908,7 +2928,9 @@ def test_run_lane_openrouter_retry_keeps_total_cost_incomplete(
         }
     ).encode()
 
-    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: float, total_timeout: float | None = None
+    ) -> _FakeResponse:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -2951,7 +2973,9 @@ def test_run_lane_openrouter_retry_progress_counts_inflight_before_interruption(
         }
     ).encode()
 
-    def fake_urlopen(_request: object, timeout: float) -> _FakeResponse:
+    def fake_urlopen(
+        _request: object, timeout: float, total_timeout: float | None = None
+    ) -> _FakeResponse:
         nonlocal urlopen_calls
         urlopen_calls += 1
         if urlopen_calls == 1:
@@ -3010,3 +3034,103 @@ def test_run_lane_records_served_tier_without_request(tmp_path: Path) -> None:
     assert result.service_tier_observed_responses == 1
     assert result.service_tier_complete is True
     assert result.service_tier_confirmed is False
+
+
+def test_live_finalize_can_use_tail_beyond_one_idle_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from or_pr_review import harness
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    now = [0.0]
+    attempts = []
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now[0])
+
+    def transport(request, *, timeout, total_timeout=None):
+        payload = json.loads(request.data)
+        attempts.append((timeout, total_timeout, "tools" in payload))
+        if "tools" in payload:
+            # Exploration reaches its cutoff with evidence already collected.
+            now[0] = 702.0
+            return io.BytesIO(json.dumps(_tool_reply()).encode())
+        assert timeout == 180
+        assert total_timeout == 360
+        # Active bytes keep this response alive. No speculative repair gets
+        # to interrupt its useful 240-second generation at the old 180s limit.
+        now[0] += 240
+        return io.BytesIO(
+            json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "findings": [
+                                            {
+                                                "title": "Preserved finding",
+                                                "body": "Evidence from a.py.",
+                                                "severity": "risk",
+                                                "file": "a.py",
+                                                "line": 1,
+                                            }
+                                        ]
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ).encode()
+        )
+
+    monkeypatch.setattr(harness, "bounded_urlopen", transport)
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        timeout=180,
+        lane_timeout=1062,
+    )
+    assert result.ok
+    assert result.salvaged
+    assert not result.retries
+    assert [finding.title for finding in result.findings] == ["Preserved finding"]
+    assert len(attempts) == 2
+    assert now[0] == 942
+
+
+@pytest.mark.parametrize("kind", ["idle_timeouts", "elapsed_deadlines", "connect_timeouts"])
+def test_failed_lane_distinguishes_idle_from_elapsed_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    from or_pr_review import harness
+    from or_pr_review.http_transport import HttpConnectTimeout, HttpElapsedTimeout, HttpIdleTimeout
+
+    now = [0.0]
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now[0])
+
+    def transport(request, *, timeout, total_timeout=None):
+        now[0] += total_timeout
+        error_type = {
+            "idle_timeouts": HttpIdleTimeout,
+            "elapsed_deadlines": HttpElapsedTimeout,
+            "connect_timeouts": HttpConnectTimeout,
+        }[kind]
+        raise error_type("private transport detail")
+
+    monkeypatch.setattr(harness, "bounded_urlopen", transport)
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        max_tool_turns=0,
+        lane_timeout=5,
+    )
+    assert not result.ok
+    assert "transport_timeouts=1" in result.error
+    assert f"{kind}=1" in result.error
+    assert "private transport detail" not in result.error

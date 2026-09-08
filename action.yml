@@ -181,7 +181,7 @@ inputs:
     required: false
     default: "50"
   openrouter_timeout_seconds:
-    description: "Elapsed-time limit for each OpenRouter HTTP attempt, including worker startup, connection, headers, body and response transfer (1-600 seconds)."
+    description: "Connection/header setup and socket inactivity limit per OpenRouter HTTP attempt (1-600 seconds); active responses share the remaining lane-stage deadline. Without a stage deadline, also limits elapsed time."
     required: false
     default: "180"
   lane_index:

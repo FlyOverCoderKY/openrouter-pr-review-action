@@ -2,12 +2,20 @@
 
 ## Unreleased
 
+- Let active OpenRouter responses finish beyond the socket inactivity interval,
+  bounded by the existing absolute lane-stage deadline. Keep killable workers
+  and bounded retries, and leave GitHub transport limits unchanged. Give a
+  structured finish its whole remaining window instead of pre-reserving half
+  for a hypothetical retry. No lane, job, judge, or publication budget increase.
+  Keep a separate DNS/connection/header watchdog; distinguish its expiry, socket
+  inactivity, and absolute elapsed-time expiry in durable checkpoint and failed-lane diagnostics.
+
 - Give reviewers priority in shared `role: all` jobs: reserve one 60-second
   judge window instead of budgeting every possible judge retry in advance.
   Keep the publication allowance and preserve validated lane findings through
   deterministic union fallback if judging fails. Skip judge calls with less
   than 15 seconds available. Dedicated matrix judge jobs retain their configured
-  per-attempt timeout and share their own job deadline across retries.
+  per-attempt inactivity timeout and share their own job deadline across retries.
 
 - Add trusted review profiles with version-1 registries, prepared matrix
   execution, and publication context v3. Freeze PR head, policy, replies, model
@@ -22,7 +30,7 @@
   validation and offline lint/explain commands. Existing reviewers remain
   caller-configured.
 
-- Enforce elapsed-time HTTP attempt limits with killable transport workers, including
+- Enforce absolute HTTP deadlines with killable transport workers, including
   stalled DNS/headers and trickling success or error bodies. Finish lanes before the
   coordinator deadline, and never wait indefinitely when the budget is exhausted.
   Preserve aggregate progress checkpoints in all-role artifacts, including retry and

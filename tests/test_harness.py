@@ -1955,6 +1955,52 @@ def test_deadline_finalize_transport_failure_keeps_one_repair_turn(
     assert now["value"] < 10
 
 
+@pytest.mark.parametrize("request_timeout", [60, 180])
+@pytest.mark.parametrize("exploration_times_out", [False, True])
+def test_deadline_finish_and_repair_receive_full_http_allowances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_timeout: int,
+    exploration_times_out: bool,
+) -> None:
+    from or_pr_review import harness
+
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    now = {"value": 0.0}
+    finishes: list[float] = []
+    monkeypatch.setattr(harness.time, "monotonic", lambda: now["value"])
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        payload = json.loads(request.data)
+        if "tools" in payload:
+            now["value"] += timeout
+            if exploration_times_out and now["value"] >= 732 - 2 * request_timeout:
+                raise TimeoutError("exploration allowance exhausted")
+            return io.BytesIO(json.dumps(_tool_reply()).encode())
+        finishes.append(timeout)
+        assert timeout == request_timeout
+        if len(finishes) == 1:
+            now["value"] += timeout
+            raise TimeoutError("finish stalled")
+        now["value"] += timeout * 0.75
+        return io.BytesIO(json.dumps(_findings_reply()).encode())
+
+    monkeypatch.setattr(harness, "bounded_urlopen", fake_urlopen)
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=tmp_path,
+        timeout=request_timeout,
+        lane_timeout=732,
+    )
+
+    assert result.ok
+    assert result.salvaged
+    assert finishes == [request_timeout, request_timeout]
+    assert now["value"] < 732
+
+
 def test_http_retries_cannot_cross_lane_request_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2020,12 +2066,52 @@ def test_failed_lane_retains_transport_evidence_without_progress(
         "timeout": "transport_timeouts=1",
         "url": "connection_errors=1",
         "connection": "connection_errors=1",
-        "http": "last_http_status=503",
     }
-    assert f"transport totals: {expected[failure]}" in error
+    if failure == "http":
+        assert "last OpenRouter HTTP 503" in error
+        assert error.count("503") == 1
+        assert "lane transport history" not in error
+    else:
+        assert f"lane transport history (includes recovered errors): {expected[failure]}" in error
     assert "private transport details" not in error
     assert "sk-test" not in error
-    assert result.cost_usd is None or result.cost_usd == 0
+    assert result.cost_usd is None
+    assert not result.cost_complete
+
+
+def test_transport_history_does_not_replace_later_parse_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_pr_review import harness
+
+    calls = 0
+
+    def fake_urlopen(_request: object, timeout: float) -> io.BytesIO:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _http_error(429)
+        if calls == 2:
+            raise TimeoutError("recovered timeout")
+        return io.BytesIO(b'{"choices":[{"message":{"content":"invalid JSON"}}]}')
+
+    monkeypatch.setattr(harness, "bounded_urlopen", fake_urlopen)
+    monkeypatch.setattr(harness, "_sleep_before_retry", lambda *_args, **_kwargs: None)
+    result = run_lane(
+        model="example/model",
+        messages=[{"role": "user", "content": "review"}],
+        api_key="sk-test",
+        workspace=None,
+        max_tool_turns=0,
+    )
+
+    assert not result.ok
+    assert "JSON" in result.error
+    assert (
+        "lane transport history (includes recovered errors): transport_timeouts=1" in result.error
+    )
+    assert "429" not in result.error
+    assert result.cost_usd is None
 
 
 def test_repository_tool_timeout_is_killed_and_returned_as_observation(

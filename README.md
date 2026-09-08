@@ -347,17 +347,25 @@ collecting results, leaving time to save their final diagnostics. The existing j
 and publication reserves are unchanged. HTTP attempts run in isolated workers that
 are terminated at the elapsed-time limit, so periodic response bytes cannot keep a
 request alive indefinitely. Retries still share the lane's remaining budget.
+Tool exploration reserves two HTTP request allowances for a structured finish and
+one repair, capped at half the lane budget. With the default 180-second request
+timeout and enough lane time, each gets up to 180 seconds. Shorter lanes divide
+the available reserve; the overall lane and job deadlines do not increase.
 The limit includes worker startup and response transfer. There is no extra time
 after that limit: near lane expiry, a response that has not reached the reviewer
 is incomplete even if the provider has finished generating it. This keeps retries
 and shutdown within the reserved publication window.
 
-All-role artifact uploads include `progress-N.json` checkpoints alongside the final
+When available, all-role artifact uploads include `progress-N.json` checkpoints alongside the final
 lane files. These contain aggregate request/tool/retry counts, observed usage and
 costs, last HTTP error status, transport timeout and connection failure counts, and
 provider metadata when known. They contain no prompts, tool arguments, or model
 output. A timeout preserves observed costs as incomplete and never turns an
 unfinished lane into a successful review.
+Final failed lane results also retain aggregate timeout and connection-error history
+in their error text, including prepared-context reviews that do not emit progress
+checkpoints. This history can include recovered errors; the leading error describes
+the terminal failure. HTTP failures already include their immediate status.
 
 Matrix lane artifacts carry a versioned publication context: the collected PR metadata,
 diff and completeness accounting, prior loop state, and tool-turn policy. The judge

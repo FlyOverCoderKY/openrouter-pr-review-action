@@ -224,7 +224,7 @@ def test_body_rejects_tampered_ledger_receipt_and_header():
 
 
 @pytest.mark.parametrize("missing_head", [False, True])
-def test_clean_receipt_requires_current_empty_ledger(missing_head):
+def test_clean_receipt_requires_current_ledger_without_open_findings(missing_head):
     body_text, canonical, _ = published_pair()
     findings = (
         ()
@@ -240,6 +240,22 @@ def test_clean_receipt_requires_current_empty_ledger(missing_head):
     lines[1] = marker
     with pytest.raises(SchemaError, match="ledger"):
         parse_review_receipt("\n".join(lines), canonical)
+
+
+@pytest.mark.parametrize("has_open_finding", [False, True])
+def test_clean_receipt_allows_settled_disputes_but_rejects_mixed_open_ledger(has_open_finding):
+    body_text, canonical, receipt = published_pair(mode="verify")
+    findings = [LedgerFinding("r1-1", "risk", "a.py", 1, "Rebutted", "Evidence", "disputed")]
+    if has_open_finding:
+        findings.append(LedgerFinding("r1-2", "bug", "b.py", 2, "Unresolved", "Evidence", "open"))
+    lines = body_text.splitlines()
+    lines[1] = encode_ledger(Ledger(3, tuple(findings), HEAD, GENERATION), repo=REPO, pr_number=9)
+    body_text = "\n".join(lines)
+    if has_open_finding:
+        with pytest.raises(SchemaError, match="unresolved ledger findings"):
+            parse_review_receipt(body_text, canonical)
+    else:
+        assert parse_review_receipt(body_text, canonical) == receipt
 
 
 def test_gate_required_models_degraded_and_neutral_policy_base():

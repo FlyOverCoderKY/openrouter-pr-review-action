@@ -345,7 +345,9 @@ def _header_lines(body: str, receipt: ReviewReceipt) -> int:
             raise _fail("review ledger marker does not decode for this repository")
         if ledger.reviewed_sha != receipt.head_sha:
             raise _fail("review ledger head SHA does not match receipt")
-        if receipt.verdict == "clean" and ledger.findings:
+        # Settled disputes remain in the ledger so subsequent rounds do not
+        # re-raise them. Only open findings contradict a clean verdict.
+        if receipt.verdict == "clean" and any(f.status == "open" for f in ledger.findings):
             raise _fail("clean receipt conflicts with unresolved ledger findings")
         return 6
 

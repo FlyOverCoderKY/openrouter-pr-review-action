@@ -16,3 +16,6 @@ build/
 bench/fixtures-local/
 uv.lock
 /review-harness-research
+
+# Local cleanup backlog, never committed
+DESLOPPIFY.md

@@ -88,10 +88,17 @@ with:
   review_policy: base
 ```
 
-The older pins in the general workflow examples predate this feature; advance
-them deliberately before enabling it. Leave `review_policy` off for unchanged
-behavior. Matrix policy planning is not supported in this initial release;
-policy-enabled matrix roles fail before model calls.
+The workflow examples in this README pin a revision that contains this feature.
+Leave `review_policy` off for unchanged behavior; matrix runs without policy
+keep working as before. Setting `review_policy: base` on `setup`, `lane`, or
+`judge` roles requires the prepared flow: setup needs a full-depth checkout of
+the reviewed repository and writes the guidance into a context artifact, and
+every lane and the judge must receive that artifact through
+`review_context_file` and `review_context_sha256` (see
+[prepared matrix execution](docs/review-profiles.md#prepared-matrix-execution)).
+Policy-enabled matrix roles without the prepared context fail before model
+calls. The shipped reusable workflow does not accept `review_policy`; use the
+direct action, or a workflow of your own that threads the setup artifact.
 
 A useful first `REVIEW.md` can be plain Markdown:
 
@@ -126,10 +133,9 @@ normal PR after the guidance lands.”
 
 ### Copyable all-role profile workflow
 
-Use this for a manually requested deep review. Resolve and pin
-`REVIEWED_PROFILE_COMMIT` to a reviewed action revision that contains the
-`review_profiles` input; do not point at an old tag and assume the feature is
-there. The handler that authorizes a deep request is a separate integration.
+Use this for a manually requested deep review. The pin below is a reviewed
+action revision that contains the `review_profiles` input; do not point at an
+old tag and assume the feature is there. The handler that authorizes a deep request is a separate integration.
 
 ```yaml
 name: OpenRouter profile review
@@ -162,7 +168,7 @@ jobs:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: FlyOverCoderKY/openrouter-pr-review-action@REVIEWED_PROFILE_COMMIT
+      - uses: FlyOverCoderKY/openrouter-pr-review-action@212775ffea22e806cddcb706c73a3df26fbcb6d0
         with:
           github_token: ${{ github.token }}
           pr_number: ${{ inputs.pr_number }}
@@ -244,7 +250,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: FlyOverCoderKY/openrouter-pr-review-action@2f551f1a028dc916a54a2b7aaf4c3cebb61add08
+      - uses: FlyOverCoderKY/openrouter-pr-review-action@212775ffea22e806cddcb706c73a3df26fbcb6d0
         with:
           github_token: ${{ github.token }}
           pr_number: ${{ github.event.pull_request.number }}
@@ -277,7 +283,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - uses: FlyOverCoderKY/openrouter-pr-review-action@2f551f1a028dc916a54a2b7aaf4c3cebb61add08
+      - uses: FlyOverCoderKY/openrouter-pr-review-action@212775ffea22e806cddcb706c73a3df26fbcb6d0
         with:
           github_token: ${{ github.token }}
           pr_number: ${{ github.event.pull_request.number }}
@@ -290,7 +296,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-The examples pin the review-integrity implementation at `2f551f1a028dc916a54a2b7aaf4c3cebb61add08`; a branch push does not update existing consumers' pins. Do not put first-pass and follow-up in one concurrency group that `synchronize` can cancel.
+The examples pin `212775ffea22e806cddcb706c73a3df26fbcb6d0`, the `main` revision that adds rebase reviews on top of the review-integrity, deadline, and profile work; a branch push does not update existing consumers' pins. Do not put first-pass and follow-up in one concurrency group that `synchronize` can cancel.
 
 When a `latest-commit` follow-up detects that the last reviewed commit is no longer an ancestor, it automatically selects **`rebase`**: a full-PR review with earlier review context and preserved finding identities. Missing compare inputs or transient compare errors still embed the **single latest head commit**, with a visible **partial** verdict. For `full-pr` and `rebase`, if GitHub rejects the patch because it exceeds its line limit, the action computes the complete `git diff base...head` from the full-depth workflow checkout before applying the normal diff-budget triage. A truncated diff is never treated as clean.
 
@@ -317,7 +323,7 @@ jobs:
     concurrency:
       group: or-review-first-pass-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
-    uses: FlyOverCoderKY/openrouter-pr-review-action/.github/workflows/pr-review.yml@2f551f1a028dc916a54a2b7aaf4c3cebb61add08
+    uses: FlyOverCoderKY/openrouter-pr-review-action/.github/workflows/pr-review.yml@212775ffea22e806cddcb706c73a3df26fbcb6d0
     permissions:
       contents: read
       pull-requests: write

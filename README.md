@@ -89,12 +89,16 @@ with:
 ```
 
 The workflow examples in this README pin a revision that contains this feature.
-Leave `review_policy` off for unchanged behavior. In a matrix, `review_policy`
-switches setup, lane, and judge to the prepared flow: setup freezes the guidance
-in a context artifact that every lane and the judge must consume (see
+Leave `review_policy` off for unchanged behavior; matrix runs without policy
+keep working as before. Setting `review_policy: base` on `setup`, `lane`, or
+`judge` roles requires the prepared flow: setup needs a full-depth checkout of
+the reviewed repository and writes the guidance into a context artifact, and
+every lane and the judge must receive that artifact through
+`review_context_file` and `review_context_sha256` (see
 [prepared matrix execution](docs/review-profiles.md#prepared-matrix-execution)).
-The shipped reusable workflow does not expose `review_policy`; a matrix without
-the prepared context fails before model calls.
+Policy-enabled matrix roles without the prepared context fail before model
+calls. The shipped reusable workflow does not accept `review_policy`; use the
+direct action, or a workflow of your own that threads the setup artifact.
 
 A useful first `REVIEW.md` can be plain Markdown:
 

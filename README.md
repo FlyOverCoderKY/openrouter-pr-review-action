@@ -162,6 +162,8 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
+          # No checkout has run yet, so gh cannot infer the repository from a git remote.
+          GH_REPO: ${{ github.repository }}
         run: echo "head_sha=$(gh pr view '${{ inputs.pr_number }}' --json headRefOid --jq .headRefOid)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

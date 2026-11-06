@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -111,9 +113,13 @@ def test_commit_diff_uses_raw_media_type(sha_length) -> None:
     [
         "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)",
         "HTTP 406: PullRequest.diff too_large",
+        "HTTP 406: Compare.diff too_large",
+        "HTTP 404: Not Found",
+        "HTTP 503: Service Unavailable",
+        "GitHub CLI timed out after 45s",
     ],
 )
-def test_pr_diff_falls_back_to_local_git_on_github_line_limit(
+def test_pr_diff_falls_back_to_same_local_range_on_api_failure(
     monkeypatch, too_large_message: str
 ) -> None:
     base = "a" * 40
@@ -569,12 +575,92 @@ def test_command_capture_preserves_input_and_output_at_limit(monkeypatch) -> Non
     assert (code, out, err) == (0, b"0123456789", b"")
 
 
-def test_command_capture_timeout_reaps_process() -> None:
-    from or_pr_review.github_ops import _bounded_command
+def test_command_capture_timeout_reaps_process(monkeypatch) -> None:
+    from or_pr_review import github_ops as mod
+
+    reaped = []
+
+    def process_exited(self):
+        reaped.append(self.transport.get_returncode())
+
+    monkeypatch.setattr(mod._CommandProtocol, "process_exited", process_exited)
 
     with pytest.raises(subprocess.TimeoutExpired):
-        _bounded_command(
+        mod._bounded_command(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             timeout=1,
             label="test",
         )
+    assert len(reaped) == 1
+    assert reaped[0] is not None and reaped[0] != 0
+
+
+def test_command_timeout_closes_inherited_pipes_without_waiting_for_eof(tmp_path) -> None:
+    from or_pr_review.github_ops import _bounded_command
+
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import pathlib, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+        "print('ready', flush=True); time.sleep(30)"
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            _bounded_command([sys.executable, "-c", script, str(pid_file)], timeout=1, label="test")
+        assert time.monotonic() - started < 3
+        assert pid_file.is_file()
+    finally:
+        if pid_file.is_file():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+
+def test_compare_status_omits_first_page_file_patches() -> None:
+    from or_pr_review.github_ops import MAX_PAYLOAD_BYTES
+
+    base, head = "a" * 40, "b" * 40
+    endpoint = f"repos/o/r/compare/{base}...{head}"
+    first_page = json.dumps(
+        {
+            "status": "ahead",
+            "behind_by": 0,
+            "files": [{"filename": "snapshot.json", "patch": "+x\n" * 2_200_000}],
+        }
+    )
+    assert len(first_page.encode()) > MAX_PAYLOAD_BYTES
+    calls = []
+
+    def runner(cmd, **kwargs):
+        calls.append(cmd)
+        if "-H" in cmd:
+            assert cmd[-1] == endpoint
+            return "diff --git a/snapshot.json b/snapshot.json\n+small raw diff\n"
+        if cmd[-1] == f"{endpoint}?per_page=1&page=2":
+            return json.dumps({"status": "ahead", "behind_by": 0, "commits": []})
+        return first_page
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+    assert gh.compare_diff(base, head).endswith("+small raw diff\n")
+    assert len(calls) == 2
+
+
+def test_local_diff_failure_is_reported_after_api_failure() -> None:
+    def runner(*args, **kwargs):
+        raise ActionError("HTTP 404: Not Found")
+
+    def git_runner(*args, **kwargs):
+        raise ActionError("Local git diff failed: missing pinned object")
+
+    gh = GitHub(
+        token="t",
+        repository="o/r",
+        runner=runner,
+        git_runner=git_runner,
+        source_workspace="/checkout",
+    )
+    with pytest.raises(ActionError, match="missing pinned object"):
+        gh.pr_diff(7, base_sha="a" * 40, head_sha="b" * 40)

@@ -141,8 +141,10 @@ inputs:
     description: >-
       Maximum diff size (KB) embedded in the prompt. Over-budget diffs go
       through diff-budget triage: generated/vendored/lock-class files are
-      demoted to stubs (still tool-readable, still requiring coverage) so
-      hand-written hunks fit; only files dropped entirely force partial.
+      demoted to stubs (still requiring coverage) so hand-written hunks fit.
+      All omitted hunks, including stub-only packing, force a partial verdict
+      and do not advance the review ledger. Raise this budget to embed the
+      full diff for authoritative coverage; tool readability is not guaranteed.
     required: false
     default: "300"
   generated_paths:
@@ -151,8 +153,9 @@ inputs:
       treated as generated/vendored during diff-budget triage, in addition to
       .gitattributes linguist-generated/linguist-vendored and the built-in
       lockfile heuristics. Demotion only changes packing priority of an
-      over-budget diff — demoted files stay stubbed, tool-readable, and
-      coverage-accounted, never excluded. TRUSTED workflow configuration
+      over-budget diff — demoted files keep path accounting and coverage
+      obligations, but omitted hunks remain partial and tool access depends
+      on materialization and safety rules. TRUSTED workflow configuration
       only: never interpolate PR content or repository files into this input.
       Maximum 8,000 UTF-8 bytes and 200 globs.
     required: false

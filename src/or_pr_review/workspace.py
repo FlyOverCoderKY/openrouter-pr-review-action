@@ -20,9 +20,9 @@ from or_pr_review.errors import ActionError, LaneError
 from or_pr_review.redaction import looks_like_dotenv
 
 MAX_MATERIALIZED_FILE = 1_000_000
-# Files diff-budget triage stubbed out of the embed carry a contract that
-# they are tool-readable, so they may exceed the normal cap — up to a hard
-# ceiling that still bounds disk use (ranged reads bound the context cost).
+# Attempt to provide extra context for files stubbed out of the embed, up to
+# a hard size ceiling. Materialization and tool safety rules can still omit
+# or block these files; inclusion does not establish complete review coverage.
 MAX_OVERSIZED_MATERIALIZED_FILE = 8_000_000
 # Per-file grep ceiling. Matches the oversized-materialization ceiling so a
 # stubbed snapshot (or a complete bench fixture tree) stays searchable.
@@ -95,8 +95,8 @@ def materialize_commit(
 
     `oversized_ok` names paths (as tracked, forward slashes) allowed past
     MAX_MATERIALIZED_FILE up to MAX_OVERSIZED_MATERIALIZED_FILE — the files
-    diff-budget triage stubbed out of the embed, whose stub promises tool
-    readability.
+    diff-budget triage stubbed out of the embed. This attempts to provide
+    context without guaranteeing tool readability or full coverage.
 
     The snapshot is deliberately incomplete (oversized and non-regular members
     are omitted), so the COMPLETE tracked path list is written next to the

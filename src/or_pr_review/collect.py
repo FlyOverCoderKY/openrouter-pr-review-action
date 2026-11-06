@@ -86,7 +86,7 @@ class Truncation:
     embedded_bytes: int
     max_diff_kb: int
     # Diff-budget triage accounting: files demoted to a stub (header +
-    # counts, hunks tool-readable) vs files dropped from the embed entirely.
+    # counts, omitted hunks) vs files dropped from the embed entirely.
     stubbed_files: tuple[str, ...] = ()
     dropped_files: tuple[str, ...] = ()
 

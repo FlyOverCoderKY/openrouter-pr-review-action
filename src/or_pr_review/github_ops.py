@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import subprocess
 import tempfile
-import threading
 from typing import Any
 
 from or_pr_review.errors import ActionError, DivergedRangeError, InputLimitError
@@ -113,18 +113,15 @@ class GitHub:
             return _checked_diff(raw)
         except InputLimitError:
             raise
-        except ActionError as exc:
-            if not _is_pr_diff_too_large(str(exc)):
+        except ActionError:
+            if not self.source_workspace:
                 raise
 
-        # Keep the same pinned range when GitHub cannot serve a large diff.
+        # Keep the same pinned range for any API collection failure. A full
+        # checkout can serve fork objects and ranges unavailable through the API.
         workspace = self.source_workspace
-        if not workspace:
-            raise ActionError(
-                "local diff fallback requires SOURCE_WORKSPACE to name the reviewed checkout"
-            )
         log(
-            "notice: GitHub rejected the PR diff as too large; "
+            "notice: GitHub could not serve the pinned PR diff; "
             "falling back to local git diff base...head"
         )
         try:
@@ -158,7 +155,9 @@ class GitHub:
         visible notice rather than silently reviewing a merge-base diff.
         """
         endpoint = f"repos/{self.repository}/compare/{before}...{after}"
-        raw = self._gh("api", endpoint)
+        # GitHub includes file patches only on page 1. Request one commit
+        # from page 2: range status is unchanged, without duplicating diff data.
+        raw = self._gh("api", f"{endpoint}?per_page=1&page=2")
         comparison = _json_object(raw, f"compare {before[:12]}...{after[:12]}")
         status = comparison.get("status")
         behind_by = comparison.get("behind_by")
@@ -385,14 +384,6 @@ def _checked_diff(raw: str) -> str:
     return raw
 
 
-def _is_pr_diff_too_large(message: str) -> bool:
-    lowered = message.lower()
-    return "http 406" in lowered and (
-        "diff exceeded the maximum number of lines" in lowered
-        or "pullrequest.diff too_large" in lowered
-    )
-
-
 def _is_inline_comment_validation_error(message: str) -> bool:
     """Whether GitHub rejected inline placement, not the review request itself."""
     lowered = message.lower()
@@ -409,6 +400,74 @@ def require_full_sha(value: object, label: str) -> str:
     return value.lower()
 
 
+class _CommandProtocol(asyncio.SubprocessProtocol):
+    """Bound both output streams and expose completion after pipe closure/reap."""
+
+    def __init__(self) -> None:
+        self.outputs: list[list[bytes]] = [[], []]
+        self.used = 0
+        self.exceeded = False
+        self.read_error: Exception | None = None
+        self.done = asyncio.get_running_loop().create_future()
+        self.closed = asyncio.get_running_loop().create_future()
+
+    def connection_made(self, transport: asyncio.SubprocessTransport) -> None:
+        self.transport = transport
+
+    def pipe_data_received(self, fd: int, data: bytes) -> None:
+        self.used += len(data)
+        if self.used > MAX_COMMAND_BYTES:
+            self.exceeded = True
+            if not self.done.done():
+                self.done.set_result(None)
+            self.transport.close()
+        elif not self.exceeded:
+            self.outputs[fd - 1].append(data)
+
+    def pipe_connection_lost(self, fd: int, exc: Exception | None) -> None:
+        if exc is not None:
+            self.read_error = exc
+            if not self.done.done():
+                self.done.set_result(None)
+            self.transport.close()
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if exc is not None:
+            self.read_error = exc
+        if not self.done.done():
+            self.done.set_result(None)
+        self.closed.set_result(None)
+
+
+async def _capture_command(
+    cmd: list[str], *, timeout: int, label: str, **kwargs: Any
+) -> tuple[int, bytes, bytes]:
+    loop = asyncio.get_running_loop()
+    transport, protocol = await loop.subprocess_exec(_CommandProtocol, *cmd, **kwargs)
+    try:
+        try:
+            await asyncio.wait_for(asyncio.shield(protocol.done), timeout)
+        except TimeoutError as exc:
+            raise subprocess.TimeoutExpired(cmd, timeout) from exc
+        if protocol.exceeded:
+            raise InputLimitError(
+                f"{label} output exceeds the {MAX_COMMAND_BYTES} byte collection limit"
+            )
+        if protocol.read_error is not None:
+            raise ActionError(f"failed to read {label} output") from protocol.read_error
+        return (
+            transport.get_returncode(),
+            b"".join(protocol.outputs[0]),
+            b"".join(protocol.outputs[1]),
+        )
+    finally:
+        # Public asyncio transports cancel pipe reads without joining a thread
+        # blocked on EOF. Closing also kills a live child; wait for its reap and
+        # pipe callbacks with a bounded cleanup window, even for inherited pipes.
+        transport.close()
+        await asyncio.wait_for(asyncio.shield(protocol.closed), 1)
+
+
 def _bounded_command(
     cmd: list[str],
     *,
@@ -418,67 +477,27 @@ def _bounded_command(
     cwd: str | None = None,
     stdin: str | None = None,
 ) -> tuple[int, bytes, bytes]:
-    """Drain both pipes with a shared byte ceiling, including failed commands."""
+    """Capture command output within byte and elapsed-time ceilings."""
     if stdin is not None:
         _check_bytes(stdin, MAX_PAYLOAD_BYTES, f"{label} request")
-    outputs: list[list[bytes]] = [[], []]
-    used = 0
-    lock = threading.Lock()
-    exceeded = threading.Event()
-    read_errors: list[OSError] = []
     # A bounded input file avoids a stdin/pipe deadlock while both output
     # streams are drained. No PR text is interpreted by a shell.
     with tempfile.TemporaryFile() as input_file:
         if stdin is not None:
             input_file.write(stdin.encode("utf-8"))
             input_file.seek(0)
-        with subprocess.Popen(
-            cmd,
-            env=env,
-            cwd=cwd,
-            stdin=input_file,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        ) as proc:
-
-            def drain(stream: Any, index: int) -> None:
-                nonlocal used
-                try:
-                    while chunk := stream.read(64 * 1024):
-                        with lock:
-                            used += len(chunk)
-                            if used > MAX_COMMAND_BYTES:
-                                exceeded.set()
-                            else:
-                                outputs[index].append(chunk)
-                        if exceeded.is_set():
-                            proc.kill()
-                            return
-                except OSError as exc:
-                    read_errors.append(exc)
-                    proc.kill()
-
-            readers = [
-                threading.Thread(target=drain, args=(proc.stdout, 0)),
-                threading.Thread(target=drain, args=(proc.stderr, 1)),
-            ]
-            for reader in readers:
-                reader.start()
-            try:
-                proc.wait(timeout=timeout)
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait()
-                for reader in readers:
-                    reader.join()
-            if exceeded.is_set():
-                raise InputLimitError(
-                    f"{label} output exceeds the {MAX_COMMAND_BYTES} byte collection limit"
-                )
-            if read_errors:
-                raise ActionError(f"failed to read {label} output") from read_errors[0]
-            return proc.returncode, b"".join(outputs[0]), b"".join(outputs[1])
+        return asyncio.run(
+            _capture_command(
+                cmd,
+                timeout=timeout,
+                label=label,
+                env=env,
+                cwd=cwd,
+                stdin=input_file,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        )
 
 
 def _run_gh(

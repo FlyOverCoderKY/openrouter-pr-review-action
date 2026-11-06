@@ -1713,6 +1713,50 @@ def test_auto_manual_seed_and_explicit_reset(tmp_path, monkeypatch):
     assert loop.generation == ""
 
 
+@pytest.mark.parametrize("method", ["list_finding_replies", "list_recent_issue_comments"])
+def test_verify_comment_limits_stop_before_review(tmp_path, monkeypatch, method):
+    from or_pr_review import cli
+    from or_pr_review.errors import InputLimitError
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+
+    def exceeded(*args, **kwargs):
+        raise InputLimitError("comments exceed the collection limit")
+
+    def unexpected_lane(*args, **kwargs):
+        raise AssertionError("a review must not start after a collection limit")
+
+    monkeypatch.setattr(github, method, exceeded)
+    monkeypatch.setattr(cli, "_github", lambda env: github)
+    monkeypatch.setattr(cli, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli, "_maybe_status", lambda *a, **kw: None)
+    monkeypatch.setattr(cli, "run_lane", unexpected_lane)
+    env = _base_env(tmp_path, PR_NUMBER="1", REVIEW_MODE="verify", GITHUB_TOKEN="ghs_dummy")
+    assert main(["all"], env) == 1
+    assert github.posted == []
+
+
+def test_verify_transport_failure_retains_optional_reply_fallback(tmp_path, monkeypatch):
+    from or_pr_review import cli
+    from or_pr_review.errors import ActionError
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+
+    def unavailable(*args, **kwargs):
+        raise ActionError("HTTP 503: temporary failure")
+
+    monkeypatch.setattr(github, "list_finding_replies", unavailable)
+    monkeypatch.setattr(cli, "_github", lambda env: github)
+    monkeypatch.setattr(cli, "_collect", lambda env: _mk_collected())
+    env = _base_env(tmp_path, PR_NUMBER="1", REVIEW_MODE="verify")
+    collected, state, replies = cli._collect_with_loop(env)
+    assert collected.head_sha == "a" * 40
+    assert state.mode == "verify"
+    assert replies == ""
+
+
 def test_auto_manual_corrupt_ledger_does_not_reset(tmp_path):
     from or_pr_review import cli
     from or_pr_review.errors import ActionError

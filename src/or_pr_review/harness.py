@@ -40,6 +40,7 @@ from or_pr_review.schema import (
     valid_review_path,
     validate_coverage,
 )
+from or_pr_review.text_safety import log
 from or_pr_review.workspace import MAX_OVERSIZED_MATERIALIZED_FILE, READ_ONLY_TOOLS, tracked_paths
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -531,7 +532,7 @@ def run_lane(
             # Telemetry is best-effort and must never abort already-billed
             # review work. Keep the warning aggregate and secret-free.
             if not progress_warning_emitted:
-                print(
+                log(
                     "warning: aggregate progress checkpoint failed",
                     file=sys.stderr,
                     flush=True,
@@ -858,7 +859,7 @@ def _run_loop(
                         meta["provider"] = exc.provider
                 if progress is not None:
                     progress()
-                print(f"lane request rejected: {_request_shape(payload)}", file=sys.stderr)
+                log(f"lane request rejected: {_request_shape(payload)}", file=sys.stderr)
                 if state.signature_finalizing:
                     # An unsigned tool turn gets one safe, tool-free finish.
                     # Retrying it with another transcript mutation would no
@@ -1530,7 +1531,7 @@ def _bounded_lf_line_count(path: Path) -> int | None:
 
 def _log_redacted_warning(message: str) -> None:
     """Emit the few model-derived diagnostics this module needs safely."""
-    print(redact(message), file=sys.stderr, flush=True)
+    log(redact(message), file=sys.stderr, flush=True)
 
 
 def elapsed_ms(started: float) -> int:

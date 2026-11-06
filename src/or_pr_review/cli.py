@@ -103,6 +103,7 @@ from or_pr_review.schema import (
     failed_lane,
     parse_lane_artifact,
 )
+from or_pr_review.text_safety import log, log_field
 from or_pr_review.triage import parse_generated_globs
 from or_pr_review.workspace import materialize_commit
 
@@ -216,7 +217,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         return 1
     except Exception as exc:  # noqa: BLE001 — unexpected bugs are operational failures
         _error(f"unexpected action error: {redact(str(exc))}")
-        print(redact(traceback.format_exc()), file=sys.stderr)
+        log(redact(traceback.format_exc()), file=sys.stderr)
         return 1
 
 
@@ -244,17 +245,17 @@ def _role_setup(env: dict[str, str]) -> int:
         _set_output("review_context_file", str(path))
         _set_output("review_context_sha256", _context_digest(context))
         _set_output("head_sha", restored.collected.head_sha)
-        print(f"prepared {plan.profile}/{plan.level} with {len(plan.lanes)} lane(s)")
+        log(f"prepared {plan.profile}/{plan.level} with {len(plan.lanes)} lane(s)")
         return 0
     slugs = _validate_inputs(env, full_roster=True)
     needed = _judge_needed(env, slugs)
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
     _write_setup_outputs(slugs, needed, judge_model)
-    print(f"parsed {len(slugs)} model lane(s) (cap {LANE_CAP}): {', '.join(slugs)}")
+    log(f"parsed {len(slugs)} model lane(s) (cap {LANE_CAP}): {', '.join(slugs)}")
     if needed:
-        print(f"judge will run with `{judge_model}`")
+        log(f"judge will run with `{judge_model}`")
     else:
-        print("judge skipped: one review lane (one reviewer = no judge)")
+        log("judge skipped: one review lane (one reviewer = no judge)")
     return 0
 
 
@@ -297,9 +298,9 @@ def _role_lane(env: dict[str, str]) -> int:
     _set_output("lane_file", str(path))
     _set_output("lane_ok", "true" if result.ok else "false")
     if result.ok:
-        print(f"lane {index} `{model}` ok: {len(result.findings)} finding(s)")
+        log(f"lane {index} `{model}` ok: {len(result.findings)} finding(s)")
     else:
-        print(f"lane {index} `{model}` failed-open: {result.error}")
+        log(f"lane {index} `{model}` failed-open: {result.error}")
     if not _judge_needed(env, slugs):
         return _finish(env, [result], collected=collected, loop=state)
     return 0
@@ -655,7 +656,7 @@ def _resolve_issues(
     reviewable_payloads, diagnostics = partition_reviewable_lanes(lane_payloads)
     needed = _judge_needed(env, slugs)
     if len(successful) == 1 and (len(slugs) > 1 or not needed):
-        print("judge skipped: one successful lane; posting that lane directly")
+        log("judge skipped: one successful lane; posting that lane directly")
         reason = (
             "skipped (single review lane; one reviewer = no judge)"
             if len(lanes) == 1
@@ -679,13 +680,13 @@ def _resolve_issues(
         )
     judge_model = parse_judge_model(env.get("JUDGE_MODEL"))
     if diagnostics and not any(lane.get("findings") for lane in reviewable_payloads):
-        print("judge skipped: successful lanes contained only review-environment diagnostics")
+        log("judge skipped: successful lanes contained only review-environment diagnostics")
         return JudgeOutcome(
             [], "skipped (review environment unavailable)", None, False, diagnostics
         )
     judge_timeout = _judge_request_timeout(env)
     if judge_timeout is None:
-        print(
+        log(
             "judge skipped near the job deadline; using the cap-aware deterministic union",
             flush=True,
         )
@@ -702,7 +703,7 @@ def _resolve_issues(
     # One absolute boundary includes retries and policy/payload preparation.
     judge_deadline = _judge_deadline(env, judge_timeout)
     key = require_openrouter_key(env)
-    print(
+    log(
         f"judge running with `{judge_model}` (reasoning effort=minimal, "
         f"request timeout={judge_timeout}s)",
         flush=True,
@@ -725,7 +726,7 @@ def _resolve_issues(
         # The lane artifacts already passed our schema and anchor gates. A
         # malformed judge answer falls back to the validated lane findings;
         # make the publication cap and degraded merge explicit on the review.
-        print(
+        log(
             f"warning: judge schema failed ({redact(str(exc))}); using the "
             "cap-aware deterministic union",
             flush=True,
@@ -746,7 +747,7 @@ def _resolve_issues(
         # same explicit, cap-aware deterministic-union degradation above.
         attempted = getattr(exc, "attempted", True)
         stage = "transport" if attempted else "preparation"
-        print(
+        log(
             f"warning: judge {stage} failed ({redact(str(exc))}); using the "
             "cap-aware deterministic union",
             flush=True,
@@ -829,7 +830,7 @@ def _role_all(env: dict[str, str]) -> int:
         lane_timeout,
         max(0.0, deadline_seconds - min(LANE_COLLECTION_GRACE_SECONDS, deadline_seconds / 2)),
     )
-    print(
+    log(
         f"lane budget={lane_timeout:g}s; collection deadline={deadline_seconds}s; "
         f"judge/publication reserve={judge_reserve}s",
         flush=True,
@@ -1247,7 +1248,7 @@ def _coverage_expectations(
         return False, None
     paths = set(changed_paths_from_diff(collected.diff))
     if len(paths) > MAX_COVERAGE_ENTRIES:
-        print(
+        log(
             f"notice: {len(paths)} diff paths exceed the coverage manifest cap "
             f"({MAX_COVERAGE_ENTRIES}); coverage enforcement is skipped for this run"
         )
@@ -1377,7 +1378,7 @@ def _collect_with_loop(
         # Transient compare failures (timeouts, 5xx) carry a different notice
         # and never reset: they stay a single-commit partial round and retry
         # naturally on the next push.
-        print(
+        log(
             "notice: history diverged from the last reviewed commit "
             f"({ledger.reviewed_sha[:12]}); collecting a rebase review with existing history"
         )
@@ -1414,13 +1415,18 @@ def _collect_with_loop(
             agent_replies = render_agent_context(
                 [
                     reply
-                    for reply in github.list_finding_replies(pr_number, generation=state.generation)
+                    for reply in github.list_finding_replies(
+                        pr_number,
+                        generation=state.generation,
+                        bot_login=_bot_login(env),
+                        carried_ids=carried_ids,
+                    )
                     if reply[0] in carried_ids
                 ],
                 github.list_recent_issue_comments(pr_number),
             )
         except ActionError as exc:
-            print(
+            log(
                 "warning: could not fetch reviewer replies; verifying from "
                 f"commits only: {redact(str(exc))}"
             )
@@ -1523,9 +1529,7 @@ def _checkout_has_commit(root: Path | None, sha: str) -> bool:
         return False
     checkout_head = (getattr(proc, "stdout", "") or "").strip().lower()
     if proc.returncode != 0 or checkout_head != checked:
-        print(
-            "notice: reviewed checkout is not at the lane commit; leaving judge anchors body-only"
-        )
+        log("notice: reviewed checkout is not at the lane commit; leaving judge anchors body-only")
         return False
     return True
 
@@ -1602,7 +1606,7 @@ def _with_review_policy(
             )
     _set_output("policy_digest", policy.digest)
     _set_output("policy_base_sha", policy.base_sha)
-    print(
+    log(
         f"review policy: {len(policy.files)} file(s), "
         f"{policy.profile}/{policy.minimum}, {policy.digest}"
     )
@@ -1860,7 +1864,7 @@ def _finish(
         try:
             github.create_issue_comment(collected.pr_number, continuation)
         except ActionError as exc:
-            print(f"warning: could not post a continuation comment: {redact(str(exc))}")
+            log(f"warning: could not post a continuation comment: {redact(str(exc))}")
 
     _maybe_status(
         env,
@@ -1918,7 +1922,7 @@ def _live_head(github: GitHub, pr_number: int) -> str | None:
     try:
         pr = github.pr_view(pr_number)
     except ActionError as exc:
-        print(f"warning: could not re-check the live PR head: {redact(str(exc))}")
+        log(f"warning: could not re-check the live PR head: {redact(str(exc))}")
         return None
     return head_sha_from_pr(pr)
 
@@ -2160,7 +2164,7 @@ def _persist_and_log_lane(
     lane.head_sha = head_sha
     lane.review_context = context
     _persist_lane_artifact(directory, index, lane)
-    print(
+    log(
         f"lane {index} `{model}` persisted ({'ok' if lane.ok else 'failed-open'})",
         flush=True,
     )
@@ -2259,9 +2263,14 @@ def _maybe_status(env: dict[str, str], pr_number: int, body: str) -> None:
     if not enabled:
         return
     try:
-        upsert_status_comment(_github(env), pr_number=pr_number, body=body)
+        upsert_status_comment(
+            _github(env),
+            pr_number=pr_number,
+            body=body,
+            bot_login=_bot_login(env),
+        )
     except ActionError as exc:
-        print(f"warning: status comment failed: {redact(str(exc))}")
+        log(f"warning: status comment failed: {redact(str(exc))}")
 
 
 def _best_effort_incomplete(env: dict[str, str], *, stage: str, reason: str) -> None:
@@ -2290,5 +2299,5 @@ def _set_output(name: str, value: str) -> None:
 
 
 def _error(message: str) -> None:
-    print(f"::error::{redact(message)}", file=sys.stderr)
-    print(redact(message), file=sys.stderr)
+    print(f"::error::{log_field(message)}", file=sys.stderr)
+    log(message, file=sys.stderr)

@@ -15,6 +15,7 @@ from or_pr_review.merge import (
     severity_emoji,
 )
 from or_pr_review.schema import LaneResult
+from or_pr_review.text_safety import neutralize_markers
 
 # GitHub caps comment bodies at 65,536 characters; stay under it in bytes and
 # continue long findings lists in follow-up comments instead of dropping them.
@@ -178,7 +179,9 @@ def render_review_parts(
             )
 
     header = ["## OpenRouter pull-request review"]
+    marker_lines: dict[int, str] = {}
     if hidden_marker:
+        marker_lines[len(header)] = hidden_marker
         header.append(hidden_marker)
     header += [
         "",
@@ -190,6 +193,7 @@ def render_review_parts(
     if receipt is not None:
         canonical = canonical_receipt_json(receipt)
         marker = base64.b64encode(canonical.encode("utf-8")).decode("ascii")
+        marker_lines[len(header)] = f"<!-- openrouter-review-plan:v1:{marker} -->"
         header.extend(
             [
                 f"<!-- openrouter-review-plan:v1:{marker} -->",
@@ -245,7 +249,7 @@ def render_review_parts(
         lines = [*header, "No structured findings from the successful lane(s).", ""]
         if run_url:
             lines.extend([f"[Workflow run]({run_url})", ""])
-        return [_finalize(lines)]
+        return [_finalize(lines, marker_lines=marker_lines)]
 
     header.extend(["### Findings", ""])
     part_lines: list[list[str]] = []
@@ -268,7 +272,7 @@ def render_review_parts(
             lines = [*lines, f"_Part {number} of {total}; all findings are preserved._", ""]
         if number == total and run_url:
             lines = [*lines, f"[Workflow run]({run_url})", ""]
-        bodies.append(_finalize(lines))
+        bodies.append(_finalize(lines, marker_lines=marker_lines if number == 1 else None))
     return bodies
 
 
@@ -399,8 +403,13 @@ def _cap_block(lines: list[str], max_bytes: int) -> list[str]:
     return kept
 
 
-def _finalize(lines: list[str]) -> str:
-    text = "\n".join(lines).rstrip() + "\n"
+def _finalize(lines: list[str], *, marker_lines: dict[int, str] | None = None) -> str:
+    # Only marker slots assembled by the harness bypass escaping. All other
+    # text, including provider diagnostics and continuation parts, is prose.
+    safe_lines = [neutralize_markers(line) for line in lines]
+    for index, marker in (marker_lines or {}).items():
+        safe_lines[index] = marker
+    text = "\n".join(safe_lines).rstrip() + "\n"
     if len(text.encode("utf-8")) > MAX_REVIEW_BYTES:
         clipped = text.encode("utf-8")[: MAX_REVIEW_BYTES - 80].decode("utf-8", errors="ignore")
         text = clipped.rstrip() + "\n\n[review body truncated]\n"
@@ -433,8 +442,9 @@ def inline_review_comments(
                 "side": "RIGHT",
                 "body": (
                     f"{marker}{severity_emoji(issue.severity)} "
-                    f"**{neutralize_mentions(issue.title)}** (`{issue.severity}`)\n\n"
-                    f"{neutralize_mentions(issue.body)}"
+                    f"**{neutralize_markers(neutralize_mentions(issue.title))}** "
+                    f"(`{issue.severity}`)\n\n"
+                    f"{neutralize_markers(neutralize_mentions(issue.body))}"
                 ),
             }
         )
@@ -452,4 +462,4 @@ def render_incomplete(*, stage: str, reason: str, run_url: str = "") -> str:
     ]
     if run_url:
         lines.extend([f"[Workflow run]({run_url})", ""])
-    return "\n".join(lines)
+    return neutralize_markers("\n".join(lines))

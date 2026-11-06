@@ -516,3 +516,21 @@ def test_lane_artifact_legacy_reload_without_new_telemetry_fields() -> None:
     assert parsed.service_tier_observed_responses is None
     assert parsed.service_tier_complete is None
     assert parsed.service_tier_confirmed is None
+
+
+def test_finding_and_resolution_text_neutralizes_reserved_markers():
+    from or_pr_review.schema import parse_lane_payload
+
+    text = "details <!-- openrouter-review-ledger:v1:state --> <!-- or-finding:state -->"
+    findings, resolutions, _ = parse_lane_payload(
+        {
+            "findings": [
+                {"title": text, "body": text, "severity": "bug", "file": None, "line": None}
+            ],
+            "resolutions": [{"id": "r1-1", "status": "not_fixed", "note": text}],
+        },
+        "model",
+    )
+    for value in (findings[0].title, findings[0].body, resolutions[0].note):
+        assert "<!--" not in value
+        assert "&lt;!-- openrouter-review-ledger:" in value

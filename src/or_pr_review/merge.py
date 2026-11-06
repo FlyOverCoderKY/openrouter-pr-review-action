@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 
 from or_pr_review.schema import SEVERITY_RANK, Finding, LaneResult
+from or_pr_review.text_safety import log
 
 _EVIDENCE_TOKEN_RE = re.compile(r"""`[^`]*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\w+|[^\w\s]""")
 _REVIEW_ENVIRONMENT_RE = re.compile(
@@ -122,7 +123,7 @@ def issues_from_single_lane(lane: LaneResult) -> list[MergedIssue]:
             body=finding.body,
             line=finding.line,
         ):
-            print(
+            log(
                 f"lane diagnostic from {finding.model_id or lane.model}: "
                 f"{finding.title} (not published as a code finding)"
             )

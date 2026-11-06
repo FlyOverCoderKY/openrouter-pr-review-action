@@ -127,6 +127,37 @@ def test_reusable_workflow_pins_reviewed_head_and_third_party_actions() -> None:
     assert "actions/download-artifact@v4" not in workflow
 
 
+def test_workflows_keep_source_execution_in_read_only_ci():
+    root = Path(__file__).resolve().parents[1]
+    workflows = root / ".github/workflows"
+    ci = (workflows / "ci.yml").read_text(encoding="utf-8")
+    for path in workflows.glob("*.yml"):
+        text = path.read_text(encoding="utf-8")
+        assert "\npermissions:\n  contents: read\n" in text
+    assert "secrets." not in ci
+    assert "pull-requests: write" not in ci
+    assert "persist-credentials: false" in ci
+    assert "run: pytest" in ci
+    self_review = (workflows / "self-review.yml").read_text(encoding="utf-8")
+    assert "\n  pull_request_target:\n" in self_review
+    assert "\n  pull_request:\n" not in self_review
+    assert self_review.count("github.event_name == 'pull_request_target'") == 2
+    assert (
+        self_review.count("github.event.pull_request.head.repo.full_name == github.repository") == 2
+    )
+    jobs = self_review.split("jobs:\n", 1)[1]
+    for job in jobs.split("  follow-up:\n", 1):
+        assert "uses: ./\n" not in job
+        assert job.count("uses: ./.or-pr-review-action\n") == 1
+        assert job.count("persist-credentials: false") == 2
+        assert "path: .or-pr-review-action" in job
+        assert "pip install" not in job
+        assert "run: pytest" not in job
+    assert "ref: ${{ steps.head.outputs.base_sha }}" in self_review
+    assert "ref: ${{ github.event.pull_request.base.sha }}" in self_review
+    assert "--jq .base.sha)" in self_review
+
+
 def test_package_version_sources_agree() -> None:
     root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))

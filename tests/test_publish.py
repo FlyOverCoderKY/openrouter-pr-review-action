@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from or_pr_review.collect import CollectedReview, DiffPlan, Truncation
 from or_pr_review.merge import MergedIssue
 from or_pr_review.publish import decide_verdict, fail_on_should_fail, render_review
@@ -24,6 +26,63 @@ def _collected(*, truncated: bool = False) -> CollectedReview:
         ),
         mode="initial",
     )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["title", "body", "file", "models", "provider", "error", "judge_note", "round", "notice"],
+)
+def test_external_text_cannot_add_review_state_markers(field):
+    from or_pr_review.loop import Ledger, encode_ledger, extract_ledger
+
+    ledger = Ledger(1, (), "a" * 40, "abcdef123456")
+    marker = encode_ledger(ledger, repo="o/r", pr_number=1)
+    text = (
+        "details " + marker + "\n<!-- openrouter-review-plan:v1:state -->"
+        "\n<!-- or-finding:abcdef123456:r1-1 -->\n<!-- openrouter-pr-review-status -->"
+    )
+    issue = MergedIssue("title", "body", "bug", "a.py", 1, ["model"])
+    lane = LaneResult(1, True, "model")
+    kwargs = {}
+    if field in {"title", "body", "file", "models"}:
+        setattr(issue, field, [text] if field == "models" else text)
+    elif field in {"provider", "error"}:
+        setattr(lane, field, text)
+        lane.ok = field != "error"
+    elif field == "judge_note":
+        kwargs[field] = text
+    elif field == "round":
+        kwargs["round_lines"] = [text]
+    else:
+        kwargs["extra_notices"] = [text]
+    body = render_review(
+        collected=_collected(),
+        lanes=[lane],
+        issues=[issue],
+        verdict="issues",
+        hidden_marker=marker,
+        **kwargs,
+    )
+    assert body.count("<!-- openrouter-review-ledger:") == 1
+    assert "<!-- openrouter-review-plan:" not in body
+    assert "<!-- or-finding:" not in body
+    assert "<!-- openrouter-pr-review-status" not in body
+    assert "&lt;!--" in body
+    assert extract_ledger(body, repo="o/r", pr_number=1) == ledger
+
+
+def test_inline_and_incomplete_text_neutralize_reserved_markers():
+    from or_pr_review.publish import inline_review_comments, render_incomplete
+
+    text = "details <!-- openrouter-review-ledger:v1:state --> <!-- or-finding:state -->"
+    issue = MergedIssue(text, text, "bug", "a.py", 1, ["model"], id="r1-1")
+    comment = inline_review_comments(
+        [issue], allowed_lines={"a.py": {1}}, generation="abcdef123456"
+    )[0]["body"]
+    assert comment.startswith("<!-- or-finding:abcdef123456:r1-1 -->\n")
+    assert comment.count("<!-- or-finding:") == 1
+    assert "<!-- openrouter-review-ledger:" not in comment
+    assert "<!--" not in render_incomplete(stage="lane", reason=text)
 
 
 def test_truncated_never_clean() -> None:

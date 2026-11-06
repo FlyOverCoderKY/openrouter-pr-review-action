@@ -125,6 +125,34 @@ def test_latest_ledger_newest_marker_is_authoritative() -> None:
     assert latest_ledger([], repo=REPO, pr_number=7) is None
 
 
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "{marker}\n{marker}",
+        "{marker}\n<!-- openrouter-review-ledger:v1:invalid -->",
+        "<!-- openrouter-review-ledger:v2:invalid -->\n{marker}",
+        "prose\n{marker}",
+        "\n{marker}",
+        "{marker} trailing text",
+    ],
+)
+def test_ledger_recovery_requires_one_header_marker(layout):
+    marker = encode_ledger(Ledger(2, (), "a" * 40), repo=REPO, pr_number=7)
+    body = "## OpenRouter pull-request review\n" + layout.format(marker=marker)
+    assert extract_ledger(body, repo=REPO, pr_number=7) is None
+    with pytest.raises(ActionError, match="newest review-loop ledger"):
+        latest_ledger([marker, body], repo=REPO, pr_number=7)
+
+
+def test_header_marker_roundtrips_and_unknown_version_fails_closed():
+    ledger = Ledger(2, (), "a" * 40)
+    marker = encode_ledger(ledger, repo=REPO, pr_number=7)
+    body = f"## OpenRouter pull-request review\n{marker}\n\nordinary review text"
+    assert extract_ledger(body, repo=REPO, pr_number=7) == ledger
+    with pytest.raises(ActionError, match="newest review-loop ledger"):
+        latest_ledger([body, marker.replace(":v1:", ":v2:")], repo=REPO, pr_number=7)
+
+
 def test_decide_loop_state_matrix() -> None:
     ledger = Ledger(round_number=3, findings=(), reviewed_sha="")
     assert decide_loop_state(review_mode="initial", event_action="synchronize", ledger=ledger) == (

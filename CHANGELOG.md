@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Bind full-PR diff collection to pinned base/head SHAs, with the same range
+  available from the local checkout when the API cannot serve it. Bound diffs
+  to 16 MiB and 3,000 files, JSON payloads to 8 MiB, comment/review lists to
+  10,000 items, and combined subprocess output to 16 MiB. Stub-only packing now
+  produces a partial verdict and does not advance the review ledger; increase
+  the embed budget to include all hunks for authoritative coverage.
+
 - Add `rebase` scope for divergent follow-ups and explicit rechecks after a
   rewrite. Review the full current PR at all severities with bounded earlier
   reviews and replies, preserving generation and finding IDs. Reassess current

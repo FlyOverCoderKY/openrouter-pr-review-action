@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from or_pr_review.errors import ActionError, DivergedRangeError
+from or_pr_review.errors import ActionError, DivergedRangeError, InputLimitError
 from or_pr_review.review_policy import ResolvedPolicy
 from or_pr_review.triage import (
     AttrRule,
@@ -86,20 +86,19 @@ class Truncation:
     embedded_bytes: int
     max_diff_kb: int
     # Diff-budget triage accounting: files demoted to a stub (header +
-    # counts, hunks tool-readable) vs files dropped from the embed entirely.
+    # counts, omitted hunks) vs files dropped from the embed entirely.
     stubbed_files: tuple[str, ...] = ()
     dropped_files: tuple[str, ...] = ()
 
     @property
     def forces_partial(self) -> bool:
-        """Truncation forces a partial verdict only when changed files were
-        dropped without even a stub — a raw byte cut, or genuine overflow.
-        When every changed file is embedded or stubbed, the coverage contract
-        still spans the whole PR, so the verdict (and the loop ledger) may
-        proceed normally."""
-        if not self.truncated:
-            return False
-        return bool(self.dropped_files) or not self.stubbed_files
+        """Omitted hunks cannot establish authoritative coverage.
+
+        A stub accounts for a path, but does not prove that its content was
+        materialized or readable by the tools. Tool availability alone is
+        insufficient, so stub-only packing also remains partial.
+        """
+        return self.truncated or bool(self.stubbed_files) or bool(self.dropped_files)
 
     @property
     def notice(self) -> str | None:
@@ -113,11 +112,10 @@ class Truncation:
                 f"{len(self.stubbed_files)} file(s) kept only a stub — diff "
                 "header, +/- counts, and a first-hunk reference, with no "
                 f"reviewable hunks: {self._stub_names()}. Each stubbed file's "
-                "current content is in the checkout for the read-only tools "
-                "(deleted-line specifics exist only as counts), and each one "
-                "still requires a full sweep and its own coverage entry. No "
-                "changed file was dropped, so with the stub accounting this "
-                "review still covers every changed file."
+                "content may be available through the read-only tools, but "
+                "stub accounting does not establish readable content or full "
+                "coverage. This review is a partial verdict and must not be "
+                "treated as clean."
             )
         if self.dropped_files:
             return (
@@ -266,9 +264,9 @@ def pack_diff(
     diffs are packed per file: generated/vendored/lock-class files (detected
     via .gitattributes linguist attributes, built-in heuristics, and the
     caller-owned generated_paths globs) demote to stubs first, then the
-    largest hand-written segments, so the coverage contract keeps covering
-    every changed file and only genuine overflow (dropped files) forces a
-    partial verdict. Unparseable diffs fall back to the raw byte cut.
+    largest hand-written segments. Stubs preserve path accounting, but all
+    omitted hunks force a partial verdict. Unparseable diffs fall back to the
+    raw byte cut.
     """
     data, limit = _diff_budget(diff, max_diff_kb)
     if len(data) <= limit:
@@ -339,6 +337,8 @@ def fetch_scoped_diff(pr_number: int, plan: DiffPlan, source: ReviewSource) -> t
             raise ActionError("commit-range plan is missing SHAs")
         try:
             return source.compare_diff(plan.from_sha, plan.to_sha), plan
+        except InputLimitError:
+            raise
         except DivergedRangeError:
             # Only a genuine non-fast-forward carries the diverged notice;
             # the review loop expands it to a rebase review with history.

@@ -259,7 +259,7 @@ def test_over_budget_stubs_generated_files_first() -> None:
     assert truncation.truncated
     assert truncation.stubbed_files == ("package-lock.json",)
     assert truncation.dropped_files == ()
-    assert not truncation.forces_partial
+    assert truncation.forces_partial
     # Hand-written hunks survive verbatim; the lock file keeps a header stub.
     assert source in truncation.text
     assert f"[diff stubbed by budget triage: {REASON_GENERATED}" in truncation.text
@@ -288,7 +288,7 @@ def test_over_budget_source_demotes_largest_hand_written_file() -> None:
     assert truncation.dropped_files == ()
     assert small in truncation.text
     assert f"[diff stubbed by budget triage: {REASON_OVER_BUDGET}" in truncation.text
-    assert not truncation.forces_partial
+    assert truncation.forces_partial
 
 
 def test_tiny_generated_file_embeds_when_stub_is_larger() -> None:
@@ -377,16 +377,16 @@ def test_stub_first_hunk_header_is_bracketed_not_hunk() -> None:
 # ---------------------------------------------------------- verdict and notices
 
 
-def test_stub_only_truncation_keeps_verdict_and_notice_says_covered() -> None:
+def test_stub_only_truncation_is_partial_and_notice_does_not_claim_coverage() -> None:
     source = _file_diff("src/main.py", 8)
     lock = _file_diff("package-lock.json", 200)
     truncation = pack_diff(source + lock, 2)
-    assert not truncation.forces_partial
+    assert truncation.forces_partial
     assert truncation.notice is not None
-    assert "still covers every changed file" in truncation.notice
-    assert "must not be treated as clean" not in truncation.notice
+    assert "still covers every changed file" not in truncation.notice
+    assert "must not be treated as clean" in truncation.notice
     verdict = decide_verdict(issues=[], truncated=truncation.forces_partial, successful_lanes=1)
-    assert verdict == "clean"
+    assert verdict == "partial"
 
 
 def test_dropped_files_notice_is_partial() -> None:

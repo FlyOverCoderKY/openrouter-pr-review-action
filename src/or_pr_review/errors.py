@@ -11,6 +11,10 @@ class ActionError(Exception):
     """Operational error of the action itself. Fail the job."""
 
 
+class InputLimitError(ActionError):
+    """Review input exceeds a hard collection limit. Do not retry a narrower scope."""
+
+
 class SchemaError(ActionError):
     """Lane-artifact or internal contract mismatch. Fail-closed."""
 

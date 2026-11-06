@@ -26,7 +26,7 @@ from or_pr_review.collect import (
     parse_scope,
     resolve_mode,
 )
-from or_pr_review.errors import ActionError, SchemaError
+from or_pr_review.errors import ActionError, InputLimitError, SchemaError
 from or_pr_review.github_ops import GitHub, require_full_sha, upsert_status_comment
 from or_pr_review.harness import (
     DEFAULT_LANE_TIMEOUT_SECONDS,
@@ -1425,6 +1425,8 @@ def _collect_with_loop(
                 ],
                 github.list_recent_issue_comments(pr_number),
             )
+        except InputLimitError:
+            raise
         except ActionError as exc:
             log(
                 "warning: could not fetch reviewer replies; verifying from "
@@ -1460,13 +1462,10 @@ def _gitattributes_text(env: dict[str, str]) -> str:
     store pins the read to the reviewed commit and fails soft (empty string,
     heuristics-only packing) when that checkout does not contain the commit.
 
-    Trust note: .gitattributes is repository content, so on a PR it is
-    contributor-controlled. Honoring linguist-generated is still strictly
-    safer than the pre-triage behavior it replaces: a demoted file keeps its
-    stub, its coverage obligation, and tool access, while under the raw byte
-    cut an attacker could push hand-written code beyond the cutoff entirely
-    (no stub, no coverage, permanent partial). Demotion can never remove a
-    file from review.
+    .gitattributes is contributor-controlled repository content. Honoring
+    linguist-generated changes packing priority and preserves path accounting;
+    it does not prove tool access or complete coverage. Omitted hunks keep the
+    review partial regardless of the classification.
     """
     root = _source_root(env)
     head = (env.get("HEAD_SHA") or env.get("EVENT_AFTER") or "").strip()
@@ -1544,8 +1543,8 @@ def _prepare_workspace(env: dict[str, str], collected: CollectedReview, work: Pa
     if dest.exists() and any(dest.iterdir()):
         return dest
     try:
-        # Stubbed files carry a tool-readability contract, so they may exceed
-        # the normal materialization cap (bounded by the oversized ceiling).
+        # Attempt to provide additional context for stubbed files within the
+        # oversized ceiling. File type and content safety rules still apply.
         return materialize_commit(
             source,
             collected.head_sha,
@@ -1686,12 +1685,8 @@ def _finish(
             if lane.ok and lane.coverage:
                 for note in coverage_count_mismatches(lane.findings, lane.coverage, diff_path_set):
                     notices.append(f"`{lane.model}`: {note}")
-    # Diff-budget triage: stub-only truncation (every changed file embedded
-    # or stubbed) does not force partial — only dropped files or a raw byte
-    # cut do, so dense PRs keep verdicts, ledger publication, and loop
-    # continuity. The stub contract is that TOOLS sweep the stubbed files,
-    # so a tool-less run cannot honor it: stubs + max_tool_turns=0 stays a
-    # partial review.
+    # A stub preserves path accounting, but does not prove its content was
+    # available to the review tools. All omitted hunks remain partial.
     truncation_partial = collected.truncation.forces_partial
     for lane in successful:
         if lane.dropped_findings:

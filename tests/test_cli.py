@@ -1713,6 +1713,50 @@ def test_auto_manual_seed_and_explicit_reset(tmp_path, monkeypatch):
     assert loop.generation == ""
 
 
+@pytest.mark.parametrize("method", ["list_finding_replies", "list_recent_issue_comments"])
+def test_verify_comment_limits_stop_before_review(tmp_path, monkeypatch, method):
+    from or_pr_review import cli
+    from or_pr_review.errors import InputLimitError
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+
+    def exceeded(*args, **kwargs):
+        raise InputLimitError("comments exceed the collection limit")
+
+    def unexpected_lane(*args, **kwargs):
+        raise AssertionError("a review must not start after a collection limit")
+
+    monkeypatch.setattr(github, method, exceeded)
+    monkeypatch.setattr(cli, "_github", lambda env: github)
+    monkeypatch.setattr(cli, "_collect", lambda env: _mk_collected())
+    monkeypatch.setattr(cli, "_maybe_status", lambda *a, **kw: None)
+    monkeypatch.setattr(cli, "run_lane", unexpected_lane)
+    env = _base_env(tmp_path, PR_NUMBER="1", REVIEW_MODE="verify", GITHUB_TOKEN="ghs_dummy")
+    assert main(["all"], env) == 1
+    assert github.posted == []
+
+
+def test_verify_transport_failure_retains_optional_reply_fallback(tmp_path, monkeypatch):
+    from or_pr_review import cli
+    from or_pr_review.errors import ActionError
+
+    repo = "FlyOverCoderKY/openrouter-pr-review-action"
+    github = _LoopGitHub(_prior_ledger_marker(repo))
+
+    def unavailable(*args, **kwargs):
+        raise ActionError("HTTP 503: temporary failure")
+
+    monkeypatch.setattr(github, "list_finding_replies", unavailable)
+    monkeypatch.setattr(cli, "_github", lambda env: github)
+    monkeypatch.setattr(cli, "_collect", lambda env: _mk_collected())
+    env = _base_env(tmp_path, PR_NUMBER="1", REVIEW_MODE="verify")
+    collected, state, replies = cli._collect_with_loop(env)
+    assert collected.head_sha == "a" * 40
+    assert state.mode == "verify"
+    assert replies == ""
+
+
 def test_auto_manual_corrupt_ledger_does_not_reset(tmp_path):
     from or_pr_review import cli
     from or_pr_review.errors import ActionError
@@ -2316,7 +2360,7 @@ def test_setup_rejects_bad_path_profiles(tmp_path: Path) -> None:
     assert main(["setup"], env) == 1
 
 
-def test_stubbed_files_with_tools_disabled_stay_partial(
+def test_stubbed_files_stay_partial_with_or_without_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dataclasses import replace as dc_replace
@@ -2377,13 +2421,14 @@ def test_stubbed_files_with_tools_disabled_stay_partial(
     assert "verdict=partial" in out
     assert "could not be swept" in posted[0]
 
-    # Tools available: stub-only truncation keeps the real verdict.
+    # Enabling tools alone does not establish readable stub content.
     (tmp_path / "out.txt").write_text("", encoding="utf-8")
     env = _base_env(tmp_path, MAX_TOOL_TURNS="50", **common)
     _save_matrix_context(env)
     assert main(["judge"], env) == 0
     out = (tmp_path / "out.txt").read_text(encoding="utf-8")
-    assert "verdict=clean" in out
+    assert "verdict=partial" in out
+    assert all("<!-- openrouter-review-ledger:" not in body for body in posted)
 
 
 def test_gitattributes_text_reads_the_reviewed_commit(tmp_path: Path) -> None:

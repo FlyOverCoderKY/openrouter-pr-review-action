@@ -82,6 +82,7 @@ from or_pr_review.models import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL, parse_slug
 from or_pr_review.prompt import build_messages, changed_paths_from_diff, parse_path_profiles
 from or_pr_review.redaction import redact
 from or_pr_review.schema import MAX_COVERAGE_ENTRIES, SEVERITIES, LaneResult
+from or_pr_review.text_safety import log
 
 LABEL_CONTEXTS = ("diff", "file", "repo")
 ADJUDICATION_VERDICTS = ("false_positive", "true_positive_unlabeled")
@@ -552,7 +553,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raise ActionError("OPENROUTER_API_KEY is not set; `bench run` spends real tokens")
     collected = collected_from_fixture(fixture, legacy_truncation=args.legacy_truncation)
     if collected.truncation.truncated:
-        print(
+        log(
             f"embed cap applied: {collected.truncation.embedded_bytes / 1024:.1f} KB "
             f"embedded of {collected.truncation.original_bytes / 1024:.1f} KB "
             f"({len(collected.truncation.stubbed_files)} stubbed, "
@@ -568,7 +569,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # more paths than the manifest may hold (see _coverage_expectations).
     expected_paths: set[str] | None = set(changed_paths_from_diff(collected.diff))
     if len(expected_paths) > MAX_COVERAGE_ENTRIES:
-        print(
+        log(
             f"notice: {len(expected_paths)} diff paths exceed the coverage cap "
             f"({MAX_COVERAGE_ENTRIES}); coverage completeness is not enforced"
         )
@@ -581,12 +582,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if stale:
         # Final leftovers would be globbed by `score`; progress leftovers
         # would otherwise make a fresh batch look like a resumed one.
-        print(f"clearing {len(stale)} stale run file(s) from {out_dir}")
+        log(f"clearing {len(stale)} stale run file(s) from {out_dir}")
         for path in stale:
             path.unlink()
     failures = 0
     for index in range(args.runs):
-        print(f"bench run {index + 1}/{args.runs}: model={args.model}", flush=True)
+        log(f"bench run {index + 1}/{args.runs}: model={args.model}", flush=True)
         progress_path = out_dir / f"progress-{index}.json"
 
         lane = run_lane(
@@ -618,13 +619,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if not lane.ok:
             failures += 1
         via = f", via {lane.provider}" if lane.provider else ""
-        print(
+        log(
             f"  -> {out_path} ({status}; {len(lane.findings)} finding(s), "
             f"{lane.tool_rounds or 0} tool round(s){via})",
             flush=True,
         )
     if failures:
-        print(f"{failures}/{args.runs} lane(s) failed")
+        log(f"{failures}/{args.runs} lane(s) failed")
         return 1
     return 0
 
@@ -643,7 +644,7 @@ def _cmd_score(args: argparse.Namespace) -> int:
     for run_file in run_files:
         payload, _ = _read_json_file(run_file, expected_type=dict)
         if not payload.get("ok"):
-            print(f"{run_file.name}: lane failed ({payload.get('error')}); excluded from means")
+            log(f"{run_file.name}: lane failed ({payload.get('error')}); excluded from means")
             failed += 1
             continue
         findings = payload.get("findings", [])
@@ -656,17 +657,17 @@ def _cmd_score(args: argparse.Namespace) -> int:
             )
         )
 
-    print(
+    log(
         f"\nfixture `{fixture.name}`: {len(fixture.labels)} label(s), "
         f"{len(scored)} scored run(s), {failed} failed run(s)\n"
     )
     if not scored:
-        print("no successful runs to score")
+        log("no successful runs to score")
         return 1
     if not fixture.labels:
         # A clean-twin fixture: there is nothing to recall, so the noise
         # column IS the score — anything nonzero is oversensitivity.
-        print("clean fixture (no labels): the noise column is the score")
+        log("clean fixture (no labels): the noise column is the score")
     header = [
         "run",
         "recall",
@@ -676,7 +677,7 @@ def _cmd_score(args: argparse.Namespace) -> int:
         "noise",
         "findings",
     ]
-    print(" | ".join(header))
+    log(" | ".join(header))
     sums: dict[str, list[int]] = {}
 
     def _cell(key: str, hit: int, total: int) -> str:
@@ -693,13 +694,13 @@ def _cmd_score(args: argparse.Namespace) -> int:
         cells.append(_cell("precision", *score.precision()))
         cells.append(_cell("noise", *score.noise()))
         cells.append(str(score.finding_count))
-        print(" | ".join(cells))
+        log(" | ".join(cells))
     mean_cells = ["mean"]
     for key in ("recall", *[f"recall:{s}" for s in SEVERITIES], "sev-agree", "precision", "noise"):
         hit, total = sums[key]
         mean_cells.append(f"{100 * hit / total:.0f}%" if total else "-")
     mean_cells.append(f"{sum(s.finding_count for _, s in scored) / len(scored):.1f}")
-    print(" | ".join(mean_cells))
+    log(" | ".join(mean_cells))
 
     # Context strata: aggregate recall can hide local-context loss, so a
     # change must not regress any stratum.
@@ -710,12 +711,12 @@ def _cmd_score(args: argparse.Namespace) -> int:
             total = sum(score.recall(fixture.labels, context=context)[1] for _, score in scored)
             if total:
                 strata.append(f"{context} {hit}/{total} ({100 * hit / total:.0f}%)")
-        print("recall by context: " + ", ".join(strata))
+        log("recall by context: " + ", ".join(strata))
         frequency = ", ".join(
             f"{label.id} {sum(1 for _, s in scored if s.matched.get(label.id))}/{len(scored)}"
             for label in fixture.labels
         )
-        print(f"label detection frequency: {frequency}")
+        log(f"label detection frequency: {frequency}")
 
     missed = [
         label
@@ -723,9 +724,9 @@ def _cmd_score(args: argparse.Namespace) -> int:
         if not any(score.matched.get(label.id) for _, score in scored)
     ]
     if missed:
-        print("\nlabels missed by every run:")
+        log("\nlabels missed by every run:")
         for label in missed:
-            print(
+            log(
                 f"  - {label.id} [{label.severity}/{label.context}] "
                 f"{label.file or '(no file)'} — {label.title}"
             )
@@ -739,9 +740,9 @@ def _cmd_score(args: argparse.Namespace) -> int:
             ],
         ]
         if listed:
-            print(f"\n{name} findings matching no label:")
+            log(f"\n{name} findings matching no label:")
             for tag_label, finding in listed:
-                print(
+                log(
                     f"  - [{finding.get('severity')}] {finding.get('file') or '(no file)'} — "
                     f"{finding.get('title')}  <{tag_label}>"
                 )
@@ -1061,7 +1062,7 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
         response_meta: dict[str, Any] = {}
         capturing_chat = _capturing_judge_chat(api_key, args.timeout, response_meta)
 
-        print(f"judge live run {run_index + 1}/{args.runs}: fixture={fixture.name}, model={model}")
+        log(f"judge live run {run_index + 1}/{args.runs}: fixture={fixture.name}, model={model}")
         base_record: dict[str, Any] = {
             "schema_version": JUDGE_RUN_SCHEMA_VERSION,
             "kind": "judge-benchmark-run",
@@ -1094,7 +1095,7 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
                 **response_meta,
                 "issues": [_merged_issue_dict(issue) for issue in issues],
             }
-            print(
+            log(
                 f"  -> {out_path} ({len(issues)} issue(s), mode={mode}, "
                 f"cost={'unreported' if cost is None else f'${cost:.6f}'})"
             )
@@ -1108,7 +1109,7 @@ def _cmd_judge_run(args: argparse.Namespace) -> int:
                 "error": safe_error,
                 "issues": [],
             }
-            print(f"  -> {out_path} (FAILED: {safe_error})")
+            log(f"  -> {out_path} (FAILED: {safe_error})")
         out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return 1 if failures else 0
 
@@ -1131,7 +1132,7 @@ def _cmd_judge_score(args: argparse.Namespace) -> int:
     for result_file in result_files:
         payload, _ = _read_json_file(result_file, expected_type=dict)
         if payload.get("ok") is False:
-            print(f"{result_file.name}: failed run excluded ({payload.get('error')})")
+            log(f"{result_file.name}: failed run excluded ({payload.get('error')})")
             failed += 1
             continue
         recorded_fixture_sha = payload.get("fixture_sha256")
@@ -1141,13 +1142,13 @@ def _cmd_judge_score(args: argparse.Namespace) -> int:
         if not isinstance(issues, list) or not all(isinstance(issue, dict) for issue in issues):
             raise ActionError(f"{result_file.name} issues must be an array of objects")
         rows.append((result_file.name, payload, score_judge_output(issues, fixture)))
-    print(
+    log(
         f"\njudge fixture `{fixture.name}`: {len(fixture.expected_issues)} expected unique "
         f"issue(s), verdict={fixture.expected_verdict}; {len(rows)} scored, {failed} failed\n"
     )
     if not rows:
         return 1
-    print("run | model | recall | precision | duplicates | critical | verdict | mode | ms | cost")
+    log("run | model | recall | precision | duplicates | critical | verdict | mode | ms | cost")
     for name, payload, score in rows:
         critical = (
             _fraction(score.critical_hit, score.critical_total) if score.critical_total else "-"
@@ -1158,7 +1159,7 @@ def _cmd_judge_score(args: argparse.Namespace) -> int:
             else f"NO ({score.actual_verdict}, want {score.expected_verdict})"
         )
         cost = payload.get("cost_usd")
-        print(
+        log(
             " | ".join(
                 [
                     name,
@@ -1175,11 +1176,11 @@ def _cmd_judge_score(args: argparse.Namespace) -> int:
             )
         )
         if score.missed_ids:
-            print(f"  missed: {', '.join(score.missed_ids)}")
+            log(f"  missed: {', '.join(score.missed_ids)}")
         if score.unmatched_titles:
-            print(f"  unsupported/noise: {', '.join(score.unmatched_titles)}")
-    print("\naggregate")
-    print(
+            log(f"  unsupported/noise: {', '.join(score.unmatched_titles)}")
+    log("\naggregate")
+    log(
         f"  mean recall: {sum(s.recall for _, _, s in rows) / len(rows):.1%}; "
         f"mean precision: {sum(s.precision for _, _, s in rows) / len(rows):.1%}; "
         f"mean duplicate rate: "
@@ -1293,7 +1294,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except ActionError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        log(f"error: {exc}", file=sys.stderr)
         return 1
 
 

@@ -49,6 +49,7 @@ from or_pr_review.schema import (
     normalize_review_path,
     parse_finding,
 )
+from or_pr_review.text_safety import log
 
 # Keep the judge clerical and low-latency. Luna's adoption benchmark used this setting.
 JUDGE_REASONING = {"effort": "minimal"}
@@ -344,7 +345,7 @@ def _capped(issues: list[MergedIssue], context: str) -> tuple[list[MergedIssue],
     findings are kept and the truncation is logged."""
     ordered = _severity_sorted(issues)
     if len(ordered) > MAX_FINDINGS:
-        print(
+        log(
             f"judge {context}: {len(ordered)} findings exceed the publishing "
             f"cap ({MAX_FINDINGS}); keeping the strongest severities and "
             f"dropping {len(ordered) - MAX_FINDINGS}"
@@ -428,7 +429,7 @@ def _verify_coverage(
     union. Returns (issues, mode) where mode is 'merged', 'repaired(+N)',
     or 'union-fallback'."""
     if sources_invalid:
-        print(
+        log(
             "judge coverage: one or more issues had missing/empty sources; "
             "using the deterministic union"
         )
@@ -443,7 +444,7 @@ def _verify_coverage(
             claim_counts[source] = claim_counts.get(source, 0) + 1
     repeated = sorted(source for source, count in claim_counts.items() if count > 1)
     if repeated:
-        print(
+        log(
             f"judge coverage: source id(s) {repeated[:5]} were used by multiple "
             "distinct issues; using the deterministic union"
         )
@@ -453,7 +454,7 @@ def _verify_coverage(
     claimed = {s for issue_sources in sources for s in issue_sources}
     unknown = claimed - set(input_ids)
     if unknown:
-        print(
+        log(
             f"judge coverage: unknown source id(s) {sorted(unknown)[:5]} — "
             "possible fabrication; using the deterministic union"
         )
@@ -512,7 +513,7 @@ def _verify_coverage(
         parts.append(f"suppressed {duplicate_count} duplicate issue(s)")
     if canonicalized:
         parts.append(f"restored canonical evidence for {canonicalized} issue(s)")
-    print("judge coverage: " + "; ".join(parts))
+    log("judge coverage: " + "; ".join(parts))
     mode = "repaired"
     if split:
         mode += f"(split+{split})"
@@ -563,7 +564,7 @@ def run_llm_judge(
     """
     lanes, diagnostics = partition_reviewable_lanes(lanes)
     for lane_model, title in diagnostics:
-        print(
+        log(
             f"lane diagnostic from {lane_model or 'unknown'}: {title} "
             "(not published as a code finding)"
         )

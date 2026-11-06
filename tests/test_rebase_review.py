@@ -42,11 +42,12 @@ class Source:
             GEN,
         )
         self.bodies = [
-            "## OpenRouter pull-request review\nOriginal fixed finding r1-1: missing guard\n"
-            + encode_ledger(first, repo=REPO, pr_number=1),
-            "## OpenRouter pull-request review\nr1-1 fixed correctly: guard added. "
-            "r1-2 disputed: caller validates first.\n"
-            + encode_ledger(self.current, repo=REPO, pr_number=1),
+            "## OpenRouter pull-request review\n"
+            + encode_ledger(first, repo=REPO, pr_number=1)
+            + "\nOriginal fixed finding r1-1: missing guard\n",
+            "## OpenRouter pull-request review\n"
+            + encode_ledger(self.current, repo=REPO, pr_number=1)
+            + "\nr1-1 fixed correctly: guard added. r1-2 disputed: caller validates first.\n",
         ]
         self.compares = 0
         self.full_reads = []

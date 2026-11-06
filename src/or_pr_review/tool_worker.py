@@ -16,12 +16,13 @@ import json
 import sys
 from pathlib import Path
 
+from or_pr_review.text_safety import log
 from or_pr_review.workspace import dispatch_tool
 
 
 def _diagnostic(message: str) -> None:
     """Write a concise operator diagnostic without contaminating JSON stdout."""
-    print(f"tool_worker: {message}", file=sys.stderr, flush=True)
+    log(f"tool_worker: {message}", file=sys.stderr, flush=True)
 
 
 def main() -> int:

@@ -1636,7 +1636,7 @@ class _LoopGitHub:
         return [f"## OpenRouter pull-request review\n{self.marker}\n"]
 
     def list_finding_replies(
-        self, number: int, *, generation: str = ""
+        self, number: int, *, generation: str = "", bot_login: str, carried_ids: set[str]
     ) -> list[tuple[str, str, str]]:
         return [("r1-1", "dev", "added the check in abc123")]
 
@@ -1881,7 +1881,7 @@ def test_verify_prompt_excludes_replies_to_retired_nits(
 
     class _RepliesGitHub(_LoopGitHub):
         def list_finding_replies(
-            self, number: int, *, generation: str = ""
+            self, number: int, *, generation: str = "", bot_login: str, carried_ids: set[str]
         ) -> list[tuple[str, str, str]]:
             return [
                 ("r1-1", "dev", "auth check added"),
@@ -2097,7 +2097,9 @@ def test_force_push_preserves_history_in_full_pr_verification(
     github = _LoopGitHub(encode_ledger(prior, repo=repo, pr_number=1))
     reply_generations: list[str] = []
 
-    def finding_replies(number: int, *, generation: str = ""):
+    def finding_replies(
+        number: int, *, generation: str = "", bot_login: str, carried_ids: set[str]
+    ):
         reply_generations.append(generation)
         return [("r1-1", "dev", "added the check in abc123")]
 
@@ -2105,7 +2107,12 @@ def test_force_push_preserves_history_in_full_pr_verification(
     monkeypatch.setattr(
         github,
         "list_rebase_replies",
-        lambda number, bot_login: finding_replies(number, generation=prior.generation),
+        lambda number, bot_login: finding_replies(
+            number,
+            generation=prior.generation,
+            bot_login=bot_login,
+            carried_ids={finding.id for finding in prior.findings},
+        ),
     )
     collected_calls: list[dict[str, str]] = []
 

@@ -14,6 +14,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from or_pr_review.errors import LaneError, SchemaError
+from or_pr_review.text_safety import log, neutralize_markers
 
 SCHEMA_VERSION = 1
 SEVERITIES = ("bug", "risk", "nit")
@@ -331,8 +332,8 @@ def parse_finding(raw: object, model_id: str) -> Finding:
         # otherwise valid finding (or fail every finding from this lane).
         prior_id = None
     return Finding(
-        title=title.strip()[:MAX_TITLE],
-        body=body.strip()[:MAX_BODY],
+        title=neutralize_markers(title.strip())[:MAX_TITLE],
+        body=neutralize_markers(body.strip())[:MAX_BODY],
         severity=severity.strip().lower(),
         file=path,
         line=_as_optional_line(raw.get("line")),
@@ -375,7 +376,7 @@ def parse_lane_payload(
         # The response_format schema advertises maxItems, so only the
         # schema-free tool path can get here. Say so instead of silently
         # narrowing an "exhaustive" review.
-        print(
+        log(
             f"warning: model returned {len(findings_raw)} findings; keeping "
             f"the strongest {MAX_FINDINGS} and omitting {dropped}"
         )
@@ -461,7 +462,9 @@ def _parse_resolutions(raw: object, *, required: bool) -> list[Resolution]:
             raise LaneError(
                 f"resolutions[{index}] for {ident.strip()!r} is inconsistent: {exc}"
             ) from exc
-        resolutions.append(Resolution(id=ident.strip(), status=status, note=note_text))
+        resolutions.append(
+            Resolution(id=ident.strip(), status=status, note=neutralize_markers(note_text))
+        )
     return resolutions
 
 

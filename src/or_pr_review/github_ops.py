@@ -11,6 +11,7 @@ from typing import Any
 from or_pr_review.errors import ActionError, DivergedRangeError
 from or_pr_review.loop import FINDING_MARKER_RE
 from or_pr_review.redaction import redact
+from or_pr_review.text_safety import log
 
 STATUS_MARKER = "<!-- openrouter-pr-review-status -->"
 # The harness's own posted bodies (continuation parts, incomplete notices)
@@ -112,7 +113,7 @@ class GitHub:
             raise ActionError(
                 "local diff fallback requires SOURCE_WORKSPACE to name the reviewed checkout"
             )
-        print(
+        log(
             "notice: GitHub rejected the PR diff as too large; "
             "falling back to local git diff base...head"
         )
@@ -190,7 +191,9 @@ class GitHub:
             if _comment_login(review) == bot_login and isinstance(body := review.get("body"), str)
         ]
 
-    def list_finding_replies(self, number: int, *, generation: str) -> list[tuple[str, str, str]]:
+    def list_finding_replies(
+        self, number: int, *, generation: str, bot_login: str, carried_ids: set[str]
+    ) -> list[tuple[str, str, str]]:
         """(finding_id, login, body) for replies to the bot's inline comments.
 
         Only markers from the given loop generation pair: finding ids restart
@@ -206,9 +209,11 @@ class GitHub:
         for comment in comments:
             ident = comment.get("id")
             body = comment.get("body")
+            if _comment_login(comment) != bot_login or comment.get("in_reply_to_id") is not None:
+                continue
             if isinstance(ident, int) and isinstance(body, str):
-                match = FINDING_MARKER_RE.search(body)
-                if match and match.group(1) == generation:
+                match = FINDING_MARKER_RE.match(body)
+                if match and match.group(1) == generation and match.group(2) in carried_ids:
                     finding_by_comment_id[ident] = match.group(2)
         replies: list[tuple[str, str, str]] = []
         for comment in comments:
@@ -230,9 +235,13 @@ class GitHub:
         roots: dict[int, str] = {}
         for comment in comments:
             body, ident = comment.get("body"), comment.get("id")
-            if _comment_login(comment) != bot_login or not isinstance(ident, int):
+            if (
+                _comment_login(comment) != bot_login
+                or not isinstance(ident, int)
+                or comment.get("in_reply_to_id") is not None
+            ):
                 continue
-            match = FINDING_MARKER_RE.search(body) if isinstance(body, str) else None
+            match = FINDING_MARKER_RE.match(body) if isinstance(body, str) else None
             if match:
                 roots[ident] = f"{match.group(1)}/{match.group(2)}"
         return [
@@ -309,7 +318,7 @@ class GitHub:
             # Inline placement can fail (for example a line outside the diff
             # hunks); the review body itself must still post — but never
             # silently.
-            print(
+            log(
                 f"warning: inline comments were rejected and dropped "
                 f"({len(comments)} comment(s)): {redact(str(exc))}"
             )
@@ -417,11 +426,16 @@ def upsert_status_comment(
     *,
     pr_number: int,
     body: str,
+    bot_login: str = "github-actions[bot]",
 ) -> str | None:
     text = f"{STATUS_MARKER}\n{body}".rstrip() + "\n"
     for comment in github.list_issue_comments(pr_number):
         existing = comment.get("body")
-        if isinstance(existing, str) and STATUS_MARKER in existing:
+        if (
+            _comment_login(comment) == bot_login
+            and isinstance(existing, str)
+            and STATUS_MARKER in existing
+        ):
             comment_id = comment.get("id")
             if isinstance(comment_id, int):
                 updated = github.update_issue_comment(comment_id, text)

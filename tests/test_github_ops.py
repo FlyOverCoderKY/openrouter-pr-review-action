@@ -259,7 +259,17 @@ def test_upsert_status_comment_uses_paginated_issue_comments() -> None:
     def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
         calls.append(cmd)
         if "--paginate" in cmd:
-            return json.dumps([[{"id": 101, "body": f"{STATUS_MARKER}\nold"}]])
+            return json.dumps(
+                [
+                    [
+                        {
+                            "id": 101,
+                            "body": f"{STATUS_MARKER}\nold",
+                            "user": {"login": "github-actions[bot]"},
+                        }
+                    ]
+                ]
+            )
         return json.dumps({"html_url": "https://example.test/status"})
 
     gh = GitHub(token="t", repository="o/r", runner=runner)
@@ -322,8 +332,67 @@ def test_list_finding_replies_pairs_marker_threads_by_generation() -> None:
     gh = GitHub(token="t", repository="o/r", runner=runner)
     # Only the current generation's thread pairs; the pre-reset thread with a
     # reused finding id is ignored, and an empty generation harvests nothing.
-    assert gh.list_finding_replies(1, generation=generation) == [("r1-1", "dev", "fixed in abc123")]
-    assert gh.list_finding_replies(1, generation="") == []
+    assert gh.list_finding_replies(
+        1, generation=generation, bot_login="bot", carried_ids={"r1-1"}
+    ) == [("r1-1", "dev", "fixed in abc123")]
+    assert gh.list_finding_replies(1, generation="", bot_login="bot", carried_ids={"r1-1"}) == []
+
+
+@pytest.mark.parametrize(
+    "root_changes",
+    [
+        {"user": {"login": "developer"}},
+        {"user": {}},
+        {"in_reply_to_id": 99},
+        {"body": "<!-- or-finding:abcdef123456:r1-2 -->\nold finding"},
+        {"body": "prose\n<!-- or-finding:abcdef123456:r1-1 -->"},
+    ],
+)
+def test_finding_replies_require_bot_root_and_carried_id(root_changes):
+    root = {
+        "id": 10,
+        "body": "<!-- or-finding:abcdef123456:r1-1 -->\nfinding",
+        "user": {"login": "custom-bot[bot]"},
+        **root_changes,
+    }
+    comments = [root, {"id": 11, "in_reply_to_id": 10, "body": "reply"}]
+    gh = GitHub(token="t", repository="o/r", runner=lambda *a, **kw: json.dumps(comments))
+    assert (
+        gh.list_finding_replies(
+            1, generation="abcdef123456", bot_login="custom-bot[bot]", carried_ids={"r1-1"}
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("include_bot", [False, True])
+def test_status_upsert_selects_only_configured_bot(include_bot):
+    from or_pr_review.github_ops import STATUS_MARKER, upsert_status_comment
+
+    comments = [
+        {"id": 10, "body": STATUS_MARKER, "user": {"login": "developer"}},
+        {"id": 11, "body": STATUS_MARKER, "user": {"login": "github-actions[bot]"}},
+        {"id": 12, "body": STATUS_MARKER},
+    ]
+    if include_bot:
+        comments.append({"id": 20, "body": STATUS_MARKER, "user": {"login": "custom-bot"}})
+    writes = []
+
+    def runner(cmd, **kwargs):
+        if "--paginate" in cmd:
+            return json.dumps(comments)
+        writes.append(cmd)
+        return json.dumps({"html_url": "https://example.test/status"})
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+    upsert_status_comment(gh, pr_number=1, body="running", bot_login="custom-bot")
+    assert len(writes) == 1
+    if include_bot:
+        assert "PATCH" in writes[0]
+        assert "repos/o/r/issues/comments/20" in writes[0]
+    else:
+        assert "PATCH" not in writes[0]
+        assert "repos/o/r/issues/1/comments" in writes[0]
 
 
 def test_recent_issue_comments_exclude_bot_review_bodies() -> None:

@@ -1,19 +1,11 @@
-# Live self-review smoke: every PR to this repo is reviewed by the PR's OWN
-# version of the harness (`uses: ./` on the checked-out PR head). This is the
-# release gate the unit suite cannot provide — it exercises the real
-# OpenRouter round-trip (reasoning_details echo, json_schema variants,
-# coverage compliance), the posted review, the ledger marker, inline
-# comments, and (on synchronize, once the loop is seeded) a verify round
-# with continuity. An unseeded synchronize SKIPS green with a notice —
-# that head is NOT reviewed until the next push or a workflow_dispatch
-# seed; a skipped follow-up means "not reviewed yet", not "clean".
-#
+# The review workflow and action come from the trusted base; PR source stays inert.
+# PR-head code is exercised separately by the read-only CI job without secrets.
+# A skipped follow-up means the loop has not been seeded; dispatch a first pass.
 # Advisory only: fail_on is never and this must not become a required check.
-# Fork PRs do not receive OPENROUTER_API_KEY and fail fast with a clear error.
 name: Self review
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
@@ -29,13 +21,12 @@ permissions:
 jobs:
   first-pass:
     name: Self review first-pass
-    # Owner-actor guard: these jobs execute the PR's OWN action code with
-    # repository secrets (the point of the smoke), so only runs triggered by
-    # the repository owner may start them.
+    # Keep the existing owner-actor gate for paid review runs.
     if: >-
       github.actor == github.repository_owner &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'pull_request' &&
+       (github.event_name == 'pull_request_target' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
         !github.event.pull_request.draft &&
         (github.event.action == 'opened' ||
          github.event.action == 'reopened' ||
@@ -60,6 +51,7 @@ jobs:
         id: head
         env:
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           HEAD_SHA="${EVENT_HEAD_SHA:-}"
@@ -70,7 +62,13 @@ jobs:
             echo "::error::Could not resolve PR head SHA for PR ${PR_NUMBER}."
             exit 1
           fi
+          BASE_SHA="${EVENT_BASE_SHA:-}"
+          if [ -z "$BASE_SHA" ]; then
+            BASE_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .base.sha)"
+          fi
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Checkout PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,8 +77,15 @@ jobs:
           fetch-depth: 0
           ref: ${{ steps.head.outputs.sha }}
 
-      - name: Run self review (this PR's own harness)
-        uses: ./
+      - name: Checkout trusted action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ steps.head.outputs.base_sha }}
+          path: .or-pr-review-action
+
+      - name: Run self review (trusted harness)
+        uses: ./.or-pr-review-action
         with:
           github_token: ${{ github.token }}
           pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
@@ -100,7 +105,8 @@ jobs:
     name: Self review follow-up
     if: >-
       github.actor == github.repository_owner &&
-      github.event_name == 'pull_request' &&
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       !github.event.pull_request.draft &&
       github.event.action == 'synchronize'
     concurrency:
@@ -151,9 +157,17 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - name: Checkout trusted action
+        if: steps.seeded.outputs.ready == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .or-pr-review-action
+
       - name: Run self review follow-up (verify round)
         if: steps.seeded.outputs.ready == 'true'
-        uses: ./
+        uses: ./.or-pr-review-action
         with:
           github_token: ${{ github.token }}
           pr_number: ${{ github.event.pull_request.number }}

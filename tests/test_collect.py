@@ -234,7 +234,7 @@ def test_collect_review_packs_over_budget_diff_with_triage_inputs() -> None:
     )
     assert collected.truncation.truncated
     assert collected.truncation.stubbed_files == ("src/data/snap.dat",)
-    assert not collected.truncation.forces_partial
+    assert collected.truncation.forces_partial
     assert handwritten in collected.diff
     # Full-diff path accounting is unaffected by the packing.
     assert collected.all_changed_paths == ("src/main.py", "src/data/snap.dat")
@@ -266,3 +266,62 @@ def test_full_pr_uses_checkout_head_and_rejects_a_concurrent_push() -> None:
         "pr_diff",
         (1, "d" * 40, checkout_head),
     ) in source.calls
+
+
+def test_compare_collection_limit_does_not_select_a_smaller_diff() -> None:
+    from or_pr_review.errors import InputLimitError
+
+    source = FakeSource()
+    source.compare_error = InputLimitError("review diff exceeds collection limit")
+    plan = plan_diff(
+        scope="latest-commit", before_sha="b" * 40, after_sha="a" * 40, head_sha="a" * 40
+    )
+    with pytest.raises(InputLimitError, match="collection limit"):
+        fetch_scoped_diff(7, plan, source)
+    assert source.calls == [("compare_diff", ("b" * 40, "a" * 40))]
+
+
+@pytest.mark.parametrize("kind", ["regular", "symlink", "oversized", "blocked", "dotenv"])
+def test_stub_verdict_does_not_assume_materialized_readable_content(tmp_path, monkeypatch, kind):
+    import io
+    import tarfile
+
+    from or_pr_review import workspace as ws
+    from or_pr_review.collect import pack_diff
+    from or_pr_review.publish import decide_verdict
+
+    path = "id_rsa" if kind == "blocked" else "snapshot.lock"
+    content = b"safe text\n"
+    if kind == "oversized":
+        monkeypatch.setattr(ws, "MAX_OVERSIZED_MATERIALIZED_FILE", 20)
+        content *= 4
+    elif kind == "dotenv":
+        content = b"API_KEY=private-value\nSECRET_TOKEN=another-value\n"
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        member = tarfile.TarInfo(path)
+        if kind == "symlink":
+            member.type = tarfile.SYMTYPE
+            member.linkname = "other.txt"
+            tar.addfile(member)
+        else:
+            member.size = len(content)
+            tar.addfile(member, io.BytesIO(content))
+    monkeypatch.setattr(ws, "_git_archive", lambda *a: archive.getvalue())
+    diff = (
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        "@@ -0,0 +1,100 @@\n" + "+some changed content\n" * 100
+    )
+    truncation = pack_diff(diff, 1)
+    assert truncation.stubbed_files == (path,)
+    dest = ws.materialize_commit(
+        tmp_path, "a" * 40, tmp_path / "inert", oversized_ok=frozenset({path})
+    )
+    observed = ws.tool_read_file(dest, path)
+    assert observed.startswith("error:") == (kind != "regular")
+    assert truncation.forces_partial
+    assert (
+        decide_verdict(issues=[], truncated=truncation.forces_partial, successful_lanes=1)
+        == "partial"
+    )
+    assert "current content is in the checkout" not in (truncation.notice or "")

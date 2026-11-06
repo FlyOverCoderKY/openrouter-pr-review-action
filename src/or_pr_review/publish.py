@@ -236,9 +236,6 @@ def render_review_parts(
                 ]
             )
         else:
-            # Diff-budget triage: every changed file was embedded or stubbed,
-            # so the coverage contract still spans the whole PR — inform,
-            # don't degrade the verdict.
             header.extend([f"> {collected.truncation.notice}", ""])
     if collected.plan.fallback_notice:
         header.extend([collected.plan.fallback_notice, ""])

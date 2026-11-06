@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -16,7 +17,7 @@ def test_run_gh_maps_timeout_to_action_error(monkeypatch) -> None:
     def run(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
 
-    monkeypatch.setattr(github_ops_mod.subprocess, "run", run)
+    monkeypatch.setattr(github_ops_mod, "_bounded_command", run)
 
     with pytest.raises(ActionError, match=r"GitHub CLI timed out after 17s"):
         github_ops_mod._run_gh(["gh", "api", "user"], env={}, timeout=17)
@@ -28,7 +29,7 @@ def test_run_gh_maps_os_error_to_action_error(monkeypatch) -> None:
     def run(*args, **kwargs):
         raise FileNotFoundError("gh executable not found")
 
-    monkeypatch.setattr(github_ops_mod.subprocess, "run", run)
+    monkeypatch.setattr(github_ops_mod, "_bounded_command", run)
 
     with pytest.raises(ActionError, match=r"failed to run GitHub CLI: gh executable not found"):
         github_ops_mod._run_gh(["gh", "api", "user"], env={}, timeout=17)
@@ -39,13 +40,8 @@ def test_run_gh_redacts_failed_command_stderr(monkeypatch) -> None:
 
     secret = "github-token-that-must-not-leak"
     monkeypatch.setenv("GH_TOKEN", secret)
-    completed = subprocess.CompletedProcess(
-        args=["gh", "api", "user"],
-        returncode=1,
-        stdout=b"",
-        stderr=f"request failed with token={secret}".encode(),
-    )
-    monkeypatch.setattr(github_ops_mod.subprocess, "run", lambda *args, **kwargs: completed)
+    completed = (1, b"", f"request failed with token={secret}".encode())
+    monkeypatch.setattr(github_ops_mod, "_bounded_command", lambda *args, **kwargs: completed)
 
     with pytest.raises(ActionError) as raised:
         github_ops_mod._run_gh(["gh", "api", "user"], env={}, timeout=17)
@@ -68,7 +64,8 @@ def test_github_env_excludes_openrouter_key_and_preserves_runner_env(monkeypatch
     assert env is not os.environ
 
 
-def test_compare_diff_validates_fast_forward_and_fetches_raw() -> None:
+@pytest.mark.parametrize("sha_length", [7, 40])
+def test_compare_diff_validates_fast_forward_and_fetches_raw(sha_length) -> None:
     calls: list[list[str]] = []
 
     def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
@@ -78,7 +75,7 @@ def test_compare_diff_validates_fast_forward_and_fetches_raw() -> None:
         return json.dumps({"status": "ahead", "behind_by": 0})
 
     gh = GitHub(token="t", repository="o/r", runner=runner)
-    assert gh.compare_diff("a" * 40, "b" * 40) == "raw-diff-text"
+    assert gh.compare_diff("a" * sha_length, "b" * sha_length) == "raw-diff-text"
     assert len(calls) == 2
     assert "Accept: application/vnd.github.diff" in calls[1]
 
@@ -96,7 +93,8 @@ def test_compare_diff_rejects_non_fast_forward_with_distinct_error() -> None:
         gh.compare_diff("a" * 40, "b" * 40)
 
 
-def test_commit_diff_uses_raw_media_type() -> None:
+@pytest.mark.parametrize("sha_length", [7, 40])
+def test_commit_diff_uses_raw_media_type(sha_length) -> None:
     calls: list[list[str]] = []
 
     def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
@@ -104,7 +102,7 @@ def test_commit_diff_uses_raw_media_type() -> None:
         return "raw-commit-diff"
 
     gh = GitHub(token="t", repository="o/r", runner=runner)
-    assert gh.commit_diff("c" * 40) == "raw-commit-diff"
+    assert gh.commit_diff("c" * sha_length) == "raw-commit-diff"
     assert "Accept: application/vnd.github.diff" in calls[0]
 
 
@@ -125,7 +123,8 @@ def test_pr_diff_falls_back_to_local_git_on_github_line_limit(
 
     def runner(cmd: list[str], *, env: dict, timeout: int, stdin: str | None = None) -> str:
         gh_calls.append(cmd)
-        assert cmd[1:3] == ["pr", "diff"]
+        assert cmd[1:4] == ["api", "-H", "Accept: application/vnd.github.diff"]
+        assert cmd[-1] == f"repos/o/r/compare/{base}...{head}"
         raise ActionError(too_large_message)
 
     def git_runner(cmd: list[str], *, timeout: int, cwd: str) -> str:
@@ -169,7 +168,7 @@ def test_pr_diff_does_not_hide_other_github_failures() -> None:
 
     gh = GitHub(token="t", repository="o/r", runner=runner, git_runner=git_runner)
     with pytest.raises(ActionError, match="HTTP 403"):
-        gh.pr_diff(7)
+        gh.pr_diff(7, base_sha="a" * 40, head_sha="b" * 40)
 
 
 def test_list_bot_review_bodies_filters_author() -> None:
@@ -413,3 +412,169 @@ def test_recent_issue_comments_exclude_bot_review_bodies() -> None:
 
     gh = GitHub(token="t", repository="o/r", runner=runner)
     assert gh.list_recent_issue_comments(1) == [("dev", "I pushed a fix for r1-1")]
+
+
+def test_full_pr_diff_requests_only_the_pinned_range() -> None:
+    calls = []
+    base, head = "a" * 40, "b" * 40
+
+    def runner(cmd, **kwargs):
+        calls.append(cmd)
+        assert cmd[-1] == f"repos/o/r/compare/{base}...{head}"
+        return "pinned-diff"
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+    assert gh.pr_diff(7, base_sha=base.upper(), head_sha=head.upper()) == "pinned-diff"
+    assert len(calls) == 1
+    assert "Accept: application/vnd.github.diff" in calls[0]
+
+
+@pytest.mark.parametrize("base,head", [(None, "b" * 40), ("a" * 40, "topic"), ("main", None)])
+def test_full_pr_diff_requires_full_shas_before_fetch(base, head) -> None:
+    def runner(*args, **kwargs):
+        raise AssertionError("invalid ranges must not be fetched")
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+    with pytest.raises(ActionError, match="SHA is missing or invalid"):
+        gh.pr_diff(7, base_sha=base, head_sha=head)
+
+
+@pytest.mark.parametrize("kind", ["full-pr", "compare", "commit", "local"])
+@pytest.mark.parametrize("bound", ["bytes", "files"])
+def test_all_diff_sources_enforce_collection_limits(monkeypatch, kind, bound) -> None:
+    from or_pr_review import github_ops as mod
+    from or_pr_review.errors import InputLimitError
+
+    # Test exact acceptance and rejection at the same shared boundary.
+    monkeypatch.setattr(mod, "MAX_DIFF_BYTES", 128)
+    monkeypatch.setattr(mod, "MAX_DIFF_FILES", 2)
+    raw = ""
+    git_calls = []
+
+    def runner(cmd, **kwargs):
+        if kind == "local":
+            raise ActionError("HTTP 406: PullRequest.diff too_large")
+        if "-H" not in cmd:
+            return json.dumps({"status": "ahead", "behind_by": 0})
+        return raw
+
+    def git_runner(*args, **kwargs):
+        git_calls.append(args)
+        return raw
+
+    gh = GitHub(
+        token="t",
+        repository="o/r",
+        runner=runner,
+        git_runner=git_runner,
+        source_workspace="/checkout",
+    )
+
+    def fetch():
+        if kind in {"full-pr", "local"}:
+            return gh.pr_diff(7, base_sha="a" * 40, head_sha="b" * 40)
+        if kind == "compare":
+            return gh.compare_diff("a" * 40, "b" * 40)
+        return gh.commit_diff("b" * 40)
+
+    if bound == "bytes":
+        raw = "é" * 64
+    else:
+        raw = "diff --git a/a b/a\n" * 2
+    assert fetch() == raw
+    raw += "x" if bound == "bytes" else "diff --git a/c b/c\n"
+    with pytest.raises(InputLimitError, match=f"{bound[:-1] if bound == 'bytes' else 'file'}"):
+        fetch()
+    if kind == "full-pr":
+        assert not git_calls
+
+
+@pytest.mark.parametrize("method", ["pr_view", "compare", "comments"])
+def test_json_payloads_are_bounded_before_parsing(monkeypatch, method) -> None:
+    from or_pr_review import github_ops as mod
+    from or_pr_review.errors import InputLimitError
+
+    monkeypatch.setattr(mod, "MAX_PAYLOAD_BYTES", 20)
+    gh = GitHub(token="t", repository="o/r", runner=lambda *a, **kw: "é" * 11)
+    with pytest.raises(InputLimitError, match="byte collection limit"):
+        if method == "pr_view":
+            gh.pr_view(7)
+        elif method == "compare":
+            gh.compare_diff("a" * 40, "b" * 40)
+        else:
+            gh.list_recent_issue_comments(7)
+
+
+@pytest.mark.parametrize("paginated", [False, True])
+def test_list_item_limit_counts_all_items_before_filtering(monkeypatch, paginated) -> None:
+    from or_pr_review import github_ops as mod
+    from or_pr_review.errors import InputLimitError
+
+    monkeypatch.setattr(mod, "MAX_LIST_ITEMS", 2)
+    payload = [[{}, None]] if paginated else [{}, None]
+    gh = GitHub(token="t", repository="o/r", runner=lambda *a, **kw: json.dumps(payload))
+    assert gh.list_issue_comments(7) == [{}]
+    if paginated:
+        payload.append([{}])
+    else:
+        payload.append({})
+    with pytest.raises(InputLimitError, match="item collection limit"):
+        gh.list_issue_comments(7)
+
+
+def test_injected_transport_preserves_limits_and_bounds_responses(monkeypatch) -> None:
+    from or_pr_review import github_ops as mod
+    from or_pr_review.errors import InputLimitError
+
+    monkeypatch.setattr(mod, "MAX_COMMAND_BYTES", 8)
+    gh = GitHub(token="t", repository="o/r", runner=lambda *a, **kw: "é" * 5)
+    with pytest.raises(InputLimitError):
+        gh.pr_diff(7, base_sha="a" * 40, head_sha="b" * 40)
+
+    def runner(*args, **kwargs):
+        raise InputLimitError("bounded transport")
+
+    gh = GitHub(token="t", repository="o/r", runner=runner)
+    with pytest.raises(InputLimitError, match="bounded transport"):
+        gh.compare_diff("a" * 40, "b" * 40)
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr", "both"])
+def test_command_capture_bounds_combined_output(monkeypatch, stream) -> None:
+    from or_pr_review import github_ops as mod
+    from or_pr_review.errors import InputLimitError
+
+    monkeypatch.setattr(mod, "MAX_COMMAND_BYTES", 100_000)
+    script = (
+        "import sys; "
+        "sys.stdout.buffer.write(b'x' * 60000); sys.stdout.flush(); "
+        "sys.stderr.buffer.write(b'y' * 60000); sys.stderr.flush()"
+        if stream == "both"
+        else f"import sys; sys.{stream}.buffer.write(b'x' * 120000); sys.{stream}.flush()"
+    )
+    with pytest.raises(InputLimitError, match="byte collection limit"):
+        mod._bounded_command([sys.executable, "-c", script], timeout=5, label="test")
+
+
+def test_command_capture_preserves_input_and_output_at_limit(monkeypatch) -> None:
+    from or_pr_review import github_ops as mod
+
+    monkeypatch.setattr(mod, "MAX_COMMAND_BYTES", 10)
+    code, out, err = mod._bounded_command(
+        [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+        timeout=5,
+        label="test",
+        stdin="0123456789",
+    )
+    assert (code, out, err) == (0, b"0123456789", b"")
+
+
+def test_command_capture_timeout_reaps_process() -> None:
+    from or_pr_review.github_ops import _bounded_command
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        _bounded_command(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            timeout=1,
+            label="test",
+        )

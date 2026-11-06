@@ -2316,7 +2316,7 @@ def test_setup_rejects_bad_path_profiles(tmp_path: Path) -> None:
     assert main(["setup"], env) == 1
 
 
-def test_stubbed_files_with_tools_disabled_stay_partial(
+def test_stubbed_files_stay_partial_with_or_without_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dataclasses import replace as dc_replace
@@ -2377,13 +2377,14 @@ def test_stubbed_files_with_tools_disabled_stay_partial(
     assert "verdict=partial" in out
     assert "could not be swept" in posted[0]
 
-    # Tools available: stub-only truncation keeps the real verdict.
+    # Enabling tools alone does not establish readable stub content.
     (tmp_path / "out.txt").write_text("", encoding="utf-8")
     env = _base_env(tmp_path, MAX_TOOL_TURNS="50", **common)
     _save_matrix_context(env)
     assert main(["judge"], env) == 0
     out = (tmp_path / "out.txt").read_text(encoding="utf-8")
-    assert "verdict=clean" in out
+    assert "verdict=partial" in out
+    assert all("<!-- openrouter-review-ledger:" not in body for body in posted)
 
 
 def test_gitattributes_text_reads_the_reviewed_commit(tmp_path: Path) -> None:

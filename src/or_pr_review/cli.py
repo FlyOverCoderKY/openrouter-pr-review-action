@@ -1686,12 +1686,8 @@ def _finish(
             if lane.ok and lane.coverage:
                 for note in coverage_count_mismatches(lane.findings, lane.coverage, diff_path_set):
                     notices.append(f"`{lane.model}`: {note}")
-    # Diff-budget triage: stub-only truncation (every changed file embedded
-    # or stubbed) does not force partial — only dropped files or a raw byte
-    # cut do, so dense PRs keep verdicts, ledger publication, and loop
-    # continuity. The stub contract is that TOOLS sweep the stubbed files,
-    # so a tool-less run cannot honor it: stubs + max_tool_turns=0 stays a
-    # partial review.
+    # A stub preserves path accounting, but does not prove its content was
+    # available to the review tools. All omitted hunks remain partial.
     truncation_partial = collected.truncation.forces_partial
     for lane in successful:
         if lane.dropped_findings:

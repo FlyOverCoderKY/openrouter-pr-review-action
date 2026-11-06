@@ -10,12 +10,10 @@ caller-owned glob input following the ``path_profiles`` trust model —
 workflow configuration only, never PR content), and packs hand-written
 hunks into the budget first. A demoted file keeps a visible STUB in the
 embedded diff — its ``diff --git`` header, add/delete counts, and first
-hunk header — plus an explicit note that the file is tool-readable and
-still requires a coverage entry, so the per-file coverage contract keeps
-covering every changed file.
+hunk header — plus an explicit coverage obligation. Tool access can supply
+additional context, but a stub alone does not establish readable content.
 
-Only when files must be dropped entirely (no segment and no stub embedded)
-does truncation still force a ``partial`` verdict.
+Any omitted hunks, including stubbed files, force a ``partial`` verdict.
 
 This module owns the diff-header and path-glob parsing so `collect` can
 import it without a cycle (`prompt` imports `collect`).
@@ -490,8 +488,8 @@ def build_stub(segment: DiffSegment, reason: str) -> str:
         f"[diff stubbed by budget triage: {reason}; +{adds}/-{dels} across "
         f"{len(hunks)} hunk(s); first hunk: {first_hunk}]\n"
         "[This file changed in this PR but its hunks are not embedded. Its "
-        "current content is in the checkout — sweep it with read_file/grep "
-        "(deleted lines exist only as the counts above); it STILL REQUIRES "
+        "current content may be available in the checkout — try read_file/grep "
+        "and report unavailable content (deleted lines exist only as counts); it STILL REQUIRES "
         "a coverage entry.]\n"
     )
 

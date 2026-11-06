@@ -464,14 +464,14 @@ def _stub_collected() -> CollectedReview:
     )
 
 
-def test_stub_only_truncation_renders_info_note_not_partial_banner() -> None:
+def test_stub_only_truncation_renders_partial_banner() -> None:
     lane = LaneResult(SCHEMA_VERSION, True, "x-ai/grok-4.6", [], None)
     collected = _stub_collected()
-    assert not collected.truncation.forces_partial
-    text = render_review(collected=collected, lanes=[lane], issues=[], verdict="clean")
+    assert collected.truncation.forces_partial
+    text = render_review(collected=collected, lanes=[lane], issues=[], verdict="partial")
     assert "Diff-budget triage" in text
-    assert "partial** review" not in text
-    assert "must not be treated as clean" not in text
+    assert "partial** review" in text
+    assert "must not be treated as clean" in text
 
 
 def test_dropped_files_truncation_renders_partial_banner() -> None:

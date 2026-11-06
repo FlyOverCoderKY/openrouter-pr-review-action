@@ -6,9 +6,11 @@ import json
 import os
 import re
 import subprocess
+import tempfile
+import threading
 from typing import Any
 
-from or_pr_review.errors import ActionError, DivergedRangeError
+from or_pr_review.errors import ActionError, DivergedRangeError, InputLimitError
 from or_pr_review.loop import FINDING_MARKER_RE
 from or_pr_review.redaction import redact
 from or_pr_review.text_safety import log
@@ -21,6 +23,12 @@ _BOT_BODY_PREFIXES = (
     "## OpenRouter review incomplete",
 )
 _FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+# Collection ceilings are independent of the caller's prompt embed budget.
+MAX_COMMAND_BYTES = 16 * 1024 * 1024
+MAX_DIFF_BYTES = 16 * 1024 * 1024
+MAX_DIFF_FILES = 3_000
+MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+MAX_LIST_ITEMS = 10_000
 
 
 class GitHub:
@@ -60,15 +68,21 @@ class GitHub:
         return env
 
     def _gh(self, *args: str, stdin: str | None = None) -> str:
+        if stdin is not None:
+            _check_bytes(stdin, MAX_PAYLOAD_BYTES, "GitHub request")
         try:
-            return self._runner(
+            raw = self._runner(
                 ["gh", *args],
                 env=self._env(),
                 timeout=self.timeout,
                 stdin=stdin,
             )
+        except InputLimitError:
+            raise
         except ActionError as exc:
             raise ActionError(redact(str(exc))) from exc
+        _check_bytes(raw, MAX_COMMAND_BYTES, "GitHub response")
+        return raw
 
     def pr_view(self, number: int) -> dict[str, object]:
         raw = self._gh(
@@ -80,13 +94,7 @@ class GitHub:
             "--json",
             "number,title,body,headRefOid,headRefName,baseRefOid,baseRefName,url",
         )
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ActionError(f"gh pr view returned non-JSON: {exc}") from exc
-        if not isinstance(parsed, dict):
-            raise ActionError("gh pr view returned a non-object")
-        return parsed
+        return _json_object(raw, "gh pr view")
 
     def pr_diff(
         self,
@@ -95,19 +103,21 @@ class GitHub:
         base_sha: str | None = None,
         head_sha: str | None = None,
     ) -> str:
+        # Both the API request and local fallback name immutable objects.
+        # Metadata confirmation in collect remains useful for stale reviews.
+        base = require_full_sha(base_sha, "base")
+        head = require_full_sha(head_sha, "head")
+        endpoint = f"repos/{self.repository}/compare/{base}...{head}"
         try:
-            return self._gh("pr", "diff", str(number), "--repo", self.repository)
+            raw = self._gh("api", "-H", "Accept: application/vnd.github.diff", endpoint)
+            return _checked_diff(raw)
+        except InputLimitError:
+            raise
         except ActionError as exc:
             if not _is_pr_diff_too_large(str(exc)):
                 raise
 
-        # GitHub's PR diff endpoint rejects diffs over 20,000 lines with a
-        # 406 even though actions/checkout has already materialized the full
-        # repository history. Use the range collection already pinned before
-        # the API call: resolving live PR metadata again could select a pushed
-        # head that the inert checkout does not contain.
-        base = require_full_sha(base_sha, "base")
-        head = require_full_sha(head_sha, "head")
+        # Keep the same pinned range when GitHub cannot serve a large diff.
         workspace = self.source_workspace
         if not workspace:
             raise ActionError(
@@ -118,7 +128,7 @@ class GitHub:
             "falling back to local git diff base...head"
         )
         try:
-            return self._git_runner(
+            raw = self._git_runner(
                 [
                     "git",
                     "diff",
@@ -132,8 +142,11 @@ class GitHub:
                 timeout=self.timeout,
                 cwd=workspace,
             )
+        except InputLimitError:
+            raise
         except ActionError as exc:
             raise ActionError(redact(str(exc))) from exc
+        return _checked_diff(raw)
 
     def compare_diff(self, before: str, after: str) -> str:
         """Raw unified diff for a verified linear fast-forward range.
@@ -151,30 +164,34 @@ class GitHub:
         behind_by = comparison.get("behind_by")
         if status != "ahead" or behind_by not in {0, None}:
             raise DivergedRangeError("commit comparison is not a linear fast-forward range")
-        return self._gh("api", "-H", "Accept: application/vnd.github.diff", endpoint)
+        return _checked_diff(self._gh("api", "-H", "Accept: application/vnd.github.diff", endpoint))
 
     def commit_diff(self, sha: str) -> str:
         """Raw unified diff for one commit (complete; no JSON files-array caps)."""
-        return self._gh(
-            "api",
-            "-H",
-            "Accept: application/vnd.github.diff",
-            f"repos/{self.repository}/commits/{sha}",
+        return _checked_diff(
+            self._gh(
+                "api",
+                "-H",
+                "Accept: application/vnd.github.diff",
+                f"repos/{self.repository}/commits/{sha}",
+            )
         )
 
     def _paginated_list(self, endpoint: str, label: str) -> list[dict[str, Any]]:
         raw = self._gh("api", "--paginate", "--slurp", endpoint)
+        _check_bytes(raw, MAX_PAYLOAD_BYTES, label)
         try:
             payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
             raise ActionError(f"could not parse {label}") from exc
         if not isinstance(payload, list):
             return []
-        items = (
-            [item for page in payload for item in page]
-            if payload and all(isinstance(page, list) for page in payload)
-            else payload
+        pages = (
+            payload if payload and all(isinstance(page, list) for page in payload) else [payload]
         )
+        if len(pages) > MAX_LIST_ITEMS or sum(len(page) for page in pages) > MAX_LIST_ITEMS:
+            raise InputLimitError(f"{label} exceeds the {MAX_LIST_ITEMS} item collection limit")
+        items = [item for page in pages for item in page]
         return [item for item in items if isinstance(item, dict)]
 
     def list_bot_review_bodies(self, number: int, bot_login: str) -> list[str]:
@@ -343,13 +360,29 @@ def _comment_login(item: dict[str, Any]) -> str:
 
 
 def _json_object(raw: str, what: str) -> dict[str, Any]:
+    _check_bytes(raw, MAX_PAYLOAD_BYTES, what)
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise ActionError(f"{what} returned non-JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ActionError(f"{what} returned a non-object")
     return parsed
+
+
+def _check_bytes(text: str, limit: int, label: str) -> None:
+    if len(text) > limit or len(text.encode("utf-8")) > limit:
+        raise InputLimitError(f"{label} exceeds the {limit} byte collection limit")
+
+
+def _checked_diff(raw: str) -> str:
+    _check_bytes(raw, MAX_DIFF_BYTES, "review diff")
+    count = 0
+    for _ in re.finditer(r"^diff --git ", raw, re.MULTILINE):
+        count += 1
+        if count > MAX_DIFF_FILES:
+            raise InputLimitError(f"review diff exceeds the {MAX_DIFF_FILES} file collection limit")
+    return raw
 
 
 def _is_pr_diff_too_large(message: str) -> bool:
@@ -372,8 +405,80 @@ def _is_inline_comment_validation_error(message: str) -> bool:
 
 def require_full_sha(value: object, label: str) -> str:
     if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
-        raise ActionError(f"PR {label} SHA is missing or invalid; cannot compute the local diff")
+        raise ActionError(f"PR {label} SHA is missing or invalid; cannot collect the pinned diff")
     return value.lower()
+
+
+def _bounded_command(
+    cmd: list[str],
+    *,
+    timeout: int,
+    label: str,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+    stdin: str | None = None,
+) -> tuple[int, bytes, bytes]:
+    """Drain both pipes with a shared byte ceiling, including failed commands."""
+    if stdin is not None:
+        _check_bytes(stdin, MAX_PAYLOAD_BYTES, f"{label} request")
+    outputs: list[list[bytes]] = [[], []]
+    used = 0
+    lock = threading.Lock()
+    exceeded = threading.Event()
+    read_errors: list[OSError] = []
+    # A bounded input file avoids a stdin/pipe deadlock while both output
+    # streams are drained. No PR text is interpreted by a shell.
+    with tempfile.TemporaryFile() as input_file:
+        if stdin is not None:
+            input_file.write(stdin.encode("utf-8"))
+            input_file.seek(0)
+        with subprocess.Popen(
+            cmd,
+            env=env,
+            cwd=cwd,
+            stdin=input_file,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as proc:
+
+            def drain(stream: Any, index: int) -> None:
+                nonlocal used
+                try:
+                    while chunk := stream.read(64 * 1024):
+                        with lock:
+                            used += len(chunk)
+                            if used > MAX_COMMAND_BYTES:
+                                exceeded.set()
+                            else:
+                                outputs[index].append(chunk)
+                        if exceeded.is_set():
+                            proc.kill()
+                            return
+                except OSError as exc:
+                    read_errors.append(exc)
+                    proc.kill()
+
+            readers = [
+                threading.Thread(target=drain, args=(proc.stdout, 0)),
+                threading.Thread(target=drain, args=(proc.stderr, 1)),
+            ]
+            for reader in readers:
+                reader.start()
+            try:
+                proc.wait(timeout=timeout)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                for reader in readers:
+                    reader.join()
+            if exceeded.is_set():
+                raise InputLimitError(
+                    f"{label} output exceeds the {MAX_COMMAND_BYTES} byte collection limit"
+                )
+            if read_errors:
+                raise ActionError(f"failed to read {label} output") from read_errors[0]
+            return proc.returncode, b"".join(outputs[0]), b"".join(outputs[1])
 
 
 def _run_gh(
@@ -384,41 +489,39 @@ def _run_gh(
     stdin: str | None = None,
 ) -> str:
     try:
-        proc = subprocess.run(
+        returncode, stdout, stderr = _bounded_command(
             cmd,
             env=env,
-            input=stdin.encode("utf-8") if stdin is not None else None,
-            capture_output=True,
-            check=False,
+            stdin=stdin,
             timeout=timeout,
+            label="GitHub CLI",
         )
     except subprocess.TimeoutExpired as exc:
         raise ActionError(f"GitHub CLI timed out after {timeout}s") from exc
     except OSError as exc:
         raise ActionError(f"failed to run GitHub CLI: {exc}") from exc
-    if proc.returncode != 0:
-        err = redact((proc.stderr or b"").decode("utf-8", errors="replace")[:600])
+    if returncode != 0:
+        err = redact(stderr.decode("utf-8", errors="replace")[:600])
         raise ActionError(f"GitHub CLI failed ({' '.join(cmd[1:4])}): {err}")
-    return proc.stdout.decode("utf-8")
+    return stdout.decode("utf-8", errors="replace")
 
 
 def _run_git(cmd: list[str], *, timeout: int, cwd: str) -> str:
     try:
-        proc = subprocess.run(
+        returncode, stdout, stderr = _bounded_command(
             cmd,
             cwd=cwd,
-            capture_output=True,
-            check=False,
             timeout=timeout,
+            label="Local git diff",
         )
     except subprocess.TimeoutExpired as exc:
         raise ActionError(f"Local git diff timed out after {timeout}s") from exc
     except OSError as exc:
         raise ActionError(f"failed to run local git diff: {exc}") from exc
-    if proc.returncode != 0:
-        err = redact((proc.stderr or b"").decode("utf-8", errors="replace")[:600])
+    if returncode != 0:
+        err = redact(stderr.decode("utf-8", errors="replace")[:600])
         raise ActionError(f"Local git diff failed: {err}")
-    return proc.stdout.decode("utf-8", errors="replace")
+    return stdout.decode("utf-8", errors="replace")
 
 
 def upsert_status_comment(

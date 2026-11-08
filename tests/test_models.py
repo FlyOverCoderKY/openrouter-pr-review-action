@@ -21,9 +21,9 @@ from or_pr_review.models import (
 )
 
 
-def test_empty_models_uses_default_grok_slug() -> None:
-    assert parse_models("") == [DEFAULT_MODEL]
-    assert parse_models(None) == ["x-ai/grok-4.6"]
+def test_empty_models_uses_default_sol_slug() -> None:
+    assert parse_models("") == [DEFAULT_MODEL] == ["openai/gpt-6.1-sol"]
+    assert parse_models(None) == [DEFAULT_MODEL]
 
 
 def test_comma_separated_list_trims_and_keeps_order() -> None:

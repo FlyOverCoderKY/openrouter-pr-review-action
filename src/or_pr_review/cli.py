@@ -64,6 +64,7 @@ from or_pr_review.models import (
     parse_model_routes,
     parse_models,
     parse_slug,
+    review_lane_defaults,
 )
 from or_pr_review.prompt import (
     build_messages,
@@ -1197,7 +1198,8 @@ def _invoke_lane(
 ) -> LaneResult:
     try:
         key = require_openrouter_key(env)
-        lane_kwargs: dict[str, Any] = parse_model_routes(env.get("MODEL_ROUTES")).get(model, {})
+        lane_kwargs = review_lane_defaults(model)
+        lane_kwargs.update(parse_model_routes(env.get("MODEL_ROUTES")).get(model, {}))
         if progress is not None:
             lane_kwargs["progress"] = progress
         if lane_timeout is not None:

@@ -790,7 +790,7 @@ def test_cmd_run_preserves_aggregate_progress_when_lane_is_interrupted(
     progress = json.loads((out / "progress-0.json").read_text(encoding="utf-8"))
     assert progress == {
         "schema": "or-pr-review/bench-progress/1",
-        "model": "x-ai/grok-4.6",
+        "model": bench_mod.DEFAULT_MODEL,
         "elapsed_ms": 123,
         "known_cost_usd": 0.004,
         "attempted_requests": 2,

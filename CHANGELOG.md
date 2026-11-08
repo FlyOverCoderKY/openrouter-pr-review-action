@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Default review lanes to `openai/gpt-6.1-sol` on `azure/us`, with provider
+  fallbacks disabled, data collection denied, and ZDR required, matching the
+  tested benchmark route. Benchmark CLI defaults use the same provider pin.
+  Model and provider overrides remain available; judge behavior is unchanged.
+
 - Bind full-PR diff collection to pinned base/head SHAs, with the same range
   available from the local checkout when the API cannot serve it. Bound diffs
   to 16 MiB and 3,000 files, JSON payloads to 8 MiB, comment/review lists to

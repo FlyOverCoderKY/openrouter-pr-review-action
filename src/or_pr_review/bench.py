@@ -78,7 +78,12 @@ from or_pr_review.judge import (
     judge_json_schema,
     run_llm_judge,
 )
-from or_pr_review.models import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL, parse_slug
+from or_pr_review.models import (
+    DEFAULT_JUDGE_MODEL,
+    DEFAULT_MODEL,
+    parse_slug,
+    review_lane_defaults,
+)
 from or_pr_review.prompt import build_messages, changed_paths_from_diff, parse_path_profiles
 from or_pr_review.redaction import redact
 from or_pr_review.schema import MAX_COVERAGE_ENTRIES, SEVERITIES, LaneResult
@@ -602,7 +607,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             provider_order=(
                 [p.strip() for p in args.provider.split(",") if p.strip()]
                 if args.provider
-                else None
+                else review_lane_defaults(args.model).get("provider_order")
             ),
             provider_data_collection=args.provider_data_collection or None,
             provider_zdr=args.provider_zdr,
@@ -1225,7 +1230,8 @@ def main(argv: list[str] | None = None) -> int:
         "--provider",
         default="",
         help="pin OpenRouter provider routing (comma-separated order, no fallbacks), "
-        "e.g. 'baseten' — for provider bake-offs",
+        "e.g. 'baseten' — for provider bake-offs; omitted uses the review model's "
+        "default route (azure/us for GPT-6.1 Sol)",
     )
     run_parser.add_argument(
         "--provider-data-collection",

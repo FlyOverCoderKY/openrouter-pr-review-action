@@ -4,7 +4,9 @@ on:
   workflow_call:
     inputs:
       models:
-        description: Comma-separated OpenRouter review-lane slugs (cap 4).
+        description: >-
+          Comma-separated OpenRouter review-lane slugs (cap 4). Default Sol uses
+          Azure US with ZDR, data collection denied, and no provider fallbacks.
         type: string
         default: openai/gpt-6.1-sol
       model_routes:

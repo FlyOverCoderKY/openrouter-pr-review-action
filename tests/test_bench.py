@@ -637,6 +637,7 @@ def test_cmd_run_wires_provider_data_policy_flags(
 
     calls.clear()
     assert main(["run", str(fixture_dir), "--out", str(out), "--allow-spend"]) == 0
+    assert calls[0]["provider_order"] == ["azure/us"]
     assert calls[0]["provider_data_collection"] == "deny"
     assert calls[0]["provider_zdr"] is True
 
@@ -658,6 +659,31 @@ def test_cmd_run_wires_provider_data_policy_flags(
     )
     assert calls[0]["provider_data_collection"] == "allow"
     assert calls[0]["provider_zdr"] is False
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        (["--provider", "azure/eu"], ["azure/eu"]),
+        (["--model", "x-ai/grok-4.6"], None),
+    ],
+)
+def test_bench_default_pin_preserves_provider_and_model_overrides(
+    tmp_path, monkeypatch, flags, expected
+):
+    from or_pr_review import bench as bench_mod
+
+    fixture_dir = tmp_path / "f"
+    _write_fixture(fixture_dir, [])
+    calls = []
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(bench_mod, "run_lane", lambda **kw: calls.append(kw) or _fake_lane(ok=True))
+    assert (
+        main(["run", str(fixture_dir), "--out", str(tmp_path / "out"), "--allow-spend", *flags])
+        == 0
+    )
+    assert calls
+    assert all(call["provider_order"] == expected for call in calls)
 
 
 def test_cmd_run_wires_service_tier_and_writes_tier_telemetry(

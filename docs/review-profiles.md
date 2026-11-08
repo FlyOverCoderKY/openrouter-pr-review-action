@@ -46,8 +46,9 @@ publication reserve.
 When a registry is supplied, do not combine it with the caller inputs `models`, `judge_model`,
 `judge_needed`, or `effort`. The legacy path remains available: without a
 registry, standard lanes are synthesized from the existing inputs and retain
-the CLI defaults (Grok reviewer and Luna judge); a requested deep review fails
-before paid work unless a deep mapping exists.
+the CLI defaults (GPT-6.1 Sol reviewer on Azure US with deny/ZDR and no provider
+fallbacks, and the unchanged Luna judge); a requested deep review fails before
+paid work unless a deep mapping exists.
 
 The root `REVIEW.md` profile may be descriptive `code` or `docs`, or a custom
 profile name present in the trusted registry. Child rules can raise the

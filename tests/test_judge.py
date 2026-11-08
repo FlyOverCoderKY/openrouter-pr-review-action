@@ -16,6 +16,22 @@ def test_default_judge_model_is_luna() -> None:
     assert DEFAULT_JUDGE_MODEL == "openai/gpt-5.6-luna"
 
 
+def test_sol_used_as_judge_does_not_inherit_review_lane_routing() -> None:
+    payloads = []
+    issues, mode, _cost = run_llm_judge(
+        model="openai/gpt-6.1-sol",
+        lanes=[],
+        api_key="test-key",
+        chat=lambda payload: (
+            payloads.append(payload) or {"choices": [{"message": {"content": '{"issues": []}'}}]}
+        ),
+    )
+    assert issues == []
+    assert mode == "merged"
+    assert len(payloads) == 1
+    assert "provider" not in payloads[0]
+
+
 def test_judge_needed_only_for_two_plus_lanes() -> None:
     assert not judge_is_needed(["x-ai/grok-4.6"])
     assert judge_is_needed(["x-ai/grok-4.6", "anthropic/claude-sonnet-4.6"])

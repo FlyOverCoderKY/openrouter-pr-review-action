@@ -60,6 +60,44 @@ def _resolve(registry, **changes):
     return resolve_review_plan(registry, **options)
 
 
+@pytest.mark.parametrize("profile", [False, True])
+def test_sol_effective_provider_is_frozen_in_legacy_and_profile_plans(profile):
+    from or_pr_review.models import DEFAULT_MODEL, parse_model_routes
+
+    registry = (
+        parse_review_profiles(
+            json.dumps(
+                {
+                    "version": 1,
+                    "profiles": {
+                        "code": {
+                            "standard": {"lanes": [{"model": DEFAULT_MODEL, "required": True}]}
+                        }
+                    },
+                }
+            )
+        )
+        if profile
+        else None
+    )
+    plan = _resolve(registry, models=[DEFAULT_MODEL])
+    assert plan.lanes[0].provider == "azure/us"
+    tier_plan = _resolve(
+        registry,
+        models=[DEFAULT_MODEL],
+        routes=parse_model_routes(json.dumps({DEFAULT_MODEL: {"service_tier": "priority"}})),
+    )
+    assert tier_plan.lanes[0].provider == "azure/us"
+    assert tier_plan.lanes[0].service_tier == "priority"
+    override = _resolve(
+        registry,
+        models=[DEFAULT_MODEL],
+        routes=parse_model_routes(json.dumps({DEFAULT_MODEL: {"provider": "azure/eu"}})),
+    )
+    assert override.lanes[0].provider == "azure/eu"
+    assert override.registry_digest != plan.registry_digest
+
+
 def test_parser_rejects_closed_schema_types_duplicates_and_bounds() -> None:
     invalid = [
         '{"version":1,"profiles":{},"unknown":true}',

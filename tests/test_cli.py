@@ -70,6 +70,75 @@ def test_setup_one_lane_skips_judge(tmp_path: Path) -> None:
     assert "judge_needed=false" in text
 
 
+def test_default_sol_setup_preserves_single_lane_judge_behavior(tmp_path: Path) -> None:
+    env = _base_env(tmp_path, MODELS="")
+    assert main(["setup"], env) == 0
+    text = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    assert "openai/gpt-6.1-sol" in text
+    assert "lane_count=1" in text
+    assert "judge_needed=false" in text
+    assert "judge_model=openai/gpt-5.6-luna" in text
+
+
+@pytest.mark.parametrize(
+    ("model", "route", "expected_provider", "tier"),
+    [
+        (DEFAULT_MODEL, {}, "azure/us", None),
+        (DEFAULT_MODEL, {"service_tier": "priority"}, "azure/us", "priority"),
+        (DEFAULT_MODEL, {"provider": "azure/eu"}, "azure/eu", None),
+        ("x-ai/grok-4.6", {}, None, None),
+    ],
+)
+def test_review_default_route_reaches_tool_and_final_requests(
+    tmp_path, monkeypatch, model, route, expected_provider, tier
+):
+    from or_pr_review import cli, harness
+
+    payloads = []
+
+    def chat(payload):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            message = {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "t1",
+                        "type": "function",
+                        "function": {"name": "list_dir", "arguments": '{"path":"."}'},
+                    }
+                ],
+            }
+        else:
+            message = {"content": '{"findings": []}'}
+        return {"choices": [{"message": message}], "usage": {"cost": 0.001}}
+
+    def run(**kwargs):
+        return harness.run_lane(**kwargs, chat=chat)
+
+    monkeypatch.setattr(cli, "run_lane", run)
+    env = _base_env(
+        tmp_path,
+        OPENROUTER_API_KEY="test-key",
+        MAX_TOOL_TURNS="2",
+        MODEL_ROUTES=json.dumps({model: route}) if route else "",
+    )
+    result = cli._invoke_lane(env, model, [{"role": "user", "content": "review"}], tmp_path)
+    assert result.ok, result.error
+    assert len(payloads) == 2
+    for payload in payloads:
+        if expected_provider is None:
+            assert "provider" not in payload
+        else:
+            assert payload["provider"] == {
+                "order": [expected_provider],
+                "allow_fallbacks": False,
+                "data_collection": "deny",
+                "zdr": True,
+            }
+        assert payload.get("service_tier") == tier
+
+
 @pytest.mark.parametrize("role", ["setup", "all"])
 def test_full_roster_rejects_unmatched_routes(tmp_path, monkeypatch, role):
     from or_pr_review import cli

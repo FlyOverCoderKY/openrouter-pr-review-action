@@ -10,9 +10,22 @@ from typing import Any
 from or_pr_review.errors import ActionError
 
 LANE_CAP = 4
-DEFAULT_MODEL = "x-ai/grok-4.6"
+DEFAULT_MODEL = "openai/gpt-6.1-sol"
+DEFAULT_REVIEW_PROVIDER = "azure/us"
 # Verified live on OpenRouter 2026-08-29. Merge/de-dupe only; not a second reviewer.
 DEFAULT_JUDGE_MODEL = "openai/gpt-5.6-luna"
+
+
+def review_lane_defaults(model: str) -> dict[str, Any]:
+    """Keep the measured Sol route scoped to review lanes, never the judge."""
+    if model != DEFAULT_MODEL:
+        return {}
+    return {
+        "provider_order": [DEFAULT_REVIEW_PROVIDER],
+        "provider_data_collection": "deny",
+        "provider_zdr": True,
+    }
+
 
 # Gemini reserves against a large provider maximum unless the client supplies
 # an explicit cap. Other model families keep their native output maximum.

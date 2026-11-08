@@ -89,7 +89,7 @@ jobs:
         with:
           github_token: ${{ github.token }}
           pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
-          models: x-ai/grok-4.6
+          models: openai/gpt-6.1-sol
           review_scope: full-pr
           review_mode: auto
           effort: medium
@@ -171,7 +171,7 @@ jobs:
         with:
           github_token: ${{ github.token }}
           pr_number: ${{ github.event.pull_request.number }}
-          models: x-ai/grok-4.6
+          models: openai/gpt-6.1-sol
           review_scope: latest-commit
           review_mode: auto
           effort: low

@@ -20,7 +20,8 @@ inputs:
   models:
     description: >-
       Comma-separated OpenRouter model slugs. List length is the lane count
-      (hard-capped at 4). Default is today's Grok 4.6 slug on OpenRouter.
+      (hard-capped at 4). Default is openai/gpt-6.1-sol on Azure US with ZDR,
+      data collection denied, and provider fallbacks disabled.
       One model = one lane; the judge is skipped unless judge_needed is true.
     required: false
     default: ""

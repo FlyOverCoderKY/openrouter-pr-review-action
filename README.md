@@ -45,7 +45,7 @@ automatic merging or treat job success as proof of a clean review.
 
 Use the [Review Benchmark leaderboard](https://bench.flyovercoder.com/leaderboard) for model recommendations and measured quality, completion, latency, and cost. Read the [methodology](https://bench.flyovercoder.com/methodology) and each result's status and configuration alongside its rank. The board is a small, harness-specific comparison; AI-adjudicated results are provisional, and a model's position does not certify its performance on every repository.
 
-- **One reviewer:** set `models` to one OpenRouter slug. The default is `x-ai/grok-4.6`; it is a configuration default, not a claim that it is always the best value.
+- **One reviewer:** set `models` to one OpenRouter slug. The default is `openai/gpt-6.1-sol` on the Azure US ZDR route; it is a configuration default, not a claim that it is always the best value.
 - **Multiple reviewers:** supply up to four comma-separated slugs. Each lane reviews the change, adding API cost. A strong individual ranking does not establish that two models catch different defects; assess the extra useful findings before keeping a second lane.
 - **Judge:** `judge_model` combines reviewer findings. Choose it separately from the reviewers; its merge benchmark answers a different question from the review leaderboard. The default and rationale are [below](#copy-paste-multi-model-bake-off).
 
@@ -220,7 +220,9 @@ The default first-pass tool budget is **50** read-only rounds (`max_tool_turns`)
 
 ## Copy-paste: one-lane Grok via OpenRouter
 
-First-pass + latest-commit follow-up. The default `models` value is one slug (`x-ai/grok-4.6`), so the **judge does not run**.
+First-pass + latest-commit follow-up with an explicit Grok model override, so the
+**judge does not run**. The current action default is `openai/gpt-6.1-sol`; the
+pinned example below intentionally keeps its explicit model selection.
 
 ```yaml
 name: OpenRouter PR review
@@ -491,6 +493,14 @@ also paginate `pulls/NUMBER/comments` and `issues/NUMBER/comments`.
 
 ## Inputs
 
+The default reviewer is `openai/gpt-6.1-sol`, pinned to `azure/us` with provider
+fallbacks disabled, `data_collection: deny`, and `zdr: true`, matching the tested
+benchmark route. Set `models` to choose another model; the Sol route is never
+applied to other model slugs. An explicit `model_routes` provider overrides the
+Sol provider pin while retaining its deny/ZDR requirements. A tier-only override
+keeps the Azure provider pin. These defaults apply only to review lanes; the
+judge model, routing, and single-lane skip behavior are unchanged.
+
 `model_routes` is optional trusted configuration keyed by exact model slugs. It
 is separate from the profile registry; use only provider identifiers verified
 for your account and action revision.
@@ -498,8 +508,8 @@ for your account and action revision.
 | Input | Default | Notes |
 | --- | --- | --- |
 | `role` | `all` | `all` (collect + lanes + optional judge + post) \| `setup` (parse matrix) \| `lane` \| `judge` |
-| `models` | `x-ai/grok-4.6` | Comma-separated OpenRouter slugs. Length = lane count. Cap 4. |
-| `model_routes` | empty | Trusted JSON keyed by exact review model slug, with optional `provider` and `service_tier` (`default`, `flex`, `priority`). Provider pins disable fallbacks. At most four entries and 8,000 UTF-8 bytes. Unlisted lanes and the judge retain their existing routing. Never interpolate PR content. |
+| `models` | `openai/gpt-6.1-sol` | Comma-separated OpenRouter slugs. Length = lane count. Cap 4. |
+| `model_routes` | empty | Trusted JSON keyed by exact review model slug, with optional `provider` and `service_tier` (`default`, `flex`, `priority`). Provider pins disable fallbacks. At most four entries and 8,000 UTF-8 bytes. Unlisted Sol lanes use the Azure US ZDR default; other unlisted lanes and the judge retain their existing routing. Never interpolate PR content. |
 | `judge_model` | `openai/gpt-5.6-luna` | Independent of `models`. Used whenever judging is enabled. |
 | `judge_needed` | _empty_ | `true` enables the judge (and forces it for one configured lane); `false` skips it. Empty infers from `models`. A sole survivor from a multi-lane run posts directly. |
 | `github_token` | `${{ github.token }}` | Needs `pull-requests: write` to post the review. |

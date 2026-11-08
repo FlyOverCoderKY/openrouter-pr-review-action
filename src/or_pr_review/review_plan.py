@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from or_pr_review.errors import ActionError
-from or_pr_review.models import DEFAULT_JUDGE_MODEL, parse_slug
+from or_pr_review.models import DEFAULT_JUDGE_MODEL, parse_slug, review_lane_defaults
 
 _PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
@@ -480,6 +480,13 @@ def resolve_review_plan(
         raise ActionError("selected profile job_budget_seconds exceeds caller ceiling")
     if panel.lane_timeout_seconds > caller_lane:
         raise ActionError("selected profile lane_timeout_seconds exceeds caller ceiling")
+    # Freeze the effective default provider so the prepared plan and its digest
+    # describe the route actually used, including a tier-only caller override.
+    for lane in panel.lanes:
+        default_order = review_lane_defaults(lane.model).get("provider_order")
+        if default_order:
+            provider, tier = bound_routes.get(lane.model, (None, None))
+            bound_routes[lane.model] = (provider or default_order[0], tier)
     lanes = tuple(
         ReviewLane(lane.model, lane.required, *bound_routes.get(lane.model, (None, None)))
         for lane in panel.lanes
